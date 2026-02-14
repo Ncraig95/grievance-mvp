@@ -39,6 +39,11 @@ services:
     environment:
       - TZ=UTC
       - DATABASE_URL=postgresql://${DOCUSEAL_DB_USER}:${DOCUSEAL_DB_PASSWORD}@docuseal_db:5432/${DOCUSEAL_DB_NAME}
+      # Public origin used for absolute links (downloads, emails, webhooks)
+      - APP_URL=${DOCUSEAL_PROTOCOL}://${DOCUSEAL_HOST}
+      - HOST=${DOCUSEAL_HOST}
+      # Rails reverse-proxy HTTPS handling (Cloudflare terminates TLS upstream)
+      - FORCE_SSL=true
       # Optional admin bootstrap (supported by many packaged images; harmless if ignored)
       - ADMIN_USERNAME=${DOCUSEAL_ADMIN_EMAIL}
       - ADMIN_PASSWORD=${DOCUSEAL_ADMIN_PASSWORD}
