@@ -1,0 +1,21 @@
+hmac_shared_secret: "REPLACE_WITH_LONG_RANDOM_SECRET"
+
+db_path: "/data/grievances.sqlite3"
+data_root: "/data/grievances"
+docx_template_path: "/app/templates/grievance_template.docx"
+libreoffice_timeout_seconds: 45
+
+docuseal:
+  # In compose, docuseal container name is "docuseal", so http://docuseal works from the api container.
+  base_url: "http://docuseal"
+  api_token: "REPLACE"
+  webhook_secret: "REPLACE"
+
+graph:
+  tenant_id: "REPLACE"
+  client_id: "REPLACE"
+  cert_pem_path: "/app/config/graph_cert.pem"
+  cert_thumbprint: "REPLACE"
+  site_hostname: "REPLACE.sharepoint.com"
+  site_path: "/sites/REPLACE"
+  document_library: "Documents"

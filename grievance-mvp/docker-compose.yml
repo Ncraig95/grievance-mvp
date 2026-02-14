@@ -1,0 +1,61 @@
+services:
+  api:
+    build:
+      context: ./apps/api
+    container_name: grievance_api
+    restart: unless-stopped
+    environment:
+      - TZ=UTC
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/data
+    ports:
+      - "127.0.0.1:${API_PORT}:8080"
+
+  docuseal_db:
+    image: postgres:16
+    container_name: docuseal_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DOCUSEAL_DB_USER}
+      POSTGRES_PASSWORD: ${DOCUSEAL_DB_PASSWORD}
+      POSTGRES_DB: ${DOCUSEAL_DB_NAME}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    volumes:
+      - docuseal_db_data:/var/lib/postgresql/data
+
+  docuseal:
+    image: "${DOCUSEAL_IMAGE}"
+    container_name: docuseal
+    restart: unless-stopped
+    depends_on:
+      docuseal_db:
+        condition: service_healthy
+    environment:
+      - TZ=UTC
+      - DATABASE_URL=postgresql://${DOCUSEAL_DB_USER}:${DOCUSEAL_DB_PASSWORD}@docuseal_db:5432/${DOCUSEAL_DB_NAME}
+      # Optional admin bootstrap (supported by many packaged images; harmless if ignored)
+      - ADMIN_USERNAME=${DOCUSEAL_ADMIN_EMAIL}
+      - ADMIN_PASSWORD=${DOCUSEAL_ADMIN_PASSWORD}
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - docuseal
+    environment:
+      - CLOUDFLARE_TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+
+    volumes:
+      - ./data/docuseal:/data
+    ports:
+      - "127.0.0.1:${DOCUSEAL_PORT}:3000"
+
+volumes:
+  docuseal_db_data:

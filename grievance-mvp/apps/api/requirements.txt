@@ -1,0 +1,15 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+pydantic==2.8.2
+PyYAML==6.0.2
+
+docxtpl==0.19.0
+python-docx==1.1.2
+
+aiofiles==24.1.0
+aiosqlite==0.20.0
+
+requests==2.32.3
+msal==1.30.0
+cryptography==43.0.0
