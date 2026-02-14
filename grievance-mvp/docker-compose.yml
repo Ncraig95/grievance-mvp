@@ -42,20 +42,19 @@ services:
       # Optional admin bootstrap (supported by many packaged images; harmless if ignored)
       - ADMIN_USERNAME=${DOCUSEAL_ADMIN_EMAIL}
       - ADMIN_PASSWORD=${DOCUSEAL_ADMIN_PASSWORD}
+    volumes:
+      - ./data/docuseal:/data
+    ports:
+      - "127.0.0.1:${DOCUSEAL_PORT}:3000"
+
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: cloudflared
     restart: unless-stopped
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
-      - docuseal
-    environment:
-      - CLOUDFLARE_TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
-
-    volumes:
-      - ./data/docuseal:/data
-    ports:
-      - "127.0.0.1:${DOCUSEAL_PORT}:3000"
+      docuseal:
+        condition: service_started
 
 volumes:
   docuseal_db_data:
