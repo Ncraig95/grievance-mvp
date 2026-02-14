@@ -1,35 +1,39 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 import msal
 import requests
 
+
 class GraphUploader:
-    """
-    Minimal Graph app-only auth using a certificate PEM.
-    """
+    """Minimal Graph app-only auth using a certificate PEM."""
 
     def __init__(self, tenant_id: str, client_id: str, cert_thumbprint: str, cert_pem_path: str):
         self.tenant_id = tenant_id
         self.client_id = client_id
         self.cert_thumbprint = cert_thumbprint
         self.cert_pem_path = cert_pem_path
-
-        authority = f"https://login.microsoftonline.com/{tenant_id}"
-        self._app = msal.ConfidentialClientApplication(
-            client_id=client_id,
-            authority=authority,
-            client_credential=self._load_cert_credential(),
-        )
+        self._authority = f"https://login.microsoftonline.com/{tenant_id}"
+        self._app: msal.ConfidentialClientApplication | None = None
 
     def _load_cert_credential(self) -> dict:
         pem = Path(self.cert_pem_path).read_text(encoding="utf-8")
         return {"private_key": pem, "thumbprint": self.cert_thumbprint}
 
     def token(self) -> str:
+        if self._app is None:
+            self._app = msal.ConfidentialClientApplication(
+                client_id=self.client_id,
+                authority=self._authority,
+                client_credential=self._load_cert_credential(),
+            )
+
         result = self._app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
         if "access_token" not in result:
-            raise RuntimeError(f"Graph token failure: {result.get(\"error\")} {result.get(\"error_description\")}")
+            err = result.get("error")
+            desc = result.get("error_description")
+            raise RuntimeError(f"Graph token failure: {err} {desc}")
         return result["access_token"]
 
     def _put_bytes(self, url: str, token: str, data: bytes) -> None:
