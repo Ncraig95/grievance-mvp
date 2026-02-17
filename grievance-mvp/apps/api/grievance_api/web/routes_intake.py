@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import date
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -13,12 +14,14 @@ from ..db.db import Db, utcnow
 from ..services.doc_render import render_docx
 from ..services.notification_service import NotificationService
 from ..services.pdf_convert import docx_to_pdf
+from ..services.signature_workflow import normalize_signers, send_document_for_signature
 from .models import CaseStatusResponse, DocumentRequest, DocumentStatus, IntakeRequest, IntakeResponse
 
 router = APIRouter()
 
 
 _FILENAME_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
+_FIELD_KEY_SAFE = re.compile(r"[^A-Za-z0-9]+")
 
 
 def _safe_name(value: str) -> str:
@@ -34,12 +37,77 @@ def _resolve_template_path(cfg, doc_req: DocumentRequest) -> str:  # noqa: ANN00
     return cfg.docx_template_path
 
 
-def _resolve_docuseal_template_id(cfg, doc_req: DocumentRequest) -> int | None:  # noqa: ANN001
-    if doc_req.template_key and doc_req.template_key in cfg.docuseal.template_ids:
-        return cfg.docuseal.template_ids[doc_req.template_key]
-    if doc_req.doc_type in cfg.docuseal.template_ids:
-        return cfg.docuseal.template_ids[doc_req.doc_type]
-    return cfg.docuseal.default_template_id
+def _normalize_field_key(key: str) -> str:
+    normalized = _FIELD_KEY_SAFE.sub("_", key.strip()).strip("_").lower()
+    return normalized
+
+
+def _flatten_fields(value: object, prefix: str = "") -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, object] = {}
+    for raw_key, raw_val in value.items():
+        key = str(raw_key).strip()
+        if not key:
+            continue
+        composed = f"{prefix}_{key}" if prefix else key
+        if isinstance(raw_val, dict):
+            out.update(_flatten_fields(raw_val, composed))
+        else:
+            out[composed] = raw_val
+    return out
+
+
+def _coerce_context_value(value: object) -> object:
+    if value is None:
+        return ""
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value if v is not None)
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _build_template_context(
+    *,
+    payload: IntakeRequest,
+    case_id: str,
+    grievance_id: str,
+    document_id: str,
+    doc_type: str,
+    grievance_number: str | None,
+) -> dict[str, object]:
+    payload_data = payload.model_dump(exclude={"documents", "template_data"})
+    merged_fields = _flatten_fields(payload_data)
+    merged_fields.update(_flatten_fields(payload.template_data))
+
+    context: dict[str, object] = {
+        "case_id": case_id,
+        "grievance_id": grievance_id,
+        "grievance_number": grievance_number or "",
+        "document_id": document_id,
+        "document_type": doc_type,
+        "created_at_utc": utcnow(),
+    }
+
+    for key, raw_val in merged_fields.items():
+        value = _coerce_context_value(raw_val)
+        context[key] = value
+
+        normalized = _normalize_field_key(key)
+        if normalized and normalized not in context:
+            context[normalized] = value
+
+    member_name = f"{payload.grievant_firstname} {payload.grievant_lastname}".strip()
+    if member_name:
+        context.setdefault("grievant_name", member_name)
+        context.setdefault("grievant_names", member_name)
+
+    today = date.today().isoformat()
+    context.setdefault("today_date", today)
+    context.setdefault("request_date", today)
+
+    return context
 
 
 async def _load_case_status(db: Db, case_id: str) -> CaseStatusResponse:
@@ -109,6 +177,7 @@ async def intake(request: Request):
         )
 
     grievance_id = normalize_grievance_id(payload.grievance_id) or payload.grievance_id
+    grievance_number = (payload.grievance_number or "").strip() or None
     case_id = new_case_id()
     cdir = Path(cfg.data_root) / case_id
     cdir.mkdir(parents=True, exist_ok=True)
@@ -118,14 +187,15 @@ async def intake(request: Request):
         await db.exec(
             """INSERT INTO cases(
                  id, grievance_id, created_at_utc, status, approval_status,
-                 member_name, member_email, intake_request_id, intake_payload_json
-               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                 grievance_number, member_name, member_email, intake_request_id, intake_payload_json
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
             (
                 case_id,
                 grievance_id,
                 utcnow(),
                 "processing",
                 "pending",
+                grievance_number,
                 member_name,
                 payload.grievant_email,
                 payload.request_id,
@@ -154,11 +224,21 @@ async def intake(request: Request):
                 ],
             )
         raise
-    await db.add_event(case_id, None, "case_created", {"request_id": payload.request_id, "grievance_id": grievance_id})
+    await db.add_event(
+        case_id,
+        None,
+        "case_created",
+        {
+            "request_id": payload.request_id,
+            "grievance_id": grievance_id,
+            "grievance_number": grievance_number,
+        },
+    )
 
     doc_requests = payload.documents or [DocumentRequest(doc_type="grievance_form", requires_signature=True)]
     doc_statuses: list[DocumentStatus] = []
     any_signature_requested = False
+    any_signature_queued = False
     any_failed = False
 
     for doc_req in doc_requests:
@@ -172,14 +252,14 @@ async def intake(request: Request):
         docx_path = str(ddir / f"{doc_name}.docx")
         pdf_path = str(ddir / f"{doc_name}.pdf")
 
-        context = {
-            "case_id": case_id,
-            "grievance_id": grievance_id,
-            "document_id": document_id,
-            "document_type": doc_type,
-            "created_at_utc": utcnow(),
-            **payload.model_dump(),
-        }
+        context = _build_template_context(
+            payload=payload,
+            case_id=case_id,
+            grievance_id=grievance_id,
+            document_id=document_id,
+            doc_type=doc_type,
+            grievance_number=grievance_number,
+        )
 
         try:
             render_docx(template_path, context, docx_path)
@@ -241,83 +321,10 @@ async def intake(request: Request):
         signing_link: str | None = None
 
         if doc_req.requires_signature:
-            signer_order = [
-                s.strip()
-                for s in (doc_req.signers or [payload.grievant_email])
-                if s and s.strip()
-            ]
-            if not signer_order:
-                signer_order = [payload.grievant_email]
-
-            try:
-                submission = docuseal.create_submission(
-                    pdf_bytes=pdf_bytes,
-                    signers=signer_order,
-                    title=f"Grievance {grievance_id} - {doc_type}",
-                    metadata={
-                        "case_id": case_id,
-                        "document_id": document_id,
-                        "grievance_id": grievance_id,
-                        "doc_type": doc_type,
-                    },
-                    template_id=_resolve_docuseal_template_id(cfg, doc_req),
-                )
-                signing_link = submission.signing_link
-                status = "sent_for_signature"
-                any_signature_requested = True
-                await db.exec(
-                    """UPDATE documents
-                       SET status=?, signer_order_json=?, docuseal_submission_id=?, docuseal_signing_link=?
-                       WHERE id=?""",
-                    (
-                        status,
-                        json.dumps(signer_order, ensure_ascii=False),
-                        submission.submission_id,
-                        signing_link,
-                        document_id,
-                    ),
-                )
-                await db.add_event(
-                    case_id,
-                    document_id,
-                    "sent_for_signature",
-                    {"submission_id": submission.submission_id, "doc_type": doc_type},
-                )
-
-                if cfg.email.enabled and signing_link:
-                    for signer in signer_order:
-                        try:
-                            await notifications.send_one(
-                                case_id=case_id,
-                                document_id=document_id,
-                                recipient_email=signer,
-                                template_key="signature_request",
-                                context={
-                                    "case_id": case_id,
-                                    "grievance_id": grievance_id,
-                                    "document_id": document_id,
-                                    "document_type": doc_type,
-                                    "docuseal_signing_url": signing_link,
-                                    "signer_email": signer,
-                                    "status": status,
-                                },
-                                idempotency_key=f"intake:{case_id}:{document_id}:signature_request:{signer.lower()}",
-                            )
-                        except Exception:
-                            await db.add_event(
-                                case_id,
-                                document_id,
-                                "signature_request_email_failed",
-                                {"recipient": signer},
-                            )
-                            logger.exception(
-                                "signature_request_email_failed",
-                                extra={"correlation_id": case_id, "document_id": document_id},
-                            )
-
-            except Exception as exc:
-                any_failed = True
-                status = "failed"
+            signer_order = normalize_signers(doc_req.signers, payload.grievant_email)
+            if not grievance_number:
+                status = "pending_grievance_number"
+                any_signature_queued = True
                 await db.exec(
                     "UPDATE documents SET status=?, signer_order_json=? WHERE id=?",
                     (status, json.dumps(signer_order, ensure_ascii=False), document_id),
@@ -325,10 +332,30 @@ async def intake(request: Request):
                 await db.add_event(
                     case_id,
                     document_id,
-                    "docuseal_create_failed",
-                    {"error": str(exc), "doc_type": doc_type},
+                    "signature_queued_pending_grievance_number",
+                    {"doc_type": doc_type},
                 )
-                logger.exception("docuseal_create_failed", extra={"correlation_id": case_id, "document_id": document_id})
+            else:
+                outcome = await send_document_for_signature(
+                    cfg=cfg,
+                    db=db,
+                    logger=logger,
+                    docuseal=docuseal,
+                    notifications=notifications,
+                    case_id=case_id,
+                    grievance_id=grievance_id,
+                    document_id=document_id,
+                    doc_type=doc_type,
+                    template_key=doc_req.template_key,
+                    pdf_bytes=pdf_bytes,
+                    signer_order=signer_order,
+                    correlation_id=correlation_id,
+                    idempotency_prefix=f"intake:{case_id}:{document_id}",
+                )
+                status = outcome.status
+                signing_link = outcome.signing_link
+                any_signature_requested = any_signature_requested or status == "sent_for_signature"
+                any_failed = any_failed or status == "failed"
         else:
             status = "pending_approval"
             await db.exec("UPDATE documents SET status=? WHERE id=?", (status, document_id))
@@ -338,10 +365,12 @@ async def intake(request: Request):
             DocumentStatus(document_id=document_id, doc_type=doc_type, status=status, signing_link=signing_link)
         )
 
-    if any_failed and not any_signature_requested:
-        case_status = "failed"
-    elif any_signature_requested:
+    if any_signature_requested:
         case_status = "awaiting_signatures"
+    elif any_signature_queued:
+        case_status = "pending_grievance_number"
+    elif any_failed:
+        case_status = "failed"
     else:
         case_status = "pending_approval"
 

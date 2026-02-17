@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DocumentRequest(BaseModel):
@@ -11,8 +11,11 @@ class DocumentRequest(BaseModel):
 
 
 class IntakeRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     request_id: str = Field(..., description="Client-generated idempotency key")
     grievance_id: str = Field(..., description="External grievance identifier such as 2026001")
+    grievance_number: str | None = None
     contract: str = Field(..., description="AT&T or COJ (or other)")
     grievant_firstname: str
     grievant_lastname: str
@@ -22,6 +25,7 @@ class IntakeRequest(BaseModel):
     supervisor: str | None = None
     incident_date: str | None = None
     narrative: str
+    template_data: dict[str, object] = Field(default_factory=dict, description="Optional template merge fields")
     documents: list[DocumentRequest] = Field(default_factory=list)
 
 
@@ -76,3 +80,8 @@ class ApprovalDecisionResponse(BaseModel):
     status: str
     approval_status: str
     grievance_number: str | None = None
+
+
+class AssignGrievanceNumberRequest(BaseModel):
+    grievance_number: str
+    assigned_by: str | None = None

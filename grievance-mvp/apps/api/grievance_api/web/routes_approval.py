@@ -6,9 +6,64 @@ from fastapi import APIRouter, HTTPException, Request
 
 from ..db.db import Db, utcnow
 from ..services.notification_service import NotificationService
-from .models import ApprovalDecisionRequest, ApprovalDecisionResponse
+from ..services.signature_workflow import send_document_for_signature, signer_order_from_json
+from .models import (
+    ApprovalDecisionRequest,
+    ApprovalDecisionResponse,
+    AssignGrievanceNumberRequest,
+    CaseStatusResponse,
+    DocumentStatus,
+)
 
 router = APIRouter()
+
+
+async def _load_case_status(db: Db, case_id: str) -> CaseStatusResponse:
+    case_row = await db.fetchone(
+        "SELECT grievance_id, status, approval_status, grievance_number FROM cases WHERE id=?",
+        (case_id,),
+    )
+    if not case_row:
+        raise HTTPException(status_code=404, detail="case_id not found")
+
+    docs = await db.fetchall(
+        "SELECT id, doc_type, status, docuseal_signing_link FROM documents WHERE case_id=? ORDER BY created_at_utc",
+        (case_id,),
+    )
+
+    return CaseStatusResponse(
+        case_id=case_id,
+        grievance_id=case_row[0],
+        status=case_row[1],
+        approval_status=case_row[2],
+        grievance_number=case_row[3],
+        documents=[DocumentStatus(document_id=d[0], doc_type=d[1], status=d[2], signing_link=d[3]) for d in docs],
+    )
+
+
+async def _recompute_case_status(db: Db, case_id: str, current_case_status: str) -> str:
+    rollup = await db.fetchone(
+        """SELECT
+             SUM(CASE WHEN requires_signature=1 AND status='pending_grievance_number' THEN 1 ELSE 0 END),
+             SUM(CASE WHEN requires_signature=1 AND status='sent_for_signature' THEN 1 ELSE 0 END),
+             SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END)
+           FROM documents
+           WHERE case_id=?""",
+        (case_id,),
+    )
+    limbo = int((rollup[0] if rollup else 0) or 0)
+    awaiting = int((rollup[1] if rollup else 0) or 0)
+    failed = int((rollup[2] if rollup else 0) or 0)
+
+    if awaiting > 0:
+        return "awaiting_signatures"
+    if limbo > 0:
+        return "pending_grievance_number"
+    if failed > 0 and current_case_status not in {"approved", "rejected"}:
+        return "failed"
+    if current_case_status in {"processing", "pending_grievance_number"}:
+        return "pending_approval"
+    return current_case_status
 
 
 @router.get("/cases/{case_id}/approval", response_model=ApprovalDecisionResponse)
@@ -26,6 +81,119 @@ async def get_approval_status(case_id: str, request: Request):
         approval_status=row[1],
         grievance_number=row[2],
     )
+
+
+@router.post("/cases/{case_id}/grievance-number", response_model=CaseStatusResponse)
+async def assign_grievance_number(case_id: str, body: AssignGrievanceNumberRequest, request: Request):
+    db: Db = request.app.state.db
+    cfg = request.app.state.cfg
+    logger = request.app.state.logger
+    docuseal = request.app.state.docuseal
+    notifications: NotificationService = request.app.state.notifications
+
+    case_row = await db.fetchone(
+        "SELECT grievance_id, status, approval_status, member_email FROM cases WHERE id=?",
+        (case_id,),
+    )
+    if not case_row:
+        raise HTTPException(status_code=404, detail="case_id not found")
+
+    grievance_id, current_status, approval_status, member_email = case_row
+    if approval_status in {"approved", "rejected"}:
+        raise HTTPException(status_code=409, detail="Cannot assign grievance number after final approval decision")
+
+    grievance_number = (body.grievance_number or "").strip()
+    if not grievance_number:
+        raise HTTPException(status_code=400, detail="grievance_number is required")
+
+    await db.exec(
+        "UPDATE cases SET grievance_number=? WHERE id=?",
+        (grievance_number, case_id),
+    )
+    await db.add_event(
+        case_id,
+        None,
+        "grievance_number_assigned",
+        {
+            "grievance_number": grievance_number,
+            "assigned_by": (body.assigned_by or "").strip(),
+        },
+    )
+
+    queued_docs = await db.fetchall(
+        """SELECT id, doc_type, template_key, signer_order_json, pdf_path
+           FROM documents
+           WHERE case_id=?
+             AND requires_signature=1
+             AND status='pending_grievance_number'
+           ORDER BY created_at_utc""",
+        (case_id,),
+    )
+
+    dispatched = 0
+    failed = 0
+    for row in queued_docs:
+        document_id, doc_type, template_key, signer_order_json, pdf_path = row
+        if not pdf_path or not Path(pdf_path).exists():
+            failed += 1
+            await db.exec(
+                "UPDATE documents SET status='failed' WHERE id=?",
+                (document_id,),
+            )
+            await db.add_event(
+                case_id,
+                document_id,
+                "docuseal_create_failed",
+                {"error": "missing_pdf_path", "doc_type": doc_type},
+            )
+            continue
+
+        signer_order = signer_order_from_json(signer_order_json, member_email)
+        outcome = await send_document_for_signature(
+            cfg=cfg,
+            db=db,
+            logger=logger,
+            docuseal=docuseal,
+            notifications=notifications,
+            case_id=case_id,
+            grievance_id=grievance_id,
+            document_id=document_id,
+            doc_type=doc_type,
+            template_key=template_key,
+            pdf_bytes=Path(pdf_path).read_bytes(),
+            signer_order=signer_order,
+            correlation_id=case_id,
+            idempotency_prefix=f"grievance_number:{case_id}:{document_id}",
+        )
+        if outcome.status == "sent_for_signature":
+            dispatched += 1
+        else:
+            failed += 1
+
+    new_case_status = await _recompute_case_status(db, case_id, current_status)
+    await db.exec(
+        "UPDATE cases SET status=?, grievance_number=? WHERE id=?",
+        (new_case_status, grievance_number, case_id),
+    )
+    await db.add_event(
+        case_id,
+        None,
+        "grievance_number_release_processed",
+        {
+            "queued_document_count": len(queued_docs),
+            "dispatched_for_signature": dispatched,
+            "failed_document_count": failed,
+            "status": new_case_status,
+        },
+    )
+
+    if failed > 0:
+        logger.warning(
+            "grievance_number_release_partial_failure",
+            extra={"correlation_id": case_id, "dispatched": dispatched, "failed": failed},
+        )
+
+    return await _load_case_status(db, case_id)
 
 
 @router.post("/cases/{case_id}/approval", response_model=ApprovalDecisionResponse)
@@ -69,7 +237,7 @@ async def decide_approval(case_id: str, body: ApprovalDecisionRequest, request: 
             """UPDATE documents
                SET status='approved'
                WHERE case_id=?
-                 AND status IN ('signed', 'pending_approval', 'created')""",
+                 AND status IN ('signed', 'pending_approval', 'created', 'pending_grievance_number')""",
             (case_id,),
         )
         await db.add_event(

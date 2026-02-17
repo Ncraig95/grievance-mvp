@@ -34,6 +34,7 @@ PAYLOAD="$(cat <<JSON
 {
   "request_id": "${REQUEST_ID}",
   "grievance_id": "2026003",
+  "grievance_number": "GN-2026003",
   "contract": "AT&T",
   "grievant_firstname": "Signed",
   "grievant_lastname": "Flow",

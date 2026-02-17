@@ -36,6 +36,8 @@ Approval flow:
 - Endpoint: `POST /intake`
 - Idempotency key: `request_id` (unique in `cases.intake_request_id`)
 - Supports multiple documents in a single intake payload.
+- `grievance_number` is optional on intake. If omitted, signature-required docs are queued in limbo until assigned later.
+- Extra JSON keys and `template_data` are merged into DOCX template context (normalized snake_case aliases are also added).
 
 ### Document creation
 - Per document:
@@ -45,7 +47,8 @@ Approval flow:
   - persist paths + SHA256 in `documents`
 
 ### E-signature
-- For `requires_signature=true`, app submits document to DocuSeal API.
+- For `requires_signature=true`, app queues documents in `pending_grievance_number` until a grievance number exists.
+- Once a grievance number is assigned (`POST /cases/{case_id}/grievance-number` or intake provides `grievance_number`), app submits document to DocuSeal API.
 - App-owned mail sends signature requests (DocuSeal SMTP is not used).
 - DocuSeal links are rewritten to public HTTPS origin via `docuseal.public_base_url` when needed.
 
@@ -63,6 +66,10 @@ Approval flow:
 - Optional grievance number recorded on approval.
 - Sends app-owned status-update emails via Graph.
 - On approval, app ensures SharePoint case folder and uploads any remaining generated/signed/audit artifacts that were not uploaded earlier.
+
+### Grievance Number Assignment
+- Endpoint: `POST /cases/{case_id}/grievance-number`
+- Assigns grievance number and releases any documents in limbo (`pending_grievance_number`) for signature dispatch.
 
 ### SharePoint placement
 - App searches under `graph.case_parent_folder` for existing folder whose name contains `grievance_id`.
@@ -199,6 +206,7 @@ Least privilege:
 - `GET /healthz`
 - `POST /intake`
 - `GET /cases/{case_id}`
+- `POST /cases/{case_id}/grievance-number`
 - `POST /webhook/docuseal`
 - `POST /cases/{case_id}/notifications/resend`
 - `GET /cases/{case_id}/approval`

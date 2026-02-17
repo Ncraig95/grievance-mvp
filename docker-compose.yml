@@ -16,6 +16,7 @@ services:
     volumes:
       - ./grievance-mvp/config:/app/config:ro
       - ./grievance-mvp/data:/data
+      - "./Docx Files Template:/app/templates/docx:ro"
     networks:
       - grievance-net
     ports:

@@ -4,16 +4,21 @@ data_root: /data/grievances
 docx_template_path: /app/templates/grievance_template.docx
 doc_templates:
   grievance_form: /app/templates/grievance_template.docx
-  witness_statement: /app/templates/grievance_template.docx
+  mobility_formal_grievance_meeting_request: /app/templates/docx/mobility-formal-grievance-meeting-request.docx
+  bellsouth_formal_grievance_meeting_request: /app/templates/docx/Bellsouth-Telecommunications-formal-grievance-meeting-request.docx
+  grievance_data_request_form: /app/templates/docx/grievance_data_request_form.docx
+  statement_of_occurrence: /app/templates/docx/statement_of_occurrence fixed.docx
+  true_intent_grievance_brief: /app/templates/docx/form_true_intent_grievance_brief_revised_05.20.21.docx
+  disciplinary_grievance_brief: /app/templates/docx/form_disciplinary_grievance_brief_revised_05.19.21.docx
+  bst_grievance_form_3g3a: /app/templates/docx/bst_grievance_form_3g3a.docx
 libreoffice_timeout_seconds: 45
 docuseal:
   base_url: http://docuseal:3000
   api_token: REPLACE
   webhook_secret: REPLACE
   public_base_url: https://docuseal.REPLACE.org
-  default_template_id: 1
-  template_ids:
-    grievance_form: 1
+  default_template_id: null  # null uploads each generated PDF to DocuSeal as a template per document
+  template_ids: {}
 graph:
   tenant_id: REPLACE
   client_id: REPLACE
