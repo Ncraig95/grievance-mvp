@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import json
@@ -22,10 +23,16 @@ class Db:
             row = await cur.fetchone()
             return row
 
-    async def add_event(self, grievance_id: str, event_type: str, details: dict) -> None:
+    async def fetchall(self, sql: str, params: tuple = ()):
+        async with aiosqlite.connect(self.db_path) as con:
+            cur = await con.execute(sql, params)
+            rows = await cur.fetchall()
+            return rows
+
+    async def add_event(self, case_id: str, document_id: str | None, event_type: str, details: dict) -> None:
         await self.exec(
-            "INSERT INTO events(grievance_id, ts_utc, event_type, details_json) VALUES(?,?,?,?)",
-            (grievance_id, utcnow(), event_type, json.dumps(details, ensure_ascii=False)),
+            "INSERT INTO events(case_id, document_id, ts_utc, event_type, details_json) VALUES(?,?,?,?,?)",
+            (case_id, document_id, utcnow(), event_type, json.dumps(details, ensure_ascii=False)),
         )
 
     async def receipt_seen(self, provider: str, receipt_key: str) -> bool:

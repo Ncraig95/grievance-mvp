@@ -1,21 +1,15 @@
 
-.PHONY: up down ps logs
-
-# Get the directory of the currently running script
-# and set the project directory relative to that.
-# This ensures that the docker-compose commands are always
-# run from the correct context.
-PROJECT_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
+.PHONY: up down logs ps
 
 up:
-	docker-compose -f $(PROJECT_DIR)/docker-compose.yml up -d --build
+	docker compose -f docker-compose.yml up -d
 
 down:
-	docker-compose -f $(PROJECT_DIR)/docker-compose.yml down
-
-ps:
-	docker-compose -f $(PROJECT_DIR)/docker-compose.yml ps
+	docker compose -f docker-compose.yml down
 
 logs:
-	docker-compose -f $(PROJECT_DIR)/docker-compose.yml logs -f
+	docker compose -f docker-compose.yml logs -f
+
+ps:
+	docker compose -f docker-compose.yml ps
 
