@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import json
@@ -28,6 +29,7 @@ class Db:
             rows = await cur.fetchall()
             return rows
 
+<<<<<<< HEAD
     async def insert(self, sql: str, params: tuple = ()) -> int:
         async with aiosqlite.connect(self.db_path) as con:
             cur = await con.execute(sql, params)
@@ -35,9 +37,12 @@ class Db:
             return int(cur.lastrowid)
 
     async def add_event(self, grievance_id: str, event_type: str, details: dict) -> None:
+=======
+    async def add_event(self, case_id: str, document_id: str | None, event_type: str, details: dict) -> None:
+>>>>>>> Firebase-Studio-Test-run
         await self.exec(
-            "INSERT INTO events(grievance_id, ts_utc, event_type, details_json) VALUES(?,?,?,?)",
-            (grievance_id, utcnow(), event_type, json.dumps(details, ensure_ascii=False)),
+            "INSERT INTO events(case_id, document_id, ts_utc, event_type, details_json) VALUES(?,?,?,?,?)",
+            (case_id, document_id, utcnow(), event_type, json.dumps(details, ensure_ascii=False)),
         )
 
     async def receipt_seen(self, provider: str, receipt_key: str) -> bool:

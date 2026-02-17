@@ -1,19 +1,16 @@
-from __future__ import annotations
 
+from __future__ import annotations
 import logging
 from fastapi import FastAPI
-
 from .core.config import load_config
 from .core.logging import setup_logging
 from .db.migrate import migrate
 from .db.db import Db
-
 from .services.docuseal_client import DocuSealClient
 from .services.email_templates import EmailTemplateStore
 from .services.graph_mail import GraphMailer
 from .services.notification_service import NotificationService
 from .services.sharepoint_graph import GraphUploader
-
 from .web.routes_health import router as health_router
 from .web.routes_intake import router as intake_router
 from .web.routes_notifications import router as notifications_router

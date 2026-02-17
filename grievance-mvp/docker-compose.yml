@@ -1,3 +1,10 @@
+
+version: '3.8'
+
+networks:
+  grievance-net:
+    driver: bridge
+
 services:
   api:
     build:
@@ -9,6 +16,8 @@ services:
     volumes:
       - ./config:/app/config:ro
       - ./data:/data
+    networks:
+      - grievance-net
     ports:
       - "127.0.0.1:${API_PORT}:8080"
 
@@ -28,6 +37,8 @@ services:
       start_period: 5s
     volumes:
       - docuseal_db_data:/var/lib/postgresql/data
+    networks:
+      - grievance-net
 
   docuseal:
     image: "${DOCUSEAL_IMAGE}"
@@ -39,16 +50,15 @@ services:
     environment:
       - TZ=UTC
       - DATABASE_URL=postgresql://${DOCUSEAL_DB_USER}:${DOCUSEAL_DB_PASSWORD}@docuseal_db:5432/${DOCUSEAL_DB_NAME}
-      # Public origin used for absolute links (downloads, emails, webhooks)
       - APP_URL=${DOCUSEAL_PROTOCOL}://${DOCUSEAL_HOST}
       - HOST=${DOCUSEAL_HOST}
-      # Rails reverse-proxy HTTPS handling (Cloudflare terminates TLS upstream)
       - FORCE_SSL=true
-      # Optional admin bootstrap (supported by many packaged images; harmless if ignored)
       - ADMIN_USERNAME=${DOCUSEAL_ADMIN_EMAIL}
       - ADMIN_PASSWORD=${DOCUSEAL_ADMIN_PASSWORD}
     volumes:
       - ./data/docuseal:/data
+    networks:
+      - grievance-net
     ports:
       - "127.0.0.1:${DOCUSEAL_PORT}:3000"
 
@@ -56,11 +66,19 @@ services:
     image: cloudflare/cloudflared:latest
     container_name: cloudflared
     restart: unless-stopped
-    network_mode: host
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    command: tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
-      docuseal:
-        condition: service_started
+      - docuseal
+      - api
+    networks:
+      - grievance-net
+    environment:
+      - TUNNEL_URL_0=https://api.${GRIEVANCE_DOMAIN}
+      - TUNNEL_SERVICE_0=http://api:8080
+      - TUNNEL_URL_1=https://docuseal.${GRIEVANCE_DOMAIN}
+      - TUNNEL_SERVICE_1=http://docuseal:3000
+      - TUNNEL_LOGLEVEL=debug
 
 volumes:
   docuseal_db_data:
+
