@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import msal
 import requests
+
+
+@dataclass(frozen=True)
+class UploadedFileRef:
+    drive_id: str
+    item_id: str
+    web_url: str | None
 
 
 class GraphUploader:
@@ -36,13 +44,13 @@ class GraphUploader:
             raise RuntimeError(f"Graph token failure: {err} {desc}")
         return result["access_token"]
 
-    def _put_bytes(self, url: str, token: str, data: bytes) -> None:
+    def _put_bytes(self, url: str, token: str, data: bytes) -> dict:
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/octet-stream"}
         last_err = None
         for _ in range(3):
             r = requests.put(url, headers=headers, data=data, timeout=60)
             if 200 <= r.status_code < 300:
-                return
+                return r.json()
             last_err = f"{r.status_code} {r.text}"
         raise RuntimeError(f"Graph upload failed after retries: {last_err}")
 
@@ -55,7 +63,7 @@ class GraphUploader:
         folder_path: str,
         filename: str,
         file_bytes: bytes,
-    ) -> None:
+    ) -> UploadedFileRef:
         token = self.token()
 
         site_url = f"https://graph.microsoft.com/v1.0/sites/{site_hostname}:{site_path}"
@@ -77,4 +85,9 @@ class GraphUploader:
 
         safe_folder = folder_path.strip("/")
         put_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{safe_folder}/{filename}:/content"
-        self._put_bytes(put_url, token, file_bytes)
+        put_result = self._put_bytes(put_url, token, file_bytes)
+        return UploadedFileRef(
+            drive_id=drive_id,
+            item_id=str(put_result.get("id", "")),
+            web_url=put_result.get("webUrl"),
+        )

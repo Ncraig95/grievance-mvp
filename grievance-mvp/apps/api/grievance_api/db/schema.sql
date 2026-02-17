@@ -46,3 +46,25 @@ CREATE TABLE IF NOT EXISTS webhook_receipts (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_receipts_provider_key
 ON webhook_receipts(provider, receipt_key);
+
+CREATE TABLE IF NOT EXISTS outbound_emails (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  grievance_id TEXT NOT NULL,
+  template_key TEXT NOT NULL,
+  recipient_email TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  status TEXT NOT NULL,                  -- pending|sent|failed|deduped
+  graph_message_id TEXT,
+  internet_message_id TEXT,
+  resend_count INTEGER NOT NULL DEFAULT 0,
+  created_at_utc TEXT NOT NULL,
+  last_sent_at_utc TEXT,
+  updated_at_utc TEXT NOT NULL,
+  metadata_json TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outbound_emails_doc_tpl_recipient_idem
+ON outbound_emails(grievance_id, template_key, recipient_email, idempotency_key);
+
+CREATE INDEX IF NOT EXISTS idx_outbound_emails_grievance_id
+ON outbound_emails(grievance_id);

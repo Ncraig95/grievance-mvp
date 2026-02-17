@@ -19,3 +19,18 @@ class IntakeResponse(BaseModel):
     grievance_id: str
     status: str
     signing_link: str | None = None
+
+
+class ResendNotificationRequest(BaseModel):
+    template_key: str = Field(..., description="Template key, for example completion_internal")
+    idempotency_key: str = Field(..., description="Client-controlled idempotency key for resend")
+    recipients: list[str] | None = Field(default=None, description="Optional explicit recipient override list")
+    context_overrides: dict[str, str] = Field(default_factory=dict)
+
+
+class ResendNotificationResult(BaseModel):
+    recipient_email: str
+    status: str
+    deduped: bool
+    graph_message_id: str | None = None
+    resend_count: int

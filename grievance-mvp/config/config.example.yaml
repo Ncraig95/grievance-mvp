@@ -19,3 +19,18 @@ graph:
   site_hostname: "REPLACE.sharepoint.com"
   site_path: "/sites/REPLACE"
   document_library: "Documents"
+
+email:
+  enabled: true
+  # Authorized mailbox identity (user principal name or mailbox GUID) used with Graph /users/{id}/...
+  sender_user_id: "grievance-mailbox@REPLACE.onmicrosoft.com"
+  templates_dir: "/app/templates/email"
+  internal_recipients:
+    - "grievance-team@REPLACE.org"
+  derek_email: "derek@REPLACE.org"
+  approval_request_url_base: "https://grievance-app.REPLACE.org/approval"
+  allow_signer_copy_link: false
+  # Recommended safe default: SharePoint link (no PDF attachment by default).
+  artifact_delivery_mode: "sharepoint_link"   # sharepoint_link | attach_pdf
+  max_attachment_bytes: 2000000
+  resend_cooldown_seconds: 300

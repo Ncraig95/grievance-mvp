@@ -4,12 +4,38 @@ What this is:
 - FastAPI orchestrator (self-hosted on Ubuntu, localhost-only)
 - DocuSeal (container) for signing (signed PDF + certificate/audit log)
 - SQLite for minimal state
-- Microsoft Graph app-only auth (certificate-based) for SharePoint uploads
+- Microsoft Graph app-only auth (certificate-based) for SharePoint uploads + app-owned email delivery
 
 What is NOT complete yet (intentional MVP scaffolding):
 - DocuSeal API client: create submission + download completed artifacts (stubs)
-- DocuSeal webhook verification (stub)
 - SharePoint upload paths need your exact site + library wiring in config
+
+Email delivery architecture:
+- DocuSeal is used for e-sign and audit trail only.
+- Do not configure DocuSeal SMTP for this app workflow.
+- Outbound email is sent by this app via Microsoft Graph Mail API (`/users/{mailbox}/messages` + `/send`).
+- Templates are versioned in repo at `apps/api/templates/email` (`.subject.txt`, `.txt`, optional `.html`).
+- Included templates: `signature_request`, `reminder_signature`, `status_update`, `completion_signer`, `completion_internal`, `completion_approval`.
+- Per-recipient delivery is audited in SQLite table `outbound_emails` with:
+  - `graph_message_id`
+  - `internet_message_id`
+  - `recipient_email`
+  - `idempotency_key`
+  - `resend_count`
+  - `last_sent_at_utc`
+- Completion webhook sends to signer, internal recipients, and Derek (approval recipient) when configured.
+- Delivery mode defaults to SharePoint links (`email.artifact_delivery_mode=sharepoint_link`), with optional small-PDF attachment mode.
+
+Manual resend endpoint:
+- `POST /grievances/{grievance_id}/notifications/resend`
+- Requires JSON body with `template_key` and `idempotency_key`.
+- Applies resend cooldown (`email.resend_cooldown_seconds`) to reduce spam.
+
+Graph permissions and least-privilege guidance:
+- Mail: `Mail.Send` + `Mail.ReadWrite` application permissions (required to create draft + capture `message_id`).
+- SharePoint: prefer `Sites.Selected` with site-specific grants where possible.
+- Restrict mailbox scope using Exchange application access policy to the authorized sender mailbox only.
+- Do not commit secrets; keep values in ignored files (`.env`, `config/config.yaml`, `config/graph_cert.pem`) or external secret storage.
 
 Run (from repo root so compose path is always correct):
   cd "/home/nicholas-craig/apps/grievance mvp"

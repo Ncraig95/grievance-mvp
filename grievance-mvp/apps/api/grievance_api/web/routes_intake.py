@@ -2,21 +2,18 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request, HTTPException
 
 from ..core.hmac_auth import verify_hmac
 from ..core.ids import new_grievance_id
 from ..db.db import Db, utcnow
+from ..services.notification_service import NotificationService
 from ..services.doc_render import render_docx
 from ..services.pdf_convert import docx_to_pdf
 from ..web.models import IntakeRequest, IntakeResponse
 
 router = APIRouter()
-
-def _year_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y")
 
 @router.post("/intake", response_model=IntakeResponse)
 async def intake(request: Request):
@@ -105,6 +102,7 @@ async def intake(request: Request):
         logger.exception("docuseal_create_failed", extra={"correlation_id": correlation_id})
         raise HTTPException(status_code=500, detail="Failed to create signing submission")
 
+    status_out = "created"
     if submission_id:
         await db.exec(
             "UPDATE grievances SET status=?, docuseal_submission_id=?, docuseal_signing_link=? WHERE id=?",
@@ -112,5 +110,27 @@ async def intake(request: Request):
         )
         await db.add_event(grievance_id, "sent_for_signature", {"submission_id": submission_id})
         logger.info("sent_for_signature", extra={"correlation_id": correlation_id})
+        status_out = "sent_for_signature"
 
-    return IntakeResponse(grievance_id=grievance_id, status="created", signing_link=signing_link)
+        if cfg.email.enabled and signing_link:
+            notifications: NotificationService = request.app.state.notifications
+            try:
+                await notifications.send_one(
+                    grievance_id=grievance_id,
+                    recipient_email=payload.grievant_email,
+                    template_key="signature_request",
+                    context={
+                        "grievance_id": grievance_id,
+                        "signing_url": signing_link,
+                        "docuseal_signing_url": signing_link,
+                        "signer_email": payload.grievant_email,
+                        "signer_lastname": payload.grievant_lastname,
+                    },
+                    idempotency_key=f"intake-signature-request:{grievance_id}:{payload.grievant_email.lower()}",
+                    allow_resend=False,
+                )
+            except Exception:
+                logger.exception("signature_request_email_failed", extra={"correlation_id": grievance_id})
+                await db.add_event(grievance_id, "signature_request_email_failed", {})
+
+    return IntakeResponse(grievance_id=grievance_id, status=status_out, signing_link=signing_link)
