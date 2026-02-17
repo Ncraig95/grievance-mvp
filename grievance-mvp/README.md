@@ -1,84 +1,205 @@
-Grievance Intake + e-sign + SharePoint drop (MVP scaffold)
+# Grievance Automation MVP
 
-What this is:
-- FastAPI orchestrator (self-hosted on Ubuntu, localhost-only)
-- DocuSeal (container) for signing (signed PDF + certificate/audit log)
-- SQLite for minimal state
-- Microsoft Graph app-only auth (certificate-based) for SharePoint uploads + app-owned email delivery
+Production-oriented grievance automation service on Ubuntu + Docker Compose.
 
-What is NOT complete yet (intentional MVP scaffolding):
-- DocuSeal API client: create submission + download completed artifacts (stubs)
-- SharePoint upload paths need your exact site + library wiring in config
+## 1) Architecture
 
-Email delivery architecture:
-- DocuSeal is used for e-sign and audit trail only.
-- Do not configure DocuSeal SMTP for this app workflow.
-- Outbound email is sent by this app via Microsoft Graph Mail API (`/users/{mailbox}/messages` + `/send`).
-- Templates are versioned in repo at `apps/api/templates/email` (`.subject.txt`, `.txt`, optional `.html`).
-- Included templates: `signature_request`, `reminder_signature`, `status_update`, `completion_signer`, `completion_internal`, `completion_approval`.
-- Per-recipient delivery is audited in SQLite table `outbound_emails` with:
-  - `graph_message_id`
-  - `internet_message_id`
-  - `recipient_email`
-  - `idempotency_key`
-  - `resend_count`
-  - `last_sent_at_utc`
-- Completion webhook sends to signer, internal recipients, and Derek (approval recipient) when configured.
-- Delivery mode defaults to SharePoint links (`email.artifact_delivery_mode=sharepoint_link`), with optional small-PDF attachment mode.
+```
+Microsoft Forms / Intake Client
+        |
+        | (HMAC-signed POST /intake)
+        v
+FastAPI Orchestrator (this app)
+  - validates + normalizes payload
+  - creates Case + Document records (SQLite)
+  - renders DOCX templates + converts to PDF
+  - sends DocuSeal submissions for docs requiring signature
+  - sends all outbound mail via Microsoft Graph Mail API
+        |
+        +--> DocuSeal (signing + audit trail)
+        |      |
+        |      +-- webhook --> POST /webhook/docuseal
+        |
+        +--> SharePoint (Microsoft Graph)
+               - finds/creates case folder by grievance_id
+               - uploads generated/signed/audit files
 
-Manual resend endpoint:
-- `POST /grievances/{grievance_id}/notifications/resend`
-- Requires JSON body with `template_key` and `idempotency_key`.
-- Applies resend cooldown (`email.resend_cooldown_seconds`) to reduce spam.
+Approval flow:
+  - Derek approves/rejects via POST /cases/{case_id}/approval
+  - approval is audited in events table
+  - status update emails are sent by Graph mail service
+```
 
-Graph permissions and least-privilege guidance:
-- Mail: `Mail.Send` + `Mail.ReadWrite` application permissions (required to create draft + capture `message_id`).
-- SharePoint: prefer `Sites.Selected` with site-specific grants where possible.
-- Restrict mailbox scope using Exchange application access policy to the authorized sender mailbox only.
-- Do not commit secrets; keep values in ignored files (`.env`, `config/config.yaml`, `config/graph_cert.pem`) or external secret storage.
+## 2) Workflow behavior
 
-Run (from repo root so compose path is always correct):
-  cd "/home/nicholas-craig/apps/grievance mvp"
-  make up
-  make ps
-  curl -sS http://127.0.0.1:${API_PORT:-8080}/healthz
+### Intake
+- Endpoint: `POST /intake`
+- Idempotency key: `request_id` (unique in `cases.intake_request_id`)
+- Supports multiple documents in a single intake payload.
 
-Equivalent direct run (from grievance-mvp/):
-  cd "/home/nicholas-craig/apps/grievance mvp/grievance-mvp"
-  docker compose up -d --build
+### Document creation
+- Per document:
+  - choose template by `doc_templates[template_key/doc_type]`, fallback to `docx_template_path`
+  - render DOCX
+  - convert DOCX -> PDF using headless LibreOffice
+  - persist paths + SHA256 in `documents`
 
-DocuSeal behind Cloudflare (public HTTPS URL + download links):
-  # one-time or after host/protocol changes
-  cd "/home/nicholas-craig/apps/grievance mvp"
-  make sync-docuseal-url
+### E-signature
+- For `requires_signature=true`, app submits document to DocuSeal API.
+- App-owned mail sends signature requests (DocuSeal SMTP is not used).
+- DocuSeal links are rewritten to public HTTPS origin via `docuseal.public_base_url` when needed.
 
-The compose config now sets these DocuSeal env vars:
-- `APP_URL=${DOCUSEAL_PROTOCOL}://${DOCUSEAL_HOST}`
-- `HOST=${DOCUSEAL_HOST}`
-- `FORCE_SSL=true`
+### Webhook completion
+- Endpoint: `POST /webhook/docuseal`
+- Verifies signature if `docuseal.webhook_secret` is configured.
+- Deduplicates by `webhook_receipts(provider, receipt_key)`.
+- Stores artifacts locally and uploads generated/signed/audit files to SharePoint.
+- Sends completion notifications to signer(s), internal recipients, and Derek.
+- Moves case to `pending_approval` when signature-required docs are complete.
 
-This ensures DocuSeal generates absolute URLs from the public domain (not localhost).
+### Approval
+- Endpoint: `POST /cases/{case_id}/approval`
+- Derek approves/rejects with audit trail.
+- Optional grievance number recorded on approval.
+- Sends app-owned status-update emails via Graph.
+- On approval, app ensures SharePoint case folder and uploads any remaining generated/signed/audit artifacts that were not uploaded earlier.
 
-Verification:
-  # discover a candidate download path (examples: /s/<slug>/download or /submitters/<slug>/download)
-  docker exec docuseal_db psql -U docuseal -d docuseal -Atc "SELECT slug FROM submitters ORDER BY id DESC LIMIT 5;"
+### SharePoint placement
+- App searches under `graph.case_parent_folder` for existing folder whose name contains `grievance_id`.
+- If missing, creates `<grievance_id> <member_name>`.
+- Upload targets:
+  - `graph.generated_subfolder`
+  - `graph.signed_subfolder`
+  - `graph.audit_subfolder`
 
-  # public edge check
-  curl -I https://docuseal.cwa3106.org/<download-path>
+## 3) Data model (SQLite)
 
-  # origin check with Host override (bypasses Cloudflare)
-  curl -I -H "Host: docuseal.cwa3106.org" http://127.0.0.1:8081/<download-path>
+Core tables:
+- `cases`
+  - `id`, `grievance_id`, `status`, `approval_status`, `grievance_number`, `intake_request_id`, `member_*`, SharePoint folder metadata
+- `documents`
+  - one row per document per case
+  - status lifecycle, template key, signature requirements, DocuSeal ids/links, local file paths, SharePoint URLs
+- `events`
+  - append-only audit log with `case_id`, optional `document_id`, `event_type`, JSON details
+- `webhook_receipts`
+  - webhook idempotency and dedupe
+- `outbound_emails`
+  - per-recipient mail audit including idempotency key, `graph_message_id`, resend tracking
 
-Expected:
-- Status `200` (or `404` only when the slug/signature is expired/invalid).
-- `Content-Type: application/json` for `/download` index endpoints that return file URL arrays.
-- For concrete file URLs, `Content-Type` and `Content-Disposition` headers should be present.
+## 4) Compose + infrastructure
 
-Cloudflare cache bypass (free plan compatible):
-- Create a Cache Rule with action: `Bypass cache`.
-- Use expression:
-  `(http.host eq "docuseal.cwa3106.org" and starts_with(http.request.uri.path, "/submitters/") and contains(http.request.uri.path, "/download")) or (http.host eq "docuseal.cwa3106.org" and starts_with(http.request.uri.path, "/s/") and contains(http.request.uri.path, "/download")) or (http.host eq "docuseal.cwa3106.org" and starts_with(http.request.uri.path, "/file/"))`
+### Compose from repo root (supported)
+- File: `docker-compose.yml` (repo root)
+- Uses `grievance-mvp/.env` via `--env-file` in Makefile.
 
-Notes:
-- All configuration lives in config/config.yaml (single source of truth).
-- docker-compose uses `.env` for host bindings, DocuSeal image, and DocuSeal public host/protocol.
+### Compose from `grievance-mvp/` (supported)
+- File: `grievance-mvp/docker-compose.yml`
+
+### DocuSeal HTTPS forwarding
+- `docuseal_proxy` (nginx) forwards Host + `X-Forwarded-*` headers to DocuSeal.
+- Cloudflare tunnel can target `docuseal_proxy`.
+- DocuSeal public URL is kept in sync by `sync-docuseal-public-url.sh`.
+
+## 5) Runbook
+
+From repo root:
+
+```bash
+make up
+make ps
+curl -sS http://127.0.0.1:8080/healthz
+```
+
+From `grievance-mvp/`:
+
+```bash
+docker compose --env-file .env up -d --build
+```
+
+Sync DocuSeal public URL:
+
+```bash
+cd grievance-mvp
+./sync-docuseal-public-url.sh
+```
+
+## 6) Smoke tests
+
+Local end-to-end smoke (intake -> docs -> approval -> docuseal local/external checks):
+
+```bash
+cd grievance-mvp
+./scripts/smoke-e2e.sh
+```
+
+Signed-intake smoke (requires real DocuSeal API token + template with signer fields):
+
+```bash
+cd grievance-mvp
+./scripts/smoke-signed-intake.sh
+```
+
+What the script validates:
+- compose config + service startup
+- API health
+- intake with multiple documents
+- case status retrieval
+- Derek approval endpoint
+- DocuSeal local proxy HTTP reachability
+- external HTTPS DocuSeal host reachability
+
+Download-link checks (manual):
+
+```bash
+cd grievance-mvp
+# sample slug discovery
+docker compose --env-file .env exec -T docuseal_db \
+  psql -U ${DOCUSEAL_DB_USER} -d ${DOCUSEAL_DB_NAME} -Atc \
+  "SELECT slug FROM submitters ORDER BY id DESC LIMIT 5;"
+
+# external test (requires valid completed submitter slug/signature context)
+curl -I https://${DOCUSEAL_HOST}/s/<slug>/download
+
+# local proxy with host header
+curl -I -H "Host: ${DOCUSEAL_HOST}" http://127.0.0.1:${DOCUSEAL_PORT}/s/<slug>/download
+```
+
+Automated helper for completed slugs:
+
+```bash
+cd grievance-mvp
+./scripts/verify-docuseal-download.sh
+```
+
+## 7) Microsoft Graph requirements
+
+Mail (app-owned delivery):
+- `Mail.Send`
+- `Mail.ReadWrite` (used to create draft and record message id)
+
+SharePoint:
+- Prefer `Sites.Selected` with site-scoped grants
+- Document library must be reachable by configured site + library name
+
+Least privilege:
+- Restrict mailbox scope with Exchange application access policy to the authorized sender mailbox.
+
+## 8) Security notes
+
+- Do not commit secrets.
+- Keep secrets in:
+  - `grievance-mvp/.env`
+  - `grievance-mvp/config/config.yaml`
+  - `grievance-mvp/config/graph_cert.pem`
+- App logs metadata only (case/document ids, status, message ids), not document contents.
+
+## 9) Key API endpoints
+
+- `GET /healthz`
+- `POST /intake`
+- `GET /cases/{case_id}`
+- `POST /webhook/docuseal`
+- `POST /cases/{case_id}/notifications/resend`
+- `GET /cases/{case_id}/approval`
+- `POST /cases/{case_id}/approval`

@@ -61,18 +61,18 @@ log "Starting cloudflared service"
 docker compose up -d cloudflared >/dev/null
 
 sleep 2
-if ! docker ps --format '{{.Names}}' | grep -Fxq 'cloudflared'; then
+if ! docker compose ps --services --status running | grep -Fxq 'cloudflared'; then
   log "Recent cloudflared logs:"
-  docker logs --tail 120 cloudflared 2>&1 || true
+  docker compose logs --tail 120 cloudflared 2>&1 || true
   fail "cloudflared container is not running"
 fi
 
 TMP_LOG="$(mktemp)"
 trap 'rm -f "$TMP_LOG"' EXIT
 
-docker logs --tail 200 cloudflared >"$TMP_LOG" 2>&1 || true
+docker compose logs --tail 200 cloudflared >"$TMP_LOG" 2>&1 || true
 # Wait briefly for connection events after startup/restart.
-timeout 20s docker logs -f --since 2s cloudflared >>"$TMP_LOG" 2>&1 || true
+timeout 20s docker compose logs -f --since 2s cloudflared >>"$TMP_LOG" 2>&1 || true
 
 TUNNEL_STATUS="starting"
 if grep -Eqi '(registered tunnel connection|connection .* registered|initial protocol h2mux|connected to edge)' "$TMP_LOG"; then

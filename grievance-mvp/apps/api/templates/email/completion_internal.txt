@@ -1,0 +1,12 @@
+A grievance document completed signing.
+
+Case ID: $case_id
+Document ID: $document_id
+Document Type: $document_type
+Status: $status
+
+DocuSeal record:
+$docuseal_signing_url
+
+Document link:
+$document_link

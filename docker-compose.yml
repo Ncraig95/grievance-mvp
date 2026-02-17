@@ -7,15 +7,15 @@ networks:
 services:
   api:
     build:
-      context: ./apps/api
+      context: ./grievance-mvp/apps/api
     restart: unless-stopped
     env_file:
-      - ./.env
+      - ./grievance-mvp/.env
     environment:
       - TZ=UTC
     volumes:
-      - ./config:/app/config:ro
-      - ./data:/data
+      - ./grievance-mvp/config:/app/config:ro
+      - ./grievance-mvp/data:/data
     networks:
       - grievance-net
     ports:
@@ -25,7 +25,7 @@ services:
     image: postgres:16
     restart: unless-stopped
     env_file:
-      - ./.env
+      - ./grievance-mvp/.env
     environment:
       POSTGRES_USER: ${DOCUSEAL_DB_USER:-docuseal}
       POSTGRES_PASSWORD: ${DOCUSEAL_DB_PASSWORD:-docuseal}
@@ -48,7 +48,7 @@ services:
       docuseal_db:
         condition: service_healthy
     env_file:
-      - ./.env
+      - ./grievance-mvp/.env
     environment:
       - TZ=UTC
       - DATABASE_URL=postgresql://${DOCUSEAL_DB_USER:-docuseal}:${DOCUSEAL_DB_PASSWORD:-docuseal}@docuseal_db:5432/${DOCUSEAL_DB_NAME:-docuseal}
@@ -59,7 +59,7 @@ services:
       - ADMIN_USERNAME=${DOCUSEAL_ADMIN_EMAIL:-admin@example.org}
       - ADMIN_PASSWORD=${DOCUSEAL_ADMIN_PASSWORD:-CHANGE_ME_please}
     volumes:
-      - ./data/docuseal:/data
+      - ./grievance-mvp/data/docuseal:/data
     networks:
       - grievance-net
 
@@ -69,7 +69,7 @@ services:
     depends_on:
       - docuseal
     volumes:
-      - ./nginx/docuseal.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./grievance-mvp/nginx/docuseal.conf:/etc/nginx/conf.d/default.conf:ro
     networks:
       - grievance-net
     ports:

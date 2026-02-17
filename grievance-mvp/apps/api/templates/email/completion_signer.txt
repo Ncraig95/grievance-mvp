@@ -1,0 +1,14 @@
+Signature workflow completed.
+
+Case ID: $case_id
+Document ID: $document_id
+Document Type: $document_type
+
+DocuSeal record:
+$docuseal_signing_url
+
+Document link:
+$document_link
+
+Copy link (if allowed):
+$copy_link

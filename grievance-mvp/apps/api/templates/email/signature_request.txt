@@ -1,0 +1,8 @@
+A signature is required for grievance $grievance_id.
+
+Case ID: $case_id
+Document ID: $document_id
+Document Type: $document_type
+
+Open signing link:
+$docuseal_signing_url

@@ -1,15 +1,40 @@
+ENV_FILE := .env
+COMPOSE := docker compose --env-file $(ENV_FILE)
 
-.PHONY: up down logs ps
+.PHONY: up down restart ps logs config pull cloudflare sync-docuseal-url smoke smoke-signed verify-download
 
 up:
-	docker compose -f docker-compose.yml up -d
+	$(COMPOSE) up -d --build
 
 down:
-	docker compose -f docker-compose.yml down
+	$(COMPOSE) down
 
-logs:
-	docker compose -f docker-compose.yml logs -f
+restart:
+	$(COMPOSE) up -d --build --force-recreate
 
 ps:
-	docker compose -f docker-compose.yml ps
+	$(COMPOSE) ps
 
+logs:
+	$(COMPOSE) logs -f --tail=200
+
+config:
+	$(COMPOSE) config
+
+pull:
+	$(COMPOSE) pull
+
+cloudflare:
+	./bring-cloudflare-live.sh
+
+sync-docuseal-url:
+	./sync-docuseal-public-url.sh
+
+smoke:
+	./scripts/smoke-e2e.sh
+
+smoke-signed:
+	./scripts/smoke-signed-intake.sh
+
+verify-download:
+	./scripts/verify-docuseal-download.sh

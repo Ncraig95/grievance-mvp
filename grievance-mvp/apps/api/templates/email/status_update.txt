@@ -1,0 +1,11 @@
+Case status update.
+
+Case ID: $case_id
+Grievance ID: $grievance_id
+Status: $status
+
+Approval link:
+$approval_url
+
+Document link:
+$document_link

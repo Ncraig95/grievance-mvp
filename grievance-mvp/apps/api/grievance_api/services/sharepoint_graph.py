@@ -2,9 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 import msal
 import requests
+
+
+@dataclass(frozen=True)
+class CaseFolderRef:
+    drive_id: str
+    folder_id: str
+    folder_name: str
+    web_url: str | None
 
 
 @dataclass(frozen=True)
@@ -12,18 +21,31 @@ class UploadedFileRef:
     drive_id: str
     item_id: str
     web_url: str | None
+    path: str
 
 
 class GraphUploader:
-    """Minimal Graph app-only auth using a certificate PEM."""
+    """Graph app-only client with SharePoint case-folder helpers."""
 
-    def __init__(self, tenant_id: str, client_id: str, cert_thumbprint: str, cert_pem_path: str):
+    def __init__(
+        self,
+        tenant_id: str,
+        client_id: str,
+        cert_thumbprint: str,
+        cert_pem_path: str,
+        timeout_seconds: int = 30,
+        dry_run: bool = False,
+    ):
         self.tenant_id = tenant_id
         self.client_id = client_id
         self.cert_thumbprint = cert_thumbprint
         self.cert_pem_path = cert_pem_path
+        self.timeout_seconds = timeout_seconds
+        self.dry_run = dry_run
         self._authority = f"https://login.microsoftonline.com/{tenant_id}"
         self._app: msal.ConfidentialClientApplication | None = None
+        self._site_cache: dict[str, str] = {}
+        self._drive_cache: dict[tuple[str, str, str], str] = {}
 
     def _load_cert_credential(self) -> dict:
         pem = Path(self.cert_pem_path).read_text(encoding="utf-8")
@@ -42,52 +64,186 @@ class GraphUploader:
             err = result.get("error")
             desc = result.get("error_description")
             raise RuntimeError(f"Graph token failure: {err} {desc}")
-        return result["access_token"]
+        return str(result["access_token"])
 
-    def _put_bytes(self, url: str, token: str, data: bytes) -> dict:
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/octet-stream"}
-        last_err = None
-        for _ in range(3):
-            r = requests.put(url, headers=headers, data=data, timeout=60)
-            if 200 <= r.status_code < 300:
+    def _request(self, method: str, endpoint: str, *, payload: dict | None = None, data: bytes | None = None) -> dict:
+        if self.dry_run:
+            return {}
+        r = requests.request(
+            method=method,
+            url=f"https://graph.microsoft.com/v1.0{endpoint}",
+            headers={
+                "Authorization": f"Bearer {self.token()}",
+                "Content-Type": "application/json" if data is None else "application/octet-stream",
+            },
+            json=payload if data is None else None,
+            data=data,
+            timeout=self.timeout_seconds,
+        )
+        if 200 <= r.status_code < 300:
+            if r.content:
                 return r.json()
-            last_err = f"{r.status_code} {r.text}"
-        raise RuntimeError(f"Graph upload failed after retries: {last_err}")
+            return {}
+        raise RuntimeError(f"Graph request failed ({method} {endpoint}): {r.status_code} {r.text[:500]}")
 
-    def upload_to_sharepoint_path(
+    @staticmethod
+    def _encode_path(path: str) -> str:
+        return "/".join(quote(part, safe="") for part in path.strip("/").split("/") if part)
+
+    def _site_id(self, site_hostname: str, site_path: str) -> str:
+        cache_key = f"{site_hostname}:{site_path}"
+        if cache_key in self._site_cache:
+            return self._site_cache[cache_key]
+        if self.dry_run:
+            site_id = "dryrun-site"
+        else:
+            site = self._request("GET", f"/sites/{site_hostname}:{site_path}")
+            site_id = str(site["id"])
+        self._site_cache[cache_key] = site_id
+        return site_id
+
+    def _drive_id(self, site_hostname: str, site_path: str, library: str) -> str:
+        cache_key = (site_hostname, site_path, library)
+        if cache_key in self._drive_cache:
+            return self._drive_cache[cache_key]
+        if self.dry_run:
+            drive_id = "dryrun-drive"
+        else:
+            site_id = self._site_id(site_hostname, site_path)
+            drives = self._request("GET", f"/sites/{site_id}/drives")
+            drive_id = ""
+            for d in drives.get("value", []):
+                if d.get("name") == library:
+                    drive_id = str(d["id"])
+                    break
+            if not drive_id:
+                raise RuntimeError(f"Could not find document library drive named '{library}'")
+        self._drive_cache[cache_key] = drive_id
+        return drive_id
+
+    def _root_folder_id(self, drive_id: str) -> str:
+        if self.dry_run:
+            return "dryrun-root"
+        root = self._request("GET", f"/drives/{drive_id}/root")
+        return str(root["id"])
+
+    def _list_children(self, drive_id: str, folder_id: str) -> list[dict]:
+        if self.dry_run:
+            return []
+        children = self._request("GET", f"/drives/{drive_id}/items/{folder_id}/children?$top=200")
+        return list(children.get("value", []))
+
+    def _find_child_folder(self, drive_id: str, folder_id: str, name: str) -> dict | None:
+        wanted = name.strip().lower()
+        for child in self._list_children(drive_id, folder_id):
+            if not isinstance(child, dict):
+                continue
+            if "folder" not in child:
+                continue
+            if str(child.get("name", "")).strip().lower() == wanted:
+                return child
+        return None
+
+    def _create_child_folder(self, drive_id: str, folder_id: str, name: str) -> dict:
+        if self.dry_run:
+            return {"id": f"dryrun-{name}", "name": name, "webUrl": f"https://dryrun/{name}"}
+        return self._request(
+            "POST",
+            f"/drives/{drive_id}/items/{folder_id}/children",
+            payload={
+                "name": name,
+                "folder": {},
+                "@microsoft.graph.conflictBehavior": "rename",
+            },
+        )
+
+    def _ensure_folder_chain(self, drive_id: str, folder_path: str) -> tuple[str, str]:
+        folder_id = self._root_folder_id(drive_id)
+        current_path_parts: list[str] = []
+        for part in [p for p in folder_path.strip("/").split("/") if p]:
+            current_path_parts.append(part)
+            existing = self._find_child_folder(drive_id, folder_id, part)
+            if existing is None:
+                existing = self._create_child_folder(drive_id, folder_id, part)
+            folder_id = str(existing["id"])
+        return folder_id, "/".join(current_path_parts)
+
+    def ensure_case_folder(
         self,
         *,
         site_hostname: str,
         site_path: str,
         library: str,
-        folder_path: str,
+        case_parent_folder: str,
+        grievance_id: str,
+        member_name: str,
+    ) -> CaseFolderRef:
+        drive_id = self._drive_id(site_hostname, site_path, library)
+        parent_id, parent_path = self._ensure_folder_chain(drive_id, case_parent_folder)
+
+        selected: dict | None = None
+        wanted_token = grievance_id.lower().strip()
+        for child in self._list_children(drive_id, parent_id):
+            if "folder" not in child:
+                continue
+            name = str(child.get("name", ""))
+            if wanted_token and wanted_token in name.lower():
+                selected = child
+                break
+
+        if selected is None:
+            desired_name = f"{grievance_id} {member_name}".strip()
+            selected = self._create_child_folder(drive_id, parent_id, desired_name)
+
+        folder_name = str(selected.get("name", ""))
+        folder_path = "/".join(part for part in [parent_path, folder_name] if part)
+        return CaseFolderRef(
+            drive_id=drive_id,
+            folder_id=str(selected["id"]),
+            folder_name=folder_name,
+            web_url=selected.get("webUrl"),
+        )
+
+    def upload_to_case_subfolder(
+        self,
+        *,
+        site_hostname: str,
+        site_path: str,
+        library: str,
+        case_folder_name: str,
+        case_parent_folder: str,
+        subfolder: str,
         filename: str,
         file_bytes: bytes,
     ) -> UploadedFileRef:
-        token = self.token()
+        drive_id = self._drive_id(site_hostname, site_path, library)
+        full_folder = "/".join(
+            part.strip("/")
+            for part in (case_parent_folder, case_folder_name, subfolder)
+            if part and part.strip("/")
+        )
+        _, normalized_folder = self._ensure_folder_chain(drive_id, full_folder)
 
-        site_url = f"https://graph.microsoft.com/v1.0/sites/{site_hostname}:{site_path}"
-        site = requests.get(site_url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
-        site.raise_for_status()
-        site_id = site.json()["id"]
+        normalized_path = "/".join(
+            part for part in [self._encode_path(normalized_folder), quote(filename, safe="")] if part
+        )
 
-        drives_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives"
-        drives = requests.get(drives_url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
-        drives.raise_for_status()
+        if self.dry_run:
+            return UploadedFileRef(
+                drive_id=drive_id,
+                item_id=f"dryrun-{filename}",
+                web_url=f"https://dryrun/{normalized_path}",
+                path=normalized_path,
+            )
 
-        drive_id = None
-        for d in drives.json().get("value", []):
-            if d.get("name") == library:
-                drive_id = d["id"]
-                break
-        if not drive_id:
-            raise RuntimeError("Could not find document library drive by name")
-
-        safe_folder = folder_path.strip("/")
-        put_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{safe_folder}/{filename}:/content"
-        put_result = self._put_bytes(put_url, token, file_bytes)
+        put = self._request(
+            "PUT",
+            f"/drives/{drive_id}/root:/{normalized_path}:/content",
+            data=file_bytes,
+        )
         return UploadedFileRef(
             drive_id=drive_id,
-            item_id=str(put_result.get("id", "")),
-            web_url=put_result.get("webUrl"),
+            item_id=str(put.get("id", "")),
+            web_url=put.get("webUrl"),
+            path=normalized_path,
         )

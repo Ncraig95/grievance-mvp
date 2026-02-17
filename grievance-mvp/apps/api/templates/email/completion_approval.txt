@@ -1,0 +1,11 @@
+A document is ready for approval.
+
+Case ID: $case_id
+Document ID: $document_id
+Document Type: $document_type
+
+Approval link:
+$approval_url
+
+Document link:
+$document_link

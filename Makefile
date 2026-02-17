@@ -1,9 +1,7 @@
-PROJECT_DIR := grievance-mvp
-COMPOSE_FILE := $(PROJECT_DIR)/docker-compose.yml
-ENV_FILE := $(PROJECT_DIR)/.env
-COMPOSE := docker compose -f "$(COMPOSE_FILE)" --env-file "$(ENV_FILE)"
+ENV_FILE := grievance-mvp/.env
+COMPOSE := docker compose --env-file $(ENV_FILE)
 
-.PHONY: up down restart ps logs config pull cloudflare sync-docuseal-url
+.PHONY: up down restart ps logs config pull cloudflare sync-docuseal-url smoke smoke-signed verify-download
 
 up:
 	$(COMPOSE) up -d --build
@@ -27,8 +25,16 @@ pull:
 	$(COMPOSE) pull
 
 cloudflare:
-	./$(PROJECT_DIR)/bring-cloudflare-live.sh
+	./grievance-mvp/bring-cloudflare-live.sh
 
 sync-docuseal-url:
-	./$(PROJECT_DIR)/sync-docuseal-public-url.sh
+	./grievance-mvp/sync-docuseal-public-url.sh
 
+smoke:
+	./grievance-mvp/scripts/smoke-e2e.sh
+
+smoke-signed:
+	./grievance-mvp/scripts/smoke-signed-intake.sh
+
+verify-download:
+	./grievance-mvp/scripts/verify-docuseal-download.sh

@@ -1,0 +1,8 @@
+This is a reminder that signature is still required.
+
+Case ID: $case_id
+Document ID: $document_id
+Document Type: $document_type
+
+Signing link:
+$docuseal_signing_url

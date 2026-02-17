@@ -1,0 +1,262 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, Request
+
+from ..db.db import Db, utcnow
+from ..services.notification_service import NotificationService
+from .models import ApprovalDecisionRequest, ApprovalDecisionResponse
+
+router = APIRouter()
+
+
+@router.get("/cases/{case_id}/approval", response_model=ApprovalDecisionResponse)
+async def get_approval_status(case_id: str, request: Request):
+    db: Db = request.app.state.db
+    row = await db.fetchone(
+        "SELECT status, approval_status, grievance_number FROM cases WHERE id=?",
+        (case_id,),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="case_id not found")
+    return ApprovalDecisionResponse(
+        case_id=case_id,
+        status=row[0],
+        approval_status=row[1],
+        grievance_number=row[2],
+    )
+
+
+@router.post("/cases/{case_id}/approval", response_model=ApprovalDecisionResponse)
+async def decide_approval(case_id: str, body: ApprovalDecisionRequest, request: Request):
+    db: Db = request.app.state.db
+    cfg = request.app.state.cfg
+    graph = request.app.state.graph
+    logger = request.app.state.logger
+    notifications: NotificationService = request.app.state.notifications
+
+    case_row = await db.fetchone(
+        "SELECT grievance_id, status, approval_status, member_name, member_email FROM cases WHERE id=?",
+        (case_id,),
+    )
+    if not case_row:
+        raise HTTPException(status_code=404, detail="case_id not found")
+
+    grievance_id, current_status, _approval_status, member_name, member_email = case_row
+
+    if cfg.email.derek_email and body.approver_email.strip().lower() != cfg.email.derek_email.lower():
+        raise HTTPException(status_code=403, detail="Only configured approver may approve this case")
+
+    if body.approve:
+        new_case_status = "approved"
+        new_approval_status = "approved"
+        await db.exec(
+            """UPDATE cases
+               SET status=?, approval_status=?, approver_email=?, approved_at_utc=?, approval_notes=?, grievance_number=?
+               WHERE id=?""",
+            (
+                new_case_status,
+                new_approval_status,
+                body.approver_email,
+                utcnow(),
+                body.notes,
+                body.grievance_number,
+                case_id,
+            ),
+        )
+        await db.exec(
+            """UPDATE documents
+               SET status='approved'
+               WHERE case_id=?
+                 AND status IN ('signed', 'pending_approval', 'created')""",
+            (case_id,),
+        )
+        await db.add_event(
+            case_id,
+            None,
+            "case_approved",
+            {
+                "approver_email": body.approver_email,
+                "grievance_number": body.grievance_number,
+            },
+        )
+
+        if cfg.graph.site_hostname and cfg.graph.site_path and cfg.graph.document_library:
+            try:
+                case_folder = graph.ensure_case_folder(
+                    site_hostname=cfg.graph.site_hostname,
+                    site_path=cfg.graph.site_path,
+                    library=cfg.graph.document_library,
+                    case_parent_folder=cfg.graph.case_parent_folder,
+                    grievance_id=grievance_id,
+                    member_name=member_name,
+                )
+                await db.exec(
+                    "UPDATE cases SET sharepoint_case_folder=?, sharepoint_case_web_url=? WHERE id=?",
+                    (case_folder.folder_name, case_folder.web_url, case_id),
+                )
+
+                docs = await db.fetchall(
+                    """SELECT id, doc_type, pdf_path, signed_pdf_path, audit_zip_path,
+                              sharepoint_generated_url, sharepoint_signed_url, sharepoint_audit_url
+                       FROM documents
+                       WHERE case_id=?""",
+                    (case_id,),
+                )
+
+                uploaded_docs = 0
+                for row in docs:
+                    (
+                        document_id,
+                        doc_type,
+                        pdf_path,
+                        signed_pdf_path,
+                        audit_zip_path,
+                        sp_generated,
+                        sp_signed,
+                        sp_audit,
+                    ) = row
+                    new_generated = sp_generated
+                    new_signed = sp_signed
+                    new_audit = sp_audit
+
+                    if pdf_path and Path(pdf_path).exists() and not sp_generated:
+                        uploaded_generated = graph.upload_to_case_subfolder(
+                            site_hostname=cfg.graph.site_hostname,
+                            site_path=cfg.graph.site_path,
+                            library=cfg.graph.document_library,
+                            case_folder_name=case_folder.folder_name,
+                            case_parent_folder=cfg.graph.case_parent_folder,
+                            subfolder=cfg.graph.generated_subfolder,
+                            filename=f"{doc_type}.pdf",
+                            file_bytes=Path(pdf_path).read_bytes(),
+                        )
+                        new_generated = uploaded_generated.web_url
+
+                    if signed_pdf_path and Path(signed_pdf_path).exists() and not sp_signed:
+                        uploaded_signed = graph.upload_to_case_subfolder(
+                            site_hostname=cfg.graph.site_hostname,
+                            site_path=cfg.graph.site_path,
+                            library=cfg.graph.document_library,
+                            case_folder_name=case_folder.folder_name,
+                            case_parent_folder=cfg.graph.case_parent_folder,
+                            subfolder=cfg.graph.signed_subfolder,
+                            filename=f"{doc_type}_signed.pdf",
+                            file_bytes=Path(signed_pdf_path).read_bytes(),
+                        )
+                        new_signed = uploaded_signed.web_url
+
+                    if audit_zip_path and Path(audit_zip_path).exists() and not sp_audit:
+                        uploaded_audit = graph.upload_to_case_subfolder(
+                            site_hostname=cfg.graph.site_hostname,
+                            site_path=cfg.graph.site_path,
+                            library=cfg.graph.document_library,
+                            case_folder_name=case_folder.folder_name,
+                            case_parent_folder=cfg.graph.case_parent_folder,
+                            subfolder=cfg.graph.audit_subfolder,
+                            filename=f"{doc_type}_audit.zip",
+                            file_bytes=Path(audit_zip_path).read_bytes(),
+                        )
+                        new_audit = uploaded_audit.web_url
+
+                    status_value = "uploaded" if new_generated else "approved"
+                    if (new_generated != sp_generated) or (new_signed != sp_signed) or (new_audit != sp_audit):
+                        uploaded_docs += 1
+                        await db.exec(
+                            """UPDATE documents
+                               SET sharepoint_generated_url=?, sharepoint_signed_url=?, sharepoint_audit_url=?, status=?
+                               WHERE id=?""",
+                            (new_generated, new_signed, new_audit, status_value, document_id),
+                        )
+
+                await db.add_event(
+                    case_id,
+                    None,
+                    "approval_sharepoint_sync_completed",
+                    {
+                        "uploaded_document_count": uploaded_docs,
+                        "case_folder": case_folder.folder_name,
+                    },
+                )
+            except Exception as exc:
+                logger.exception("approval_sharepoint_sync_failed", extra={"correlation_id": case_id})
+                await db.add_event(
+                    case_id,
+                    None,
+                    "approval_sharepoint_sync_failed",
+                    {"error": str(exc)},
+                )
+    else:
+        new_case_status = "rejected"
+        new_approval_status = "rejected"
+        await db.exec(
+            """UPDATE cases
+               SET status=?, approval_status=?, approver_email=?, approved_at_utc=?, approval_notes=?
+               WHERE id=?""",
+            (
+                new_case_status,
+                new_approval_status,
+                body.approver_email,
+                utcnow(),
+                body.notes,
+                case_id,
+            ),
+        )
+        await db.exec(
+            "UPDATE documents SET status='failed' WHERE case_id=? AND status NOT IN ('uploaded')",
+            (case_id,),
+        )
+        await db.add_event(
+            case_id,
+            None,
+            "case_rejected",
+            {
+                "approver_email": body.approver_email,
+                "notes": body.notes,
+            },
+        )
+
+    if cfg.email.enabled:
+        recipients = [*cfg.email.internal_recipients]
+        if member_email:
+            recipients.append(member_email)
+        if cfg.email.derek_email:
+            recipients.append(cfg.email.derek_email)
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for recipient in recipients:
+            lowered = recipient.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            deduped.append(recipient)
+
+        for recipient in deduped:
+            try:
+                await notifications.send_one(
+                    case_id=case_id,
+                    template_key="status_update",
+                    recipient_email=recipient,
+                    context={
+                        "case_id": case_id,
+                        "grievance_id": grievance_id,
+                        "status": new_case_status,
+                        "document_type": "case",
+                        "docuseal_signing_url": "",
+                        "document_link": "",
+                        "approval_url": f"{(cfg.email.approval_request_url_base or '').rstrip('/')}/{case_id}",
+                    },
+                    idempotency_key=f"approval:{case_id}:{new_case_status}:{recipient.lower()}",
+                )
+            except Exception:
+                logger.exception("approval_status_update_email_failed", extra={"correlation_id": case_id})
+                await db.add_event(case_id, None, "approval_status_update_email_failed", {"recipient": recipient})
+
+    return ApprovalDecisionResponse(
+        case_id=case_id,
+        status=new_case_status,
+        approval_status=new_approval_status,
+        grievance_number=body.grievance_number,
+    )
