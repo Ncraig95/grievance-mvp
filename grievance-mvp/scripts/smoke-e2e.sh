@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 API_PORT="${API_PORT:-8080}"
 DOCUSEAL_HOST="${DOCUSEAL_HOST:-docuseal.cwa3106.org}"
 DOCUSEAL_PROTOCOL="${DOCUSEAL_PROTOCOL:-https}"
+APPROVER_EMAIL="${APPROVER_EMAIL:-derek@REPLACE.org}"
 
 log() {
   printf '%s\n' "$*"
@@ -37,12 +38,10 @@ for i in {1..40}; do
 done
 
 REQUEST_ID="smoke-$(date +%s)"
-GRIEVANCE_ID="2026001"
 
 PAYLOAD="$(cat <<JSON
 {
   "request_id": "${REQUEST_ID}",
-  "grievance_id": "${GRIEVANCE_ID}",
   "contract": "AT&T",
   "grievant_firstname": "John",
   "grievant_lastname": "Doe",
@@ -66,7 +65,7 @@ log "[smoke] case status"
 curl -fsS "http://127.0.0.1:${API_PORT}/cases/${CASE_ID}" | sed 's/.*/[smoke] case -> &/'
 
 log "[smoke] approval request"
-APPROVAL_PAYLOAD='{"approver_email":"derek@REPLACE.org","approve":true,"grievance_number":"2026001","notes":"smoke approval"}'
+APPROVAL_PAYLOAD="{\"approver_email\":\"${APPROVER_EMAIL}\",\"approve\":true,\"grievance_number\":\"2026001\",\"notes\":\"smoke approval\"}"
 curl -fsS -X POST "http://127.0.0.1:${API_PORT}/cases/${CASE_ID}/approval" -H "Content-Type: application/json" -d "$APPROVAL_PAYLOAD" | sed 's/.*/[smoke] approval -> &/'
 
 log "[smoke] local docuseal proxy check"

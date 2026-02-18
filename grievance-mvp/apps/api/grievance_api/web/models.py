@@ -14,7 +14,7 @@ class IntakeRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     request_id: str = Field(..., description="Client-generated idempotency key")
-    grievance_id: str = Field(..., description="External grievance identifier such as 2026001")
+    grievance_id: str | None = Field(default=None, description="External grievance identifier such as 2026001")
     grievance_number: str | None = None
     contract: str = Field(..., description="AT&T or COJ (or other)")
     grievant_firstname: str

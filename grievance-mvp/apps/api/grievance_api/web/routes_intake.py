@@ -12,6 +12,7 @@ from ..core.hmac_auth import verify_hmac
 from ..core.ids import new_case_id, new_document_id, normalize_grievance_id
 from ..db.db import Db, utcnow
 from ..services.doc_render import render_docx
+from ..services.grievance_id_allocator import GrievanceIdAllocationError, GrievanceIdAllocator
 from ..services.notification_service import NotificationService
 from ..services.pdf_convert import docx_to_pdf
 from ..services.signature_workflow import normalize_signers, send_document_for_signature
@@ -68,6 +69,19 @@ def _coerce_context_value(value: object) -> object:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _validate_grievance_input_mode(grievance_mode: str, incoming_grievance_id: str) -> None:
+    if grievance_mode == "auto" and incoming_grievance_id:
+        raise HTTPException(
+            status_code=400,
+            detail="grievance_id must be omitted when grievance_id.mode=auto",
+        )
+    if grievance_mode == "manual" and not incoming_grievance_id:
+        raise HTTPException(
+            status_code=400,
+            detail="grievance_id is required when grievance_id.mode=manual",
+        )
+
+
 def _build_template_context(
     *,
     payload: IntakeRequest,
@@ -89,10 +103,12 @@ def _build_template_context(
         "document_type": doc_type,
         "created_at_utc": utcnow(),
     }
+    protected_keys = set(context.keys())
 
     for key, raw_val in merged_fields.items():
         value = _coerce_context_value(raw_val)
-        context[key] = value
+        if key not in protected_keys:
+            context[key] = value
 
         normalized = _normalize_field_key(key)
         if normalized and normalized not in context:
@@ -176,19 +192,47 @@ async def intake(request: Request):
             ],
         )
 
-    grievance_id = normalize_grievance_id(payload.grievance_id) or payload.grievance_id
     grievance_number = (payload.grievance_number or "").strip() or None
     case_id = new_case_id()
     cdir = Path(cfg.data_root) / case_id
     cdir.mkdir(parents=True, exist_ok=True)
 
     member_name = f"{payload.grievant_firstname} {payload.grievant_lastname}".strip()
+    incoming_grievance_id = (payload.grievance_id or "").strip()
+    grievance_mode = cfg.grievance_id.mode
+
+    _validate_grievance_input_mode(grievance_mode, incoming_grievance_id)
+
+    sharepoint_case_folder: str | None = None
+    sharepoint_case_web_url: str | None = None
+    if grievance_mode == "manual":
+        grievance_id = normalize_grievance_id(incoming_grievance_id) or incoming_grievance_id
+    else:
+        allocator = GrievanceIdAllocator(
+            cfg=cfg,
+            db=db,
+            graph=request.app.state.graph,
+            logger=logger,
+        )
+        try:
+            allocation = await allocator.allocate_and_reserve_folder(
+                member_name=member_name,
+                correlation_id=correlation_id,
+            )
+        except GrievanceIdAllocationError as exc:
+            logger.exception("grievance_id_allocation_failed", extra={"correlation_id": correlation_id})
+            raise HTTPException(status_code=503, detail="unable to allocate grievance_id") from exc
+        grievance_id = allocation.grievance_id
+        sharepoint_case_folder = allocation.case_folder_name
+        sharepoint_case_web_url = allocation.case_folder_web_url
+
     try:
         await db.exec(
             """INSERT INTO cases(
                  id, grievance_id, created_at_utc, status, approval_status,
-                 grievance_number, member_name, member_email, intake_request_id, intake_payload_json
-               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                 grievance_number, member_name, member_email, intake_request_id, intake_payload_json,
+                 sharepoint_case_folder, sharepoint_case_web_url
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 case_id,
                 grievance_id,
@@ -200,6 +244,8 @@ async def intake(request: Request):
                 payload.grievant_email,
                 payload.request_id,
                 payload.model_dump_json(),
+                sharepoint_case_folder,
+                sharepoint_case_web_url,
             ),
         )
     except Exception as exc:
@@ -232,6 +278,8 @@ async def intake(request: Request):
             "request_id": payload.request_id,
             "grievance_id": grievance_id,
             "grievance_number": grievance_number,
+            "grievance_id_mode": grievance_mode,
+            "sharepoint_case_folder": sharepoint_case_folder,
         },
     )
 

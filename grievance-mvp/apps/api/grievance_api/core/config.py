@@ -47,6 +47,14 @@ class EmailConfig:
 
 
 @dataclass(frozen=True)
+class GrievanceIdConfig:
+    mode: str
+    timezone: str
+    min_width: int
+    separator: str
+
+
+@dataclass(frozen=True)
 class AppConfig:
     hmac_shared_secret: str
     db_path: str
@@ -57,6 +65,7 @@ class AppConfig:
     graph: GraphConfig
     docuseal: DocuSealConfig
     email: EmailConfig
+    grievance_id: GrievanceIdConfig
 
 
 def _as_recipients(value: object) -> tuple[str, ...]:
@@ -103,11 +112,25 @@ def _normalize_delivery_mode(value: object) -> str:
     return mode
 
 
+def _normalize_grievance_mode(value: object) -> str:
+    mode = str(value or "auto").strip().lower()
+    if mode not in {"auto", "manual"}:
+        return "auto"
+    return mode
+
+
+def _normalize_grievance_separator(value: object) -> str:
+    # Current policy is no separator in produced IDs (YYYY + sequence).
+    _ = value
+    return ""
+
+
 def load_config(path: str) -> AppConfig:
     p = Path(path)
     raw = yaml.safe_load(p.read_text(encoding="utf-8"))
     graph_raw = raw.get("graph", {}) or {}
     email_raw = raw.get("email", {}) or {}
+    grievance_raw = raw.get("grievance_id", {}) or {}
 
     sender_user_id = str(email_raw.get("sender_user_id", "")).strip()
 
@@ -155,5 +178,11 @@ def load_config(path: str) -> AppConfig:
             max_attachment_bytes=int(email_raw.get("max_attachment_bytes", 2_000_000)),
             resend_cooldown_seconds=int(email_raw.get("resend_cooldown_seconds", 300)),
             dry_run=bool(email_raw.get("dry_run", False)),
+        ),
+        grievance_id=GrievanceIdConfig(
+            mode=_normalize_grievance_mode(grievance_raw.get("mode")),
+            timezone=str(grievance_raw.get("timezone", "America/New_York")).strip() or "America/New_York",
+            min_width=max(1, int(grievance_raw.get("min_width", 3))),
+            separator=_normalize_grievance_separator(grievance_raw.get("separator")),
         ),
     )

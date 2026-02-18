@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import logging
 import re
 import tempfile
 from pathlib import Path
@@ -13,13 +14,17 @@ from docxtpl import DocxTemplate
 _JINJA_PLACEHOLDER_RE = re.compile(r"{{\s*([^{}]+?)\s*}}")
 _LEFTOVER_PLACEHOLDER_RE = re.compile(r"{{.*?}}", flags=re.DOTALL)
 _XML_TAG_RE = re.compile(r"<[^>]+>")
+_SAFE_JINJA_EXPR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+_LOG = logging.getLogger("grievance_api")
 
 
 def _escape_signature_placeholders(xml_text: str) -> str:
     def _replace(match: re.Match[str]) -> str:
         expr = match.group(1).strip()
         # DocuSeal signature/date tags use ":" and are not valid Jinja variables.
-        if ":" in expr:
+        # Some legacy templates include malformed placeholders that are not valid Jinja;
+        # keep them literal for post-processing replacement instead of failing render.
+        if ":" in expr or not _SAFE_JINJA_EXPR_RE.fullmatch(expr):
             return "{% raw %}" + match.group(0) + "{% endraw %}"
         return match.group(0)
 
@@ -66,7 +71,11 @@ def _replace_leftover_placeholders(xml_text: str, context: dict) -> str:
 
 def _postprocess_rendered_docx(out_path: str, context: dict) -> None:
     source = Path(out_path)
-    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(
+        suffix=".docx",
+        delete=False,
+        dir=str(source.parent),
+    ) as tmp:
         tmp_path = Path(tmp.name)
 
     try:
@@ -93,7 +102,8 @@ def render_docx(template_path: str, context: dict, out_path: str) -> None:
         tpl.save(out_path)
         _postprocess_rendered_docx(out_path, context)
         return
-    except Exception:
+    except Exception as exc:
+        _LOG.exception("docx_render_fallback", extra={"template_path": template_path, "error": str(exc)})
         # Fallback for missing/invalid template files during bootstrap/testing.
         doc = Document()
         doc.add_heading("Grievance Document", level=1)

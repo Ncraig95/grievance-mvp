@@ -46,6 +46,10 @@ class DocuSealClient:
         return rebuilt.geturl()
 
     def _extract_signing_link(self, submission: dict) -> str | None:
+        def _from_slug(slug: str) -> str:
+            base = (self.public_base_url or self.base_url).rstrip("/")
+            return f"{base}/s/{slug.strip('/')}"
+
         for key in ("submitters", "signers"):
             raw = submission.get(key)
             if not isinstance(raw, list):
@@ -57,11 +61,27 @@ class DocuSealClient:
                     val = entry.get(link_key)
                     if isinstance(val, str) and val.strip():
                         return self._rewrite_public_url(val.strip())
+                slug = entry.get("slug")
+                if isinstance(slug, str) and slug.strip():
+                    return self._rewrite_public_url(_from_slug(slug))
         for key in ("url", "signing_url", "submitter_url"):
             val = submission.get(key)
             if isinstance(val, str) and val.strip():
                 return self._rewrite_public_url(val.strip())
+        slug = submission.get("slug")
+        if isinstance(slug, str) and slug.strip():
+            return self._rewrite_public_url(_from_slug(slug))
         return None
+
+    @staticmethod
+    def _first_object(payload: object) -> dict:
+        if isinstance(payload, dict):
+            return payload
+        if isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, dict):
+                    return item
+        return {}
 
     def create_submission(
         self,
@@ -85,7 +105,7 @@ class DocuSealClient:
                 timeout=self.timeout,
             )
             if 200 <= create_template.status_code < 300:
-                template_obj = create_template.json()
+                template_obj = self._first_object(create_template.json())
                 selected_template_id = str(template_obj.get("id") or template_obj.get("template_id") or "")
             elif create_template.status_code == 404:
                 # API template creation may be disabled in some deployments; use an existing template id instead.
@@ -139,7 +159,7 @@ class DocuSealClient:
                 timeout=self.timeout,
             )
             if 200 <= resp.status_code < 300:
-                submission = resp.json()
+                submission = self._first_object(resp.json())
                 break
             last_err = f"{resp.status_code} {resp.text[:400]}"
 

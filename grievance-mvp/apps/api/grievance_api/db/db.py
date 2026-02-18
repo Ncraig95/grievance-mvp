@@ -36,6 +36,31 @@ class Db:
             cur = await con.execute(sql, params)
             return await cur.fetchall()
 
+    async def reserve_next_grievance_seq(self, *, year: int, floor_seq: int) -> int:
+        now = utcnow()
+        floor = max(0, int(floor_seq))
+        async with aiosqlite.connect(self.db_path) as con:
+            await con.execute("BEGIN IMMEDIATE")
+            cur = await con.execute(
+                "SELECT last_seq FROM grievance_id_sequences WHERE year=?",
+                (year,),
+            )
+            row = await cur.fetchone()
+            db_last = int(row[0]) if row else 0
+            next_seq = max(floor, db_last) + 1
+            await con.execute(
+                """
+                INSERT INTO grievance_id_sequences(year, last_seq, updated_at_utc)
+                VALUES(?,?,?)
+                ON CONFLICT(year) DO UPDATE SET
+                  last_seq=excluded.last_seq,
+                  updated_at_utc=excluded.updated_at_utc
+                """,
+                (year, next_seq, now),
+            )
+            await con.commit()
+            return next_seq
+
     async def table_columns(self, table: str) -> set[str]:
         if table in self._table_columns_cache:
             return self._table_columns_cache[table]

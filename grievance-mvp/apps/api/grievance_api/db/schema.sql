@@ -25,6 +25,12 @@ ON cases(intake_request_id);
 CREATE INDEX IF NOT EXISTS idx_cases_grievance_id
 ON cases(grievance_id);
 
+CREATE TABLE IF NOT EXISTS grievance_id_sequences (
+  year INTEGER PRIMARY KEY,
+  last_seq INTEGER NOT NULL,
+  updated_at_utc TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS documents (
   id TEXT PRIMARY KEY,
   case_id TEXT NOT NULL,

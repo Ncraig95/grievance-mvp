@@ -38,6 +38,16 @@ def migrate(db_path: str) -> None:
     try:
         _safe_executescript(con, schema)
 
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS grievance_id_sequences (
+              year INTEGER PRIMARY KEY,
+              last_seq INTEGER NOT NULL,
+              updated_at_utc TEXT NOT NULL
+            )
+            """
+        )
+
         # Backwards-compatible column evolution
         _ensure_column(con, "cases", "grievance_id", "TEXT")
         _ensure_column(con, "cases", "approval_status", "TEXT NOT NULL DEFAULT 'pending'")

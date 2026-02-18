@@ -69,9 +69,12 @@ class GraphUploader:
     def _request(self, method: str, endpoint: str, *, payload: dict | None = None, data: bytes | None = None) -> dict:
         if self.dry_run:
             return {}
+        url = endpoint
+        if not endpoint.startswith("http://") and not endpoint.startswith("https://"):
+            url = f"https://graph.microsoft.com/v1.0{endpoint}"
         r = requests.request(
             method=method,
-            url=f"https://graph.microsoft.com/v1.0{endpoint}",
+            url=url,
             headers={
                 "Authorization": f"Bearer {self.token()}",
                 "Content-Type": "application/json" if data is None else "application/octet-stream",
@@ -130,8 +133,13 @@ class GraphUploader:
     def _list_children(self, drive_id: str, folder_id: str) -> list[dict]:
         if self.dry_run:
             return []
-        children = self._request("GET", f"/drives/{drive_id}/items/{folder_id}/children?$top=200")
-        return list(children.get("value", []))
+        out: list[dict] = []
+        endpoint = f"/drives/{drive_id}/items/{folder_id}/children?$top=200"
+        while endpoint:
+            page = self._request("GET", endpoint)
+            out.extend(page.get("value", []))
+            endpoint = str(page.get("@odata.nextLink", "")).strip()
+        return out
 
     def _find_child_folder(self, drive_id: str, folder_id: str, name: str) -> dict | None:
         wanted = name.strip().lower()
@@ -181,18 +189,29 @@ class GraphUploader:
         drive_id = self._drive_id(site_hostname, site_path, library)
         parent_id, parent_path = self._ensure_folder_chain(drive_id, case_parent_folder)
 
-        selected: dict | None = None
+        desired_name = f"{grievance_id} {member_name}".strip()
+        desired_lower = desired_name.lower()
         wanted_token = grievance_id.lower().strip()
+        exact_match: dict | None = None
+        prefix_match: dict | None = None
+        contains_match: dict | None = None
         for child in self._list_children(drive_id, parent_id):
             if "folder" not in child:
                 continue
             name = str(child.get("name", ""))
-            if wanted_token and wanted_token in name.lower():
-                selected = child
+            lowered = name.lower()
+            if lowered == desired_lower:
+                exact_match = child
                 break
+            if wanted_token and (lowered == wanted_token or lowered.startswith(f"{wanted_token} ")):
+                if prefix_match is None:
+                    prefix_match = child
+                continue
+            if wanted_token and wanted_token in lowered and contains_match is None:
+                contains_match = child
 
+        selected = exact_match or prefix_match or contains_match
         if selected is None:
-            desired_name = f"{grievance_id} {member_name}".strip()
             selected = self._create_child_folder(drive_id, parent_id, desired_name)
 
         folder_name = str(selected.get("name", ""))
@@ -203,6 +222,25 @@ class GraphUploader:
             folder_name=folder_name,
             web_url=selected.get("webUrl"),
         )
+
+    def list_case_folder_names(
+        self,
+        *,
+        site_hostname: str,
+        site_path: str,
+        library: str,
+        case_parent_folder: str,
+    ) -> list[str]:
+        drive_id = self._drive_id(site_hostname, site_path, library)
+        parent_id, _ = self._ensure_folder_chain(drive_id, case_parent_folder)
+        names: list[str] = []
+        for child in self._list_children(drive_id, parent_id):
+            if "folder" not in child:
+                continue
+            name = str(child.get("name", "")).strip()
+            if name:
+                names.append(name)
+        return names
 
     def upload_to_case_subfolder(
         self,
