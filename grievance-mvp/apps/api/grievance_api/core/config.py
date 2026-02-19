@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -60,6 +60,23 @@ class GrievanceIdConfig:
 
 
 @dataclass(frozen=True)
+class IntakeAuthConfig:
+    shared_header_name: str
+    shared_header_value: str
+    cloudflare_access_client_id: str
+    cloudflare_access_client_secret: str
+
+
+def _default_intake_auth() -> IntakeAuthConfig:
+    return IntakeAuthConfig(
+        shared_header_name="X-Intake-Key",
+        shared_header_value="",
+        cloudflare_access_client_id="",
+        cloudflare_access_client_secret="",
+    )
+
+
+@dataclass(frozen=True)
 class AppConfig:
     hmac_shared_secret: str
     db_path: str
@@ -71,6 +88,7 @@ class AppConfig:
     docuseal: DocuSealConfig
     email: EmailConfig
     grievance_id: GrievanceIdConfig
+    intake_auth: IntakeAuthConfig = field(default_factory=_default_intake_auth)
 
 
 def _as_recipients(value: object) -> tuple[str, ...]:
@@ -137,6 +155,7 @@ def load_config(path: str) -> AppConfig:
     graph_raw = raw.get("graph", {}) or {}
     email_raw = raw.get("email", {}) or {}
     grievance_raw = raw.get("grievance_id", {}) or {}
+    intake_auth_raw = raw.get("intake_auth", {}) or {}
 
     sender_user_id = str(email_raw.get("sender_user_id", "")).strip()
 
@@ -212,5 +231,22 @@ def load_config(path: str) -> AppConfig:
             timezone=str(grievance_raw.get("timezone", "America/New_York")).strip() or "America/New_York",
             min_width=max(1, int(grievance_raw.get("min_width", 3))),
             separator=_normalize_grievance_separator(grievance_raw.get("separator")),
+        ),
+        intake_auth=IntakeAuthConfig(
+            shared_header_name=(
+                str(intake_auth_raw.get("shared_header_name", "X-Intake-Key")).strip() or "X-Intake-Key"
+            ),
+            shared_header_value=(
+                str(intake_auth_raw.get("shared_header_value", "")).strip()
+                or os.getenv("INTAKE_SHARED_HEADER_VALUE", "").strip()
+            ),
+            cloudflare_access_client_id=(
+                str(intake_auth_raw.get("cloudflare_access_client_id", "")).strip()
+                or os.getenv("CF_ACCESS_CLIENT_ID", "").strip()
+            ),
+            cloudflare_access_client_secret=(
+                str(intake_auth_raw.get("cloudflare_access_client_secret", "")).strip()
+                or os.getenv("CF_ACCESS_CLIENT_SECRET", "").strip()
+            ),
         ),
     )

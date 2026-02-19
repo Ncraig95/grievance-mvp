@@ -1,4 +1,13 @@
 hmac_shared_secret: REPLACE_WITH_LONG_RANDOM_SECRET
+intake_auth:
+  # Optional additional gate for /intake when HMAC is disabled.
+  # Keep blank to disable this check.
+  shared_header_name: X-Intake-Key
+  shared_header_value: ""
+  # Optional Cloudflare Access service-token verification.
+  # If one value is set, both must be set.
+  cloudflare_access_client_id: ""
+  cloudflare_access_client_secret: ""
 db_path: /data/grievances.sqlite3
 data_root: /data/grievances
 docx_template_path: /app/templates/docx/statement_of_occurrence fixed.docx

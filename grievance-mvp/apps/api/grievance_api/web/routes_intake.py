@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from ..core.hmac_auth import verify_hmac
 from ..core.ids import new_case_id, new_document_id, normalize_grievance_id
+from ..core.intake_auth import verify_intake_request_auth
 from ..db.db import Db, utcnow
 from ..services.case_folder_naming import build_case_folder_member_name
 from ..services.doc_render import render_docx
@@ -494,6 +495,7 @@ async def intake(request: Request):
     graph = request.app.state.graph
     notifications: NotificationService = request.app.state.notifications
 
+    await verify_intake_request_auth(request, cfg.intake_auth)
     body = await verify_hmac(request, cfg.hmac_shared_secret)
     payload = IntakeRequest.model_validate_json(body)
 

@@ -105,6 +105,7 @@ Core tables:
 ### Compose from repo root (supported)
 - File: `docker-compose.yml` (repo root)
 - Uses `grievance-mvp/.env` via `--env-file` in Makefile.
+- Requires `CLOUDFLARE_TUNNEL_TOKEN` to be set when running `cloudflared` service.
 
 ### Compose from `grievance-mvp/` (supported)
 - File: `grievance-mvp/docker-compose.yml`
@@ -112,6 +113,7 @@ Core tables:
 ### DocuSeal HTTPS forwarding
 - `docuseal_proxy` (nginx) forwards Host + `X-Forwarded-*` headers to DocuSeal.
 - Cloudflare tunnel can target `docuseal_proxy`.
+- `cloudflared` runs in host-network mode so tunnel ingress routes pointing to `localhost` / `127.0.0.1` are valid.
 - DocuSeal public URL is kept in sync by `sync-docuseal-public-url.sh`.
 
 ## 5) Runbook
@@ -207,6 +209,31 @@ Least privilege:
   - `grievance-mvp/config/graph_cert.pem`
 - App logs metadata only (case/document ids, status, message ids), not document contents.
 
+### Intake endpoint hardening (works without HMAC)
+
+`POST /intake` supports optional header-based gating via `intake_auth` config:
+
+```yaml
+intake_auth:
+  shared_header_name: X-Intake-Key
+  shared_header_value: ""
+  cloudflare_access_client_id: ""
+  cloudflare_access_client_secret: ""
+```
+
+`shared_header_value`, `cloudflare_access_client_id`, and `cloudflare_access_client_secret` can also be supplied via env vars:
+- `INTAKE_SHARED_HEADER_VALUE`
+- `CF_ACCESS_CLIENT_ID`
+- `CF_ACCESS_CLIENT_SECRET`
+
+Rules:
+- If `shared_header_value` is set, request must include matching `shared_header_name`.
+- If Cloudflare values are set, request must include:
+  - `CF-Access-Client-Id`
+  - `CF-Access-Client-Secret`
+- If both methods are configured, both checks are enforced.
+- Cloudflare ID/secret must either both be set or both be blank.
+
 ## 9) Key API endpoints
 
 - `GET /healthz`
@@ -269,6 +296,11 @@ Notes:
 - If `template_data.personal_email` is present, that address is used as signer email.
 - `documents` array still works and takes precedence if you send both.
 - If `hmac_shared_secret` is set (not `REPLACE...`), include `X-Timestamp` and `X-Signature` headers.
+- If `intake_auth.shared_header_value` is set, include:
+  - `<intake_auth.shared_header_name>: <configured value>`
+- If Cloudflare Access service token is configured in `intake_auth`, include:
+  - `CF-Access-Client-Id: <token id>`
+  - `CF-Access-Client-Secret: <token secret>`
 
 For Forms file uploads:
 - Add `client_supplied_files` to intake payload.

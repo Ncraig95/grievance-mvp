@@ -5,6 +5,7 @@ import logging
 from fastapi import FastAPI
 
 from .core.config import load_config
+from .core.intake_auth import validate_intake_auth_config
 from .core.logging import setup_logging
 from .db.db import Db
 from .db.migrate import migrate
@@ -23,6 +24,7 @@ from .web.routes_webhook import router as webhook_router
 def create_app() -> FastAPI:
     setup_logging()
     cfg = load_config("/app/config/config.yaml")
+    validate_intake_auth_config(cfg.intake_auth)
 
     migrate(cfg.db_path)
 
