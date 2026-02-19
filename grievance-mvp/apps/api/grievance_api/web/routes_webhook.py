@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 
 from ..db.db import Db, utcnow
+from ..services.case_folder_naming import build_case_folder_member_name, resolve_contract_label
 from ..services.graph_mail import MailAttachment
 from ..services.notification_service import NotificationService
 
@@ -140,7 +141,7 @@ async def webhook_docuseal(request: Request):
 
     row = await db.fetchone(
         """SELECT d.id, d.case_id, d.doc_type, d.signer_order_json, d.pdf_path, d.docuseal_signing_link,
-                  c.grievance_id, c.member_name, c.member_email
+                  c.grievance_id, c.member_name, c.member_email, c.intake_payload_json
            FROM documents d
            JOIN cases c ON c.id = d.case_id
            WHERE d.docuseal_submission_id=?""",
@@ -151,7 +152,22 @@ async def webhook_docuseal(request: Request):
         logger.warning("docuseal_webhook_unknown_submission", extra={"correlation_id": submission_id})
         return {"ok": True, "handled": False, "reason": "unknown_submission"}
 
-    document_id, case_id, doc_type, signer_order_json, pdf_path, signing_link, grievance_id, member_name, member_email = row
+    (
+        document_id,
+        case_id,
+        doc_type,
+        signer_order_json,
+        pdf_path,
+        signing_link,
+        grievance_id,
+        member_name,
+        member_email,
+        intake_payload_json,
+    ) = row
+    folder_member_name = build_case_folder_member_name(
+        member_name,
+        resolve_contract_label(intake_payload_json),
+    )
 
     await db.add_event(case_id, document_id, "docuseal_webhook_received", {"event_type": _event_type(payload), "receipt_key": receipt_key})
 
@@ -202,7 +218,7 @@ async def webhook_docuseal(request: Request):
                 library=cfg.graph.document_library,
                 case_parent_folder=cfg.graph.case_parent_folder,
                 grievance_id=grievance_id,
-                member_name=member_name,
+                member_name=folder_member_name,
             )
             sharepoint_case_folder = case_folder.folder_name
             sharepoint_case_web_url = case_folder.web_url

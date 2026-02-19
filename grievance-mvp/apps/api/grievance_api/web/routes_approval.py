@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 
 from ..db.db import Db, utcnow
+from ..services.case_folder_naming import build_case_folder_member_name, resolve_contract_label
 from ..services.notification_service import NotificationService
 from ..services.signature_workflow import send_document_for_signature, signer_order_from_json
 from .models import (
@@ -206,13 +207,17 @@ async def decide_approval(case_id: str, body: ApprovalDecisionRequest, request: 
     notifications: NotificationService = request.app.state.notifications
 
     case_row = await db.fetchone(
-        "SELECT grievance_id, status, approval_status, member_name, member_email FROM cases WHERE id=?",
+        "SELECT grievance_id, status, approval_status, member_name, member_email, intake_payload_json FROM cases WHERE id=?",
         (case_id,),
     )
     if not case_row:
         raise HTTPException(status_code=404, detail="case_id not found")
 
-    grievance_id, current_status, _approval_status, member_name, member_email = case_row
+    grievance_id, current_status, _approval_status, member_name, member_email, intake_payload_json = case_row
+    folder_member_name = build_case_folder_member_name(
+        member_name,
+        resolve_contract_label(intake_payload_json),
+    )
 
     if cfg.email.derek_email and body.approver_email.strip().lower() != cfg.email.derek_email.lower():
         raise HTTPException(status_code=403, detail="Only configured approver may approve this case")
@@ -259,7 +264,7 @@ async def decide_approval(case_id: str, body: ApprovalDecisionRequest, request: 
                     library=cfg.graph.document_library,
                     case_parent_folder=cfg.graph.case_parent_folder,
                     grievance_id=grievance_id,
-                    member_name=member_name,
+                    member_name=folder_member_name,
                 )
                 await db.exec(
                     "UPDATE cases SET sharepoint_case_folder=?, sharepoint_case_web_url=? WHERE id=?",

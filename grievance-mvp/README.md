@@ -78,7 +78,7 @@ Approval flow:
 
 ### SharePoint placement
 - App searches under `graph.case_parent_folder` for existing folder whose name contains `grievance_id`.
-- If missing, creates `<grievance_id> <member_name>`.
+- If missing, creates `<grievance_id> <member_name> - <contract>` when contract is available (otherwise `<grievance_id> <member_name>`).
 - Upload targets:
   - `graph.generated_subfolder`
   - `graph.signed_subfolder`
@@ -284,4 +284,26 @@ Example file item:
   "file_name": "supporting-evidence.pdf",
   "download_url": "https://<tenant>.sharepoint.com/.../download?...token..."
 }
+```
+
+## 11) Dynamic Statement Rows (Template-ready backend)
+
+Backend is now pre-wired for dynamic lined statement rows; no additional API code changes are required when you update the DOCX.
+
+Context keys available to template:
+- `statement_lines`: list of `{ "text": "...", "line_no": N }`
+- `statement_rows`: alias of `statement_lines`
+- `statement_line_count`
+- `statement_full_text`
+- `statement_has_continuation`
+
+Optional input override from Forms/Power Automate:
+- `template_data.statement_line_wrap_width` (default: `95`)
+
+Recommended DOCX row loop tags (when you are ready to edit the Word file):
+
+```jinja
+{%tr for line in statement_lines %}
+{{ line.text }}
+{%tr endfor %}
 ```

@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import tempfile
+import textwrap
 from datetime import date
 from pathlib import Path
 from urllib.parse import urlparse
@@ -16,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Request
 from ..core.hmac_auth import verify_hmac
 from ..core.ids import new_case_id, new_document_id, normalize_grievance_id
 from ..db.db import Db, utcnow
+from ..services.case_folder_naming import build_case_folder_member_name
 from ..services.doc_render import render_docx
 from ..services.grievance_id_allocator import GrievanceIdAllocationError, GrievanceIdAllocator
 from ..services.notification_service import NotificationService
@@ -37,6 +39,7 @@ _FILENAME_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 _FIELD_KEY_SAFE = re.compile(r"[^A-Za-z0-9]+")
 _CLIENT_SUPPLIED_TOTAL_MAX_BYTES = 1_073_741_824
 _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+_DEFAULT_STATEMENT_WRAP_WIDTH = 95
 
 
 def _safe_name(value: str) -> str:
@@ -81,6 +84,73 @@ def _coerce_context_value(value: object) -> object:
     if isinstance(value, list):
         return ", ".join(str(v) for v in value if v is not None)
     return json.dumps(value, ensure_ascii=False)
+
+
+def _coerce_positive_int(value: object, fallback: int) -> int:
+    try:
+        parsed = int(str(value).strip())
+    except Exception:
+        return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def _normalize_existing_statement_lines(value: object) -> list[dict[str, object]] | None:
+    if not isinstance(value, list):
+        return None
+    rows: list[dict[str, object]] = []
+    for idx, item in enumerate(value, start=1):
+        if isinstance(item, dict):
+            text = str(item.get("text", ""))
+        else:
+            text = str(item)
+        rows.append({"text": text, "line_no": idx})
+    return rows
+
+
+def _build_statement_line_rows(full_text: str, wrap_width: int) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for paragraph in full_text.splitlines():
+        normalized = paragraph.strip()
+        if not normalized:
+            rows.append({"text": ""})
+            continue
+        wrapped = textwrap.wrap(
+            normalized,
+            width=wrap_width,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        if not wrapped:
+            rows.append({"text": normalized})
+            continue
+        for line in wrapped:
+            rows.append({"text": line})
+
+    if not rows:
+        rows = [{"text": ""}]
+
+    return [{"text": str(row.get("text", "")), "line_no": idx + 1} for idx, row in enumerate(rows)]
+
+
+def _apply_dynamic_statement_context(context: dict[str, object]) -> None:
+    statement_text = str(context.get("statement_text", "") or "")
+    continuation = str(context.get("statement_continuation", "") or "")
+    joined = statement_text
+    if continuation.strip():
+        joined = f"{statement_text}\n{continuation}" if statement_text else continuation
+
+    existing = _normalize_existing_statement_lines(context.get("statement_lines"))
+    if existing is not None:
+        rows = existing if existing else [{"text": "", "line_no": 1}]
+    else:
+        wrap_width = _coerce_positive_int(context.get("statement_line_wrap_width"), _DEFAULT_STATEMENT_WRAP_WIDTH)
+        rows = _build_statement_line_rows(joined, wrap_width)
+
+    context["statement_full_text"] = joined
+    context["statement_lines"] = rows
+    context["statement_rows"] = rows
+    context["statement_line_count"] = len(rows)
+    context["statement_has_continuation"] = bool(continuation.strip())
 
 
 def _preferred_signer_email(payload: IntakeRequest) -> str | None:
@@ -377,6 +447,7 @@ def _build_template_context(
     today = date.today().isoformat()
     context.setdefault("today_date", today)
     context.setdefault("request_date", today)
+    _apply_dynamic_statement_context(context)
 
     return context
 
@@ -454,6 +525,7 @@ async def intake(request: Request):
     cdir.mkdir(parents=True, exist_ok=True)
 
     member_name = f"{payload.grievant_firstname} {payload.grievant_lastname}".strip()
+    folder_member_name = build_case_folder_member_name(member_name, payload.contract)
     incoming_grievance_id = (payload.grievance_id or "").strip()
     grievance_mode = cfg.grievance_id.mode
 
@@ -472,7 +544,7 @@ async def intake(request: Request):
         )
         try:
             allocation = await allocator.allocate_and_reserve_folder(
-                member_name=member_name,
+                member_name=folder_member_name,
                 correlation_id=correlation_id,
             )
         except GrievanceIdAllocationError as exc:
@@ -548,7 +620,7 @@ async def intake(request: Request):
             payload=payload,
             case_id=case_id,
             grievance_id=grievance_id,
-            member_name=member_name,
+            member_name=folder_member_name,
             correlation_id=correlation_id,
             sharepoint_case_folder=sharepoint_case_folder,
             sharepoint_case_web_url=sharepoint_case_web_url,
