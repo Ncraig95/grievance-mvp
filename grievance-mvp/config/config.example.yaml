@@ -1,7 +1,7 @@
 hmac_shared_secret: REPLACE_WITH_LONG_RANDOM_SECRET
 db_path: /data/grievances.sqlite3
 data_root: /data/grievances
-docx_template_path: /app/templates/grievance_template.docx
+docx_template_path: /app/templates/docx/statement_of_occurrence fixed.docx
 doc_templates:
   grievance_form: /app/templates/docx/statement_of_occurrence fixed.docx
   mobility_formal_grievance_meeting_request: /app/templates/docx/mobility-formal-grievance-meeting-request.docx
@@ -22,7 +22,10 @@ docuseal:
   api_token: REPLACE
   webhook_secret: REPLACE
   public_base_url: https://docuseal.REPLACE.org
-  default_template_id: null  # null uploads each generated PDF to DocuSeal as a template per document
+  web_base_url: https://docuseal.REPLACE.org
+  web_email: ""     # optional; fallback uses DOCUSEAL_WEB_EMAIL or DOCUSEAL_ADMIN_EMAIL
+  web_password: ""  # optional; fallback uses DOCUSEAL_WEB_PASSWORD or DOCUSEAL_ADMIN_PASSWORD
+  default_template_id: 1  # base template id with signature fields; app clones+replaces with generated PDF
   template_ids: {}
 graph:
   tenant_id: REPLACE

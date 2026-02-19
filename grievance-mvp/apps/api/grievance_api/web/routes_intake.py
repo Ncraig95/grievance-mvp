@@ -69,6 +69,62 @@ def _coerce_context_value(value: object) -> object:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _preferred_signer_email(payload: IntakeRequest) -> str | None:
+    template_data = payload.template_data or {}
+    if isinstance(template_data, dict):
+        for key in ("personal_email", "personalEmail", "signer_email", "signerEmail"):
+            val = template_data.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+
+    if payload.grievant_email and payload.grievant_email.strip():
+        return payload.grievant_email.strip()
+    return None
+
+
+def _apply_statement_defaults(
+    *,
+    context: dict[str, object],
+    payload: IntakeRequest,
+    grievance_id: str,
+    grievance_number: str | None,
+) -> None:
+    member_name = f"{payload.grievant_firstname} {payload.grievant_lastname}".strip()
+    defaults: dict[str, object] = {
+        "grievant_name": member_name,
+        "work_address": payload.work_location or "",
+        "home_address": "",
+        "seniority_date": "",
+        "ncs_date": "",
+        "personal_cell": payload.grievant_phone or "",
+        "personal_email": payload.grievant_email or "",
+        "department": "",
+        "title": "",
+        "supervisor_name": payload.supervisor or "",
+        "supervisor_phone": "",
+        "supervisor_email": "",
+        # Legacy placeholder in template includes a space.
+        "grievants uid": grievance_id,
+        "grievants_uid": grievance_id,
+        "incident_date": payload.incident_date or "",
+        "article": "",
+        "statement_text": payload.narrative or "",
+        "statement_continuation": "",
+        "witness_1_name": "",
+        "witness_1_title": "",
+        "witness_1_phone": "",
+        "witness_2_name": "",
+        "witness_2_title": "",
+        "witness_2_phone": "",
+        "witness_3_name": "",
+        "witness_3_title": "",
+        "witness_3_phone": "",
+        "grievance_number": grievance_number or "",
+    }
+    for key, value in defaults.items():
+        context.setdefault(key, value)
+
+
 def _validate_grievance_input_mode(grievance_mode: str, incoming_grievance_id: str) -> None:
     if grievance_mode == "auto" and incoming_grievance_id:
         raise HTTPException(
@@ -113,6 +169,13 @@ def _build_template_context(
         normalized = _normalize_field_key(key)
         if normalized and normalized not in context:
             context[normalized] = value
+
+    _apply_statement_defaults(
+        context=context,
+        payload=payload,
+        grievance_id=grievance_id,
+        grievance_number=grievance_number,
+    )
 
     member_name = f"{payload.grievant_firstname} {payload.grievant_lastname}".strip()
     if member_name:
@@ -363,13 +426,18 @@ async def intake(request: Request):
                 pdf_sha,
             ),
         )
-        await db.add_event(case_id, document_id, "document_created", {"doc_type": doc_type})
+        await db.add_event(
+            case_id,
+            document_id,
+            "document_created",
+            {"doc_type": doc_type, "template_path": template_path},
+        )
 
         status = initial_status
         signing_link: str | None = None
 
         if doc_req.requires_signature:
-            signer_order = normalize_signers(doc_req.signers, payload.grievant_email)
+            signer_order = normalize_signers(doc_req.signers, _preferred_signer_email(payload))
             if not grievance_number:
                 status = "pending_grievance_number"
                 any_signature_queued = True

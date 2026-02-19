@@ -7,7 +7,6 @@ import tempfile
 from pathlib import Path
 from zipfile import ZipFile
 
-from docx import Document
 from docxtpl import DocxTemplate
 
 
@@ -15,6 +14,7 @@ _JINJA_PLACEHOLDER_RE = re.compile(r"{{\s*([^{}]+?)\s*}}")
 _LEFTOVER_PLACEHOLDER_RE = re.compile(r"{{.*?}}", flags=re.DOTALL)
 _XML_TAG_RE = re.compile(r"<[^>]+>")
 _SAFE_JINJA_EXPR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+_NORMALIZE_KEY_RE = re.compile(r"[^A-Za-z0-9]+")
 _LOG = logging.getLogger("grievance_api")
 
 
@@ -54,15 +54,42 @@ def _prepare_template_docx(template_path: str) -> str:
 
 
 def _replace_leftover_placeholders(xml_text: str, context: dict) -> str:
+    def _lookup_value(raw_inner: str) -> object | None:
+        candidates: list[str] = []
+
+        def _add(value: str) -> None:
+            val = value.strip()
+            if val and val not in candidates:
+                candidates.append(val)
+
+        compact_spaces = " ".join(raw_inner.split())
+        underscore_spaces = re.sub(r"\s+", "_", compact_spaces)
+        normalized = _NORMALIZE_KEY_RE.sub("_", compact_spaces).strip("_")
+
+        for value in (
+            raw_inner,
+            compact_spaces,
+            underscore_spaces,
+            normalized,
+            compact_spaces.lower(),
+            underscore_spaces.lower(),
+            normalized.lower(),
+        ):
+            _add(value)
+
+        for key in candidates:
+            if key in context:
+                return context.get(key)
+        return None
+
     def _replace(match: re.Match[str]) -> str:
         raw = match.group(0)
         inner = _XML_TAG_RE.sub("", raw[2:-2]).strip()
         if not inner or ":" in inner:
             return raw
-        if inner not in context:
-            return raw
-        value = context.get(inner)
+        value = _lookup_value(inner)
         if value is None:
+            # Drop unresolved non-signature placeholders so no raw {{...}} leaks into final docs.
             return ""
         return html.escape(str(value), quote=False)
 
@@ -104,12 +131,7 @@ def render_docx(template_path: str, context: dict, out_path: str) -> None:
         return
     except Exception as exc:
         _LOG.exception("docx_render_fallback", extra={"template_path": template_path, "error": str(exc)})
-        # Fallback for missing/invalid template files during bootstrap/testing.
-        doc = Document()
-        doc.add_heading("Grievance Document", level=1)
-        for key, value in context.items():
-            doc.add_paragraph(f"{key}: {value}")
-        doc.save(out_path)
+        raise RuntimeError(f"DOCX render failed for template '{template_path}': {exc}") from exc
     finally:
         if patched_template_path and patched_template_path != template_path:
             Path(patched_template_path).unlink(missing_ok=True)

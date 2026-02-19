@@ -36,6 +36,9 @@ def create_app() -> FastAPI:
         cfg.docuseal.base_url,
         cfg.docuseal.api_token,
         public_base_url=cfg.docuseal.public_base_url,
+        web_base_url=cfg.docuseal.web_base_url,
+        web_email=cfg.docuseal.web_email,
+        web_password=cfg.docuseal.web_password,
     )
 
     app.state.graph = GraphUploader(

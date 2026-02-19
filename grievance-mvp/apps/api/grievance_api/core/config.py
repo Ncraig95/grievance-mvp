@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +28,9 @@ class DocuSealConfig:
     api_token: str
     webhook_secret: str
     public_base_url: str | None
+    web_base_url: str | None
+    web_email: str | None
+    web_password: str | None
     default_template_id: int | None
     template_ids: dict[str, int]
 
@@ -128,6 +132,7 @@ def _normalize_grievance_separator(value: object) -> str:
 def load_config(path: str) -> AppConfig:
     p = Path(path)
     raw = yaml.safe_load(p.read_text(encoding="utf-8"))
+    docuseal_raw = raw.get("docuseal", {}) or {}
     graph_raw = raw.get("graph", {}) or {}
     email_raw = raw.get("email", {}) or {}
     grievance_raw = raw.get("grievance_id", {}) or {}
@@ -155,16 +160,34 @@ def load_config(path: str) -> AppConfig:
             audit_subfolder=str(graph_raw.get("audit_subfolder", "Audit")).strip() or "Audit",
         ),
         docuseal=DocuSealConfig(
-            base_url=str(raw["docuseal"]["base_url"]).strip(),
-            api_token=str(raw["docuseal"]["api_token"]).strip(),
-            webhook_secret=str(raw["docuseal"]["webhook_secret"]).strip(),
-            public_base_url=(str(raw["docuseal"].get("public_base_url", "")).strip() or None),
+            base_url=str(docuseal_raw["base_url"]).strip(),
+            api_token=str(docuseal_raw["api_token"]).strip(),
+            webhook_secret=str(docuseal_raw["webhook_secret"]).strip(),
+            public_base_url=(str(docuseal_raw.get("public_base_url", "")).strip() or None),
+            web_base_url=(
+                str(docuseal_raw.get("web_base_url", "")).strip()
+                or os.getenv("DOCUSEAL_WEB_BASE_URL", "").strip()
+                or str(docuseal_raw.get("public_base_url", "")).strip()
+                or None
+            ),
+            web_email=(
+                str(docuseal_raw.get("web_email", "")).strip()
+                or os.getenv("DOCUSEAL_WEB_EMAIL", "").strip()
+                or os.getenv("DOCUSEAL_ADMIN_EMAIL", "").strip()
+                or None
+            ),
+            web_password=(
+                str(docuseal_raw.get("web_password", "")).strip()
+                or os.getenv("DOCUSEAL_WEB_PASSWORD", "").strip()
+                or os.getenv("DOCUSEAL_ADMIN_PASSWORD", "").strip()
+                or None
+            ),
             default_template_id=(
-                int(raw["docuseal"]["default_template_id"])
-                if raw["docuseal"].get("default_template_id") is not None
+                int(docuseal_raw["default_template_id"])
+                if docuseal_raw.get("default_template_id") is not None
                 else None
             ),
-            template_ids=_as_int_mapping(raw["docuseal"].get("template_ids")),
+            template_ids=_as_int_mapping(docuseal_raw.get("template_ids")),
         ),
         email=EmailConfig(
             enabled=bool(email_raw.get("enabled", bool(sender_user_id))),

@@ -49,6 +49,9 @@ Approval flow:
 ### E-signature
 - For `requires_signature=true`, app queues documents in `pending_grievance_number` until a grievance number exists.
 - Once a grievance number is assigned (`POST /cases/{case_id}/grievance-number` or intake provides `grievance_number`), app submits document to DocuSeal API.
+- On self-hosted OSS DocuSeal where `POST /api/templates` is unavailable, app uses a base template (`docuseal.default_template_id`) and performs web `clone_and_replace` with the generated PDF before submission.
+  - Requires web credentials (`DOCUSEAL_WEB_EMAIL` / `DOCUSEAL_WEB_PASSWORD`) and HTTPS base (`docuseal.web_base_url` or `docuseal.public_base_url`).
+  - If the generated PDF contains Adobe-style placeholders (`{{Sig_es_:signerN:signature}}`, `{{Dte_es_:signerN:date}}`), app auto-aligns DocuSeal fields to those exact coordinates.
 - App-owned mail sends signature requests (DocuSeal SMTP is not used).
 - DocuSeal links are rewritten to public HTTPS origin via `docuseal.public_base_url` when needed.
 
