@@ -85,8 +85,7 @@ if not mail or mail["recipient_email"].lower() != expected_signer.lower():
 xml = zipfile.ZipFile(doc["docx_path"]).read("word/document.xml").decode("utf-8", "ignore")
 left = re.findall(r"\{\{.*?\}\}", xml)
 print("LEFTOVER", left)
-allowed = {"{{Sig_es_:signer1:signature}}", "{{Dte_es_:signer1:date}}"}
-if any(item not in allowed for item in left):
+if left:
     raise SystemExit("Unexpected leftover placeholders in statement document")
 
 checks = [

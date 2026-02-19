@@ -161,6 +161,7 @@ async def assign_grievance_number(case_id: str, body: AssignGrievanceNumberReque
             doc_type=doc_type,
             template_key=template_key,
             pdf_bytes=Path(pdf_path).read_bytes(),
+            alignment_pdf_bytes=None,
             signer_order=signer_order,
             correlation_id=case_id,
             idempotency_prefix=f"grievance_number:{case_id}:{document_id}",

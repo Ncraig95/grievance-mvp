@@ -16,6 +16,8 @@ _XML_TAG_RE = re.compile(r"<[^>]+>")
 _SAFE_JINJA_EXPR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 _NORMALIZE_KEY_RE = re.compile(r"[^A-Za-z0-9]+")
 _LOG = logging.getLogger("grievance_api")
+_SIGNATURE_TAG_RE = re.compile(r"^Sig_es_:signer\d+:signature$", re.IGNORECASE)
+_DATE_TAG_RE = re.compile(r"^Dte_es_:signer\d+:date$", re.IGNORECASE)
 
 
 def _escape_signature_placeholders(xml_text: str) -> str:
@@ -53,7 +55,12 @@ def _prepare_template_docx(template_path: str) -> str:
         raise
 
 
-def _replace_leftover_placeholders(xml_text: str, context: dict) -> str:
+def _replace_leftover_placeholders(
+    xml_text: str,
+    context: dict,
+    *,
+    strip_signature_placeholders: bool,
+) -> str:
     def _lookup_value(raw_inner: str) -> object | None:
         candidates: list[str] = []
 
@@ -85,7 +92,13 @@ def _replace_leftover_placeholders(xml_text: str, context: dict) -> str:
     def _replace(match: re.Match[str]) -> str:
         raw = match.group(0)
         inner = _XML_TAG_RE.sub("", raw[2:-2]).strip()
-        if not inner or ":" in inner:
+        if not inner:
+            return raw
+        if ":" in inner:
+            if strip_signature_placeholders and (
+                _SIGNATURE_TAG_RE.fullmatch(inner) or _DATE_TAG_RE.fullmatch(inner)
+            ):
+                return ""
             return raw
         value = _lookup_value(inner)
         if value is None:
@@ -96,7 +109,7 @@ def _replace_leftover_placeholders(xml_text: str, context: dict) -> str:
     return _LEFTOVER_PLACEHOLDER_RE.sub(_replace, xml_text)
 
 
-def _postprocess_rendered_docx(out_path: str, context: dict) -> None:
+def _postprocess_rendered_docx(out_path: str, context: dict, *, strip_signature_placeholders: bool) -> None:
     source = Path(out_path)
     with tempfile.NamedTemporaryFile(
         suffix=".docx",
@@ -110,7 +123,11 @@ def _postprocess_rendered_docx(out_path: str, context: dict) -> None:
             for info in zin.infolist():
                 data = zin.read(info.filename)
                 if info.filename.startswith("word/") and info.filename.endswith(".xml"):
-                    patched = _replace_leftover_placeholders(data.decode("utf-8", errors="ignore"), context)
+                    patched = _replace_leftover_placeholders(
+                        data.decode("utf-8", errors="ignore"),
+                        context,
+                        strip_signature_placeholders=strip_signature_placeholders,
+                    )
                     data = patched.encode("utf-8")
                 zout.writestr(info, data)
         tmp_path.replace(source)
@@ -119,7 +136,13 @@ def _postprocess_rendered_docx(out_path: str, context: dict) -> None:
         raise
 
 
-def render_docx(template_path: str, context: dict, out_path: str) -> None:
+def render_docx(
+    template_path: str,
+    context: dict,
+    out_path: str,
+    *,
+    strip_signature_placeholders: bool = False,
+) -> None:
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     patched_template_path: str | None = None
     try:
@@ -127,7 +150,11 @@ def render_docx(template_path: str, context: dict, out_path: str) -> None:
         tpl = DocxTemplate(patched_template_path)
         tpl.render(context)
         tpl.save(out_path)
-        _postprocess_rendered_docx(out_path, context)
+        _postprocess_rendered_docx(
+            out_path,
+            context,
+            strip_signature_placeholders=strip_signature_placeholders,
+        )
         return
     except Exception as exc:
         _LOG.exception("docx_render_fallback", extra={"template_path": template_path, "error": str(exc)})

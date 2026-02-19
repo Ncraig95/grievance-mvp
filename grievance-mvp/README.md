@@ -36,6 +36,8 @@ Approval flow:
 - Endpoint: `POST /intake`
 - Idempotency key: `request_id` (unique in `cases.intake_request_id`)
 - Supports multiple documents in a single intake payload.
+- Supports single-document command mode via `document_command` (convenience for Power Automate).
+- Supports optional `client_supplied_files` list for uploaded form artifacts.
 - `grievance_number` is optional on intake. If omitted, signature-required docs are queued in limbo until assigned later.
 - Extra JSON keys and `template_data` are merged into DOCX template context (normalized snake_case aliases are also added).
 
@@ -81,6 +83,7 @@ Approval flow:
   - `graph.generated_subfolder`
   - `graph.signed_subfolder`
   - `graph.audit_subfolder`
+  - `graph.client_supplied_subfolder` (created only when `client_supplied_files` are provided)
 
 ## 3) Data model (SQLite)
 
@@ -214,3 +217,71 @@ Least privilege:
 - `POST /cases/{case_id}/notifications/resend`
 - `GET /cases/{case_id}/approval`
 - `POST /cases/{case_id}/approval`
+
+## 10) Power Automate setup (Statement of Occurrence)
+
+Use the intake `document_command` so the flow tells the app exactly which document to run.
+
+For this document:
+- `document_command: "statement_of_occurrence"`
+
+Flow shape:
+1. Trigger: `When a new response is submitted` (Microsoft Forms)
+2. Action: `Get response details`
+3. Action: `HTTP` (POST) to `https://<your-api-host>/intake`
+4. Parse JSON response and store `case_id`, `grievance_id`, and `documents[0].signing_link` if needed
+
+HTTP body example:
+
+```json
+{
+  "request_id": "forms-@{triggerOutputs()?['body/responseId']}",
+  "document_command": "statement_of_occurrence",
+  "contract": "COJ",
+  "grievant_firstname": "@{outputs('Get_response_details')?['body/r_first_name']}",
+  "grievant_lastname": "@{outputs('Get_response_details')?['body/r_last_name']}",
+  "grievant_email": "@{outputs('Get_response_details')?['body/r_work_email']}",
+  "grievant_phone": "@{outputs('Get_response_details')?['body/r_phone']}",
+  "work_location": "@{outputs('Get_response_details')?['body/r_work_location']}",
+  "supervisor": "@{outputs('Get_response_details')?['body/r_supervisor']}",
+  "incident_date": "@{outputs('Get_response_details')?['body/r_incident_date']}",
+  "narrative": "@{outputs('Get_response_details')?['body/r_statement']}",
+  "grievance_number": "@{outputs('Get_response_details')?['body/r_grievance_number']}",
+  "template_data": {
+    "personal_email": "@{outputs('Get_response_details')?['body/r_personal_email']}",
+    "article": "@{outputs('Get_response_details')?['body/r_article']}",
+    "statement_continuation": "@{outputs('Get_response_details')?['body/r_statement_cont']}",
+    "witness_1_name": "@{outputs('Get_response_details')?['body/r_witness_1_name']}",
+    "witness_1_title": "@{outputs('Get_response_details')?['body/r_witness_1_title']}",
+    "witness_1_phone": "@{outputs('Get_response_details')?['body/r_witness_1_phone']}"
+  },
+  "client_supplied_files": [
+    {
+      "file_name": "supporting-evidence.pdf",
+      "download_url": "@{outputs('Get_file_metadata')?['body/@microsoft.graph.downloadUrl']}"
+    }
+  ]
+}
+```
+
+Notes:
+- If `grievance_number` is blank, signature dispatch is queued until Derek assigns one.
+- If `template_data.personal_email` is present, that address is used as signer email.
+- `documents` array still works and takes precedence if you send both.
+- If `hmac_shared_secret` is set (not `REPLACE...`), include `X-Timestamp` and `X-Signature` headers.
+
+For Forms file uploads:
+- Add `client_supplied_files` to intake payload.
+- Each item should include `file_name` and either:
+  - `download_url` (recommended for large files up to 1GB total), or
+  - `content_base64` (small files only).
+- Intake returns `503` if file transfer/upload fails so Power Automate can retry.
+
+Example file item:
+
+```json
+{
+  "file_name": "supporting-evidence.pdf",
+  "download_url": "https://<tenant>.sharepoint.com/.../download?...token..."
+}
+```

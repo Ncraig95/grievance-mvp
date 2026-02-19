@@ -131,6 +131,7 @@ class AllocatorIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 generated_subfolder="Generated",
                 signed_subfolder="Signed",
                 audit_subfolder="Audit",
+                client_supplied_subfolder="Client supplied data",
             ),
             docuseal=DocuSealConfig(
                 base_url="http://docuseal",

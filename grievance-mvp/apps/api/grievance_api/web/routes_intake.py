@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
+import tempfile
 from datetime import date
 from pathlib import Path
+from urllib.parse import urlparse
+
+import requests
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -16,13 +21,22 @@ from ..services.grievance_id_allocator import GrievanceIdAllocationError, Grieva
 from ..services.notification_service import NotificationService
 from ..services.pdf_convert import docx_to_pdf
 from ..services.signature_workflow import normalize_signers, send_document_for_signature
-from .models import CaseStatusResponse, DocumentRequest, DocumentStatus, IntakeRequest, IntakeResponse
+from .models import (
+    CaseStatusResponse,
+    ClientSuppliedFile,
+    DocumentRequest,
+    DocumentStatus,
+    IntakeRequest,
+    IntakeResponse,
+)
 
 router = APIRouter()
 
 
 _FILENAME_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 _FIELD_KEY_SAFE = re.compile(r"[^A-Za-z0-9]+")
+_CLIENT_SUPPLIED_TOTAL_MAX_BYTES = 1_073_741_824
+_DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 def _safe_name(value: str) -> str:
@@ -138,6 +152,182 @@ def _validate_grievance_input_mode(grievance_mode: str, incoming_grievance_id: s
         )
 
 
+def _sanitize_intake_payload_for_storage(payload: IntakeRequest) -> str:
+    body = payload.model_dump(exclude_none=True)
+    sanitized_client_files: list[dict[str, object]] = []
+    for item in payload.client_supplied_files:
+        sanitized_client_files.append(
+            {
+                "file_name": item.file_name,
+                "has_download_url": bool((item.download_url or "").strip()),
+                "has_content_base64": bool((item.content_base64 or "").strip()),
+            }
+        )
+    body["client_supplied_files"] = sanitized_client_files
+    return json.dumps(body, ensure_ascii=False)
+
+
+def _decode_base64_payload(value: str) -> bytes:
+    raw = (value or "").strip()
+    if not raw:
+        return b""
+    if raw.startswith("data:") and "," in raw:
+        raw = raw.split(",", 1)[1]
+    return base64.b64decode(raw, validate=True)
+
+
+def _download_to_temp_file(*, download_url: str) -> tuple[Path, int]:
+    parsed = urlparse(download_url)
+    if parsed.scheme.lower() != "https":
+        raise RuntimeError("client file download_url must use https")
+
+    with tempfile.NamedTemporaryFile(prefix="client-file-", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+
+    size_bytes = 0
+    try:
+        with requests.get(download_url, stream=True, timeout=(10, 300)) as resp:
+            resp.raise_for_status()
+            with tmp_path.open("wb") as out:
+                for chunk in resp.iter_content(chunk_size=_DOWNLOAD_CHUNK_BYTES):
+                    if not chunk:
+                        continue
+                    out.write(chunk)
+                    size_bytes += len(chunk)
+                    if size_bytes > _CLIENT_SUPPLIED_TOTAL_MAX_BYTES:
+                        raise RuntimeError("client supplied file exceeds 1GB limit")
+        return tmp_path, size_bytes
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _materialize_client_supplied_file(item: ClientSuppliedFile) -> tuple[Path, int]:
+    if item.download_url and item.download_url.strip():
+        return _download_to_temp_file(download_url=item.download_url.strip())
+
+    if item.content_base64 and item.content_base64.strip():
+        content = _decode_base64_payload(item.content_base64)
+        if len(content) > _CLIENT_SUPPLIED_TOTAL_MAX_BYTES:
+            raise RuntimeError("client supplied file exceeds 1GB limit")
+        with tempfile.NamedTemporaryFile(prefix="client-file-", delete=False) as tmp:
+            tmp.write(content)
+            return Path(tmp.name), len(content)
+
+    raise RuntimeError("client supplied file requires download_url or content_base64")
+
+
+async def _upload_client_supplied_files(
+    *,
+    cfg,  # noqa: ANN001
+    db: Db,
+    logger,  # noqa: ANN001
+    graph,  # noqa: ANN001
+    payload: IntakeRequest,
+    case_id: str,
+    grievance_id: str,
+    member_name: str,
+    correlation_id: str,
+    sharepoint_case_folder: str | None,
+    sharepoint_case_web_url: str | None,
+) -> tuple[str | None, str | None]:
+    files = payload.client_supplied_files or []
+    if not files:
+        return sharepoint_case_folder, sharepoint_case_web_url
+
+    if not cfg.graph.site_hostname or not cfg.graph.site_path or not cfg.graph.document_library:
+        raise HTTPException(status_code=503, detail="SharePoint is not configured for client supplied files")
+
+    case_folder_name = sharepoint_case_folder
+    case_folder_web_url = sharepoint_case_web_url
+    if not case_folder_name:
+        folder_ref = graph.ensure_case_folder(
+            site_hostname=cfg.graph.site_hostname,
+            site_path=cfg.graph.site_path,
+            library=cfg.graph.document_library,
+            case_parent_folder=cfg.graph.case_parent_folder,
+            grievance_id=grievance_id,
+            member_name=member_name,
+        )
+        case_folder_name = folder_ref.folder_name
+        case_folder_web_url = folder_ref.web_url
+
+    total_uploaded_bytes = 0
+    uploaded_count = 0
+    for item in files:
+        safe_filename = _safe_name(item.file_name)
+        local_path: Path | None = None
+        try:
+            local_path, size_bytes = _materialize_client_supplied_file(item)
+            total_uploaded_bytes += size_bytes
+            if total_uploaded_bytes > _CLIENT_SUPPLIED_TOTAL_MAX_BYTES:
+                raise RuntimeError("combined client supplied files exceed 1GB limit")
+
+            uploaded = graph.upload_local_file_to_case_subfolder(
+                site_hostname=cfg.graph.site_hostname,
+                site_path=cfg.graph.site_path,
+                library=cfg.graph.document_library,
+                case_folder_name=case_folder_name,
+                case_parent_folder=cfg.graph.case_parent_folder,
+                subfolder=cfg.graph.client_supplied_subfolder,
+                filename=safe_filename,
+                local_path=str(local_path),
+            )
+            uploaded_count += 1
+            await db.add_event(
+                case_id,
+                None,
+                "client_supplied_file_uploaded",
+                {
+                    "filename": safe_filename,
+                    "size_bytes": size_bytes,
+                    "sharepoint_path": uploaded.path,
+                },
+            )
+        except Exception as exc:
+            logger.exception(
+                "client_supplied_file_upload_failed",
+                extra={"correlation_id": correlation_id, "case_id": case_id, "client_filename": safe_filename},
+            )
+            await db.add_event(
+                case_id,
+                None,
+                "client_supplied_file_upload_failed",
+                {"filename": safe_filename, "error": str(exc)},
+            )
+            raise HTTPException(status_code=503, detail="unable to upload client supplied files") from exc
+        finally:
+            if local_path is not None:
+                local_path.unlink(missing_ok=True)
+
+    await db.add_event(
+        case_id,
+        None,
+        "client_supplied_files_upload_completed",
+        {"file_count": uploaded_count, "total_bytes": total_uploaded_bytes},
+    )
+    return case_folder_name, case_folder_web_url
+
+
+def _resolve_document_command(cfg, document_command: str) -> DocumentRequest:  # noqa: ANN001
+    raw = (document_command or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="document_command cannot be empty")
+
+    candidates: list[str] = []
+    for value in (raw, _normalize_field_key(raw)):
+        normalized = value.strip()
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+
+    for key in candidates:
+        if key in cfg.doc_templates:
+            # Command mode is a convenience for single-doc workflows (Power Automate).
+            return DocumentRequest(doc_type=key, template_key=key, requires_signature=True)
+
+    raise HTTPException(status_code=400, detail=f"Unknown document_command '{raw}'")
+
+
 def _build_template_context(
     *,
     payload: IntakeRequest,
@@ -147,7 +337,9 @@ def _build_template_context(
     doc_type: str,
     grievance_number: str | None,
 ) -> dict[str, object]:
-    payload_data = payload.model_dump(exclude={"documents", "template_data"})
+    payload_data = payload.model_dump(
+        exclude={"documents", "template_data", "document_command", "client_supplied_files"}
+    )
     merged_fields = _flatten_fields(payload_data)
     merged_fields.update(_flatten_fields(payload.template_data))
 
@@ -228,6 +420,7 @@ async def intake(request: Request):
     db: Db = request.app.state.db
     logger = request.app.state.logger
     docuseal = request.app.state.docuseal
+    graph = request.app.state.graph
     notifications: NotificationService = request.app.state.notifications
 
     body = await verify_hmac(request, cfg.hmac_shared_secret)
@@ -306,7 +499,7 @@ async def intake(request: Request):
                 member_name,
                 payload.grievant_email,
                 payload.request_id,
-                payload.model_dump_json(),
+                _sanitize_intake_payload_for_storage(payload),
                 sharepoint_case_folder,
                 sharepoint_case_web_url,
             ),
@@ -346,7 +539,35 @@ async def intake(request: Request):
         },
     )
 
-    doc_requests = payload.documents or [DocumentRequest(doc_type="grievance_form", requires_signature=True)]
+    try:
+        sharepoint_case_folder, sharepoint_case_web_url = await _upload_client_supplied_files(
+            cfg=cfg,
+            db=db,
+            logger=logger,
+            graph=graph,
+            payload=payload,
+            case_id=case_id,
+            grievance_id=grievance_id,
+            member_name=member_name,
+            correlation_id=correlation_id,
+            sharepoint_case_folder=sharepoint_case_folder,
+            sharepoint_case_web_url=sharepoint_case_web_url,
+        )
+        if sharepoint_case_folder or sharepoint_case_web_url:
+            await db.exec(
+                "UPDATE cases SET sharepoint_case_folder=?, sharepoint_case_web_url=? WHERE id=?",
+                (sharepoint_case_folder, sharepoint_case_web_url, case_id),
+            )
+    except HTTPException:
+        await db.exec("UPDATE cases SET status=? WHERE id=?", ("failed", case_id))
+        raise
+
+    if payload.documents:
+        doc_requests = payload.documents
+    elif (payload.document_command or "").strip():
+        doc_requests = [_resolve_document_command(cfg, payload.document_command or "")]
+    else:
+        doc_requests = [DocumentRequest(doc_type="grievance_form", requires_signature=True)]
     doc_statuses: list[DocumentStatus] = []
     any_signature_requested = False
     any_signature_queued = False
@@ -372,8 +593,37 @@ async def intake(request: Request):
             grievance_number=grievance_number,
         )
 
+        alignment_pdf_bytes: bytes | None = None
         try:
-            render_docx(template_path, context, docx_path)
+            if doc_req.requires_signature:
+                anchor_docx_path = str(ddir / f"{doc_name}.anchor.docx")
+                anchor_pdf_path: str | None = None
+                try:
+                    render_docx(
+                        template_path,
+                        context,
+                        anchor_docx_path,
+                        strip_signature_placeholders=False,
+                    )
+                    anchor_pdf_path = docx_to_pdf(
+                        anchor_docx_path,
+                        str(ddir),
+                        cfg.libreoffice_timeout_seconds,
+                    )
+                    alignment_pdf_bytes = Path(anchor_pdf_path).read_bytes()
+                finally:
+                    Path(anchor_docx_path).unlink(missing_ok=True)
+                    if anchor_pdf_path:
+                        Path(anchor_pdf_path).unlink(missing_ok=True)
+
+                render_docx(
+                    template_path,
+                    context,
+                    docx_path,
+                    strip_signature_placeholders=True,
+                )
+            else:
+                render_docx(template_path, context, docx_path)
             pdf_path = docx_to_pdf(docx_path, str(ddir), cfg.libreoffice_timeout_seconds)
             pdf_bytes = Path(pdf_path).read_bytes()
             pdf_sha = hashlib.sha256(pdf_bytes).hexdigest()
@@ -464,6 +714,7 @@ async def intake(request: Request):
                     doc_type=doc_type,
                     template_key=doc_req.template_key,
                     pdf_bytes=pdf_bytes,
+                    alignment_pdf_bytes=alignment_pdf_bytes,
                     signer_order=signer_order,
                     correlation_id=correlation_id,
                     idempotency_prefix=f"intake:{case_id}:{document_id}",

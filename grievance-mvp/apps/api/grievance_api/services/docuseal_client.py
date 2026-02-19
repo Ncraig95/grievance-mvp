@@ -83,7 +83,8 @@ class DocuSealClient:
         self,
         *,
         base_template_id: str,
-        pdf_bytes: bytes,
+        upload_pdf_bytes: bytes,
+        alignment_pdf_bytes: bytes | None,
         title: str,
     ) -> str:
         web_base = self.web_base_url or self.public_base_url
@@ -124,7 +125,7 @@ class DocuSealClient:
         files = {
             "files[]": (
                 self._safe_filename(title),
-                pdf_bytes,
+                upload_pdf_bytes,
                 "application/pdf",
             )
         }
@@ -145,7 +146,10 @@ class DocuSealClient:
         template_id = str(obj.get("id") or "").strip()
         if not template_id:
             raise RuntimeError("DocuSeal clone-and-replace response missing template id")
-        self._apply_placeholder_field_alignment(template_id=template_id, pdf_bytes=pdf_bytes)
+        self._apply_placeholder_field_alignment(
+            template_id=template_id,
+            pdf_bytes=alignment_pdf_bytes or upload_pdf_bytes,
+        )
         return template_id
 
     def _extract_placeholder_areas(self, *, pdf_bytes: bytes) -> dict[tuple[int, str], list[dict]]:
@@ -217,11 +221,13 @@ class DocuSealClient:
 
         if field_type == "signature":
             min_w, min_h, pad_w, pad_h = 140.0, 28.0, 8.0, 4.0
+            y_lift = 14.0
         else:
             min_w, min_h, pad_w, pad_h = 90.0, 18.0, 4.0, 2.0
+            y_lift = 6.0
 
         x = max(0.0, raw["x_min"] - 2.0)
-        y = max(0.0, raw["y_min"] - 1.0)
+        y = max(0.0, raw["y_min"] - y_lift)
         w = max(min_w, word_w + 2 * pad_w)
         h = max(min_h, word_h + 2 * pad_h)
 
@@ -363,6 +369,7 @@ class DocuSealClient:
         self,
         *,
         pdf_bytes: bytes,
+        alignment_pdf_bytes: bytes | None = None,
         signers: list[str],
         title: str,
         metadata: dict[str, str] | None = None,
@@ -375,7 +382,8 @@ class DocuSealClient:
         if selected_template_id:
             selected_template_id = self._clone_and_replace_template(
                 base_template_id=selected_template_id,
-                pdf_bytes=pdf_bytes,
+                upload_pdf_bytes=pdf_bytes,
+                alignment_pdf_bytes=alignment_pdf_bytes,
                 title=title,
             )
         else:

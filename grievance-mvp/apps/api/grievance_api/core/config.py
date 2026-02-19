@@ -20,6 +20,7 @@ class GraphConfig:
     generated_subfolder: str
     signed_subfolder: str
     audit_subfolder: str
+    client_supplied_subfolder: str
 
 
 @dataclass(frozen=True)
@@ -158,6 +159,10 @@ def load_config(path: str) -> AppConfig:
             generated_subfolder=str(graph_raw.get("generated_subfolder", "Generated")).strip() or "Generated",
             signed_subfolder=str(graph_raw.get("signed_subfolder", "Signed")).strip() or "Signed",
             audit_subfolder=str(graph_raw.get("audit_subfolder", "Audit")).strip() or "Audit",
+            client_supplied_subfolder=(
+                str(graph_raw.get("client_supplied_subfolder", "Client supplied data")).strip()
+                or "Client supplied data"
+            ),
         ),
         docuseal=DocuSealConfig(
             base_url=str(docuseal_raw["base_url"]).strip(),
