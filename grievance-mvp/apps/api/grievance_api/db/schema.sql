@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS documents (
   sharepoint_generated_url TEXT,
   sharepoint_signed_url TEXT,
   sharepoint_audit_url TEXT,
+  audit_backup_locations_json TEXT,
   completed_at_utc TEXT,
   FOREIGN KEY (case_id) REFERENCES cases (id)
 );

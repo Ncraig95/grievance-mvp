@@ -23,6 +23,7 @@ FastAPI Orchestrator (this app)
         +--> SharePoint (Microsoft Graph)
                - finds/creates case folder by grievance_id
                - uploads generated/signed/audit files
+               - can fan out extra audit copies to backup subfolders
 
 Approval flow:
   - Derek approves/rejects via POST /cases/{case_id}/approval
@@ -35,11 +36,22 @@ Approval flow:
 ### Intake
 - Endpoint: `POST /intake`
 - Idempotency key: `request_id` (unique in `cases.intake_request_id`)
+- Reusing the same `request_id` returns the existing case (`intake_deduped`) and will not create/send again.
 - Supports multiple documents in a single intake payload.
 - Supports single-document command mode via `document_command` (convenience for Power Automate).
 - Supports optional `client_supplied_files` list for uploaded form artifacts.
-- `grievance_number` is optional on intake. If omitted, signature-required docs are queued in limbo until assigned later.
+- `grievance_number` is optional on intake.
+- `wait_for_grievance_number_before_signature` controls gating:
+  - `true` (default): signature-required docs are queued until grievance number is assigned.
+  - `false`: signature-required docs are sent immediately even when grievance number is blank.
+- `require_approver_decision` controls the final approval step:
+  - `true` (default): case moves to `pending_approval` and Derek approval flow is used.
+  - `false`: case is auto-approved by the workflow after signatures complete.
 - Extra JSON keys and `template_data` are merged into DOCX template context (normalized snake_case aliases are also added).
+- `log_level` controls runtime verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`).
+- `rendering` config controls template normalization and per-document layout policies:
+  - `normalize_split_placeholders`: rewrites split `{{ ... }}` fields before render.
+  - `layout_policies.<doc_type>`: optional clamp/fallback rules for fixed-width lines.
 
 ### Document creation
 - Per document:
@@ -49,21 +61,30 @@ Approval flow:
   - persist paths + SHA256 in `documents`
 
 ### E-signature
-- For `requires_signature=true`, app queues documents in `pending_grievance_number` until a grievance number exists.
+- For `requires_signature=true`, queueing behavior depends on `wait_for_grievance_number_before_signature`.
 - Once a grievance number is assigned (`POST /cases/{case_id}/grievance-number` or intake provides `grievance_number`), app submits document to DocuSeal API.
 - On self-hosted OSS DocuSeal where `POST /api/templates` is unavailable, app uses a base template (`docuseal.default_template_id`) and performs web `clone_and_replace` with the generated PDF before submission.
   - Requires web credentials (`DOCUSEAL_WEB_EMAIL` / `DOCUSEAL_WEB_PASSWORD`) and HTTPS base (`docuseal.web_base_url` or `docuseal.public_base_url`).
-  - If the generated PDF contains Adobe-style placeholders (`{{Sig_es_:signerN:signature}}`, `{{Dte_es_:signerN:date}}`), app auto-aligns DocuSeal fields to those exact coordinates.
+  - If the generated PDF contains Adobe-style placeholders (`{{Sig_es_:signerN:signature}}`, `{{Dte_es_:signerN:date}}`, `{{Eml_es_:signerN:email}}`), app auto-aligns DocuSeal fields to those exact coordinates.
+  - `Eml_es_` placeholders create locked text fields and are prefilled with the signer email used for that signer slot.
 - App-owned mail sends signature requests (DocuSeal SMTP is not used).
 - DocuSeal links are rewritten to public HTTPS origin via `docuseal.public_base_url` when needed.
 
 ### Webhook completion
 - Endpoint: `POST /webhook/docuseal`
-- Verifies signature if `docuseal.webhook_secret` is configured.
+- Verifies webhook auth when `docuseal.webhook_secret` is configured:
+  - HMAC body signature via `X-DocuSeal-Signature` / `X-Signature`, or
+  - static shared token via `X-Webhook-Token` / `X-DocuSeal-Webhook-Token` / `Authorization: Bearer <secret>`.
 - Deduplicates by `webhook_receipts(provider, receipt_key)`.
 - Stores artifacts locally and uploads generated/signed/audit files to SharePoint.
-- Sends completion notifications to signer(s), internal recipients, and Derek.
-- Moves case to `pending_approval` when signature-required docs are complete.
+- Supports multi-destination audit backups:
+  - primary: `graph.audit_subfolder`
+  - optional extra SharePoint copies: `graph.audit_backup_subfolders`
+  - optional local/NAS mirror copies: `graph.audit_local_backup_roots`
+- Always sends completion notifications to internal recipients.
+- `email.test_mode=true` prefixes outbound subjects with `[TEST]` and adds a test banner to body content.
+- Sends completion notifications to Derek only when `require_approver_decision=true`.
+- Moves case to `pending_approval` when `require_approver_decision=true`; otherwise auto-approves.
 
 ### Approval
 - Endpoint: `POST /cases/{case_id}/approval`
@@ -83,7 +104,11 @@ Approval flow:
   - `graph.generated_subfolder`
   - `graph.signed_subfolder`
   - `graph.audit_subfolder`
+  - each path in `graph.audit_backup_subfolders` (additional audit copies)
   - `graph.client_supplied_subfolder` (created only when `client_supplied_files` are provided)
+- Local/NAS audit mirrors:
+  - each root in `graph.audit_local_backup_roots` gets:
+    - `<root>/<case_parent_folder>/<case_folder>/<audit_subfolder>/<doc_type>_audit.zip`
 
 ## 3) Data model (SQLite)
 
@@ -93,6 +118,7 @@ Core tables:
 - `documents`
   - one row per document per case
   - status lifecycle, template key, signature requirements, DocuSeal ids/links, local file paths, SharePoint URLs
+  - `audit_backup_locations_json` stores extra audit copy destinations
 - `events`
   - append-only audit log with `case_id`, optional `document_id`, `event_type`, JSON details
 - `webhook_receipts`
@@ -137,6 +163,13 @@ Sync DocuSeal public URL:
 ```bash
 cd grievance-mvp
 ./sync-docuseal-public-url.sh
+```
+
+Sync DocuSeal completion webhook:
+
+```bash
+cd grievance-mvp
+./sync-docuseal-webhook.sh https://api.cwa3106.org/webhook/docuseal
 ```
 
 ## 6) Smoke tests

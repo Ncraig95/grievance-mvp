@@ -6,11 +6,14 @@ import io
 import json
 import zipfile
 from pathlib import Path
+from typing import Mapping
 
 from fastapi import APIRouter, HTTPException, Request
 
 from ..db.db import Db, utcnow
+from ..services.audit_backups import fanout_audit_backups, merge_backup_locations_json
 from ..services.case_folder_naming import build_case_folder_member_name, resolve_contract_label
+from ..services.contract_timeline import calculate_deadline, deadline_days_for_contract, resolve_contract_and_incident_date
 from ..services.graph_mail import MailAttachment
 from ..services.notification_service import NotificationService
 
@@ -88,20 +91,44 @@ def _approval_url(base: str | None, case_id: str) -> str:
     return f"{base.rstrip('/')}/{case_id}"
 
 
-def verify_docuseal_webhook(raw_body: bytes, header_sig: str | None, secret: str) -> None:
+def _extract_bearer_token(headers: Mapping[str, str]) -> str | None:
+    auth_header = headers.get("Authorization")
+    if not auth_header:
+        return None
+    prefix = "bearer "
+    if auth_header.lower().startswith(prefix):
+        token = auth_header[len(prefix) :].strip()
+        return token or None
+    return None
+
+
+def verify_docuseal_webhook(raw_body: bytes, headers: Mapping[str, str], secret: str) -> None:
     normalized_secret = (secret or "").strip()
     if not normalized_secret or normalized_secret.upper().startswith("REPLACE"):
         return
-    if not header_sig:
-        raise ValueError("Missing webhook signature header")
 
-    provided = header_sig.strip()
-    if "=" in provided:
-        provided = provided.split("=", 1)[1]
+    signature_header = headers.get("X-DocuSeal-Signature") or headers.get("X-Signature")
+    if signature_header:
+        provided = signature_header.strip()
+        if "=" in provided:
+            provided = provided.split("=", 1)[1]
 
-    expected = hmac.new(normalized_secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(provided.lower(), expected.lower()):
-        raise ValueError("Signature mismatch")
+        expected = hmac.new(normalized_secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(provided.lower(), expected.lower()):
+            raise ValueError("Signature mismatch")
+        return
+
+    token_header = (
+        headers.get("X-Webhook-Token")
+        or headers.get("X-DocuSeal-Webhook-Token")
+        or headers.get("X-Webhook-Secret")
+        or headers.get("X-DocuSeal-Secret")
+        or _extract_bearer_token(headers)
+    )
+    if token_header and hmac.compare_digest(token_header.strip(), normalized_secret):
+        return
+
+    raise ValueError("Missing or invalid webhook authentication")
 
 
 @router.post("/webhook/docuseal")
@@ -115,9 +142,8 @@ async def webhook_docuseal(request: Request):
 
     raw = await request.body()
 
-    signature_header = request.headers.get("X-DocuSeal-Signature") or request.headers.get("X-Signature")
     try:
-        verify_docuseal_webhook(raw, signature_header, cfg.docuseal.webhook_secret)
+        verify_docuseal_webhook(raw, request.headers, cfg.docuseal.webhook_secret)
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
@@ -141,7 +167,7 @@ async def webhook_docuseal(request: Request):
 
     row = await db.fetchone(
         """SELECT d.id, d.case_id, d.doc_type, d.signer_order_json, d.pdf_path, d.docuseal_signing_link,
-                  c.grievance_id, c.member_name, c.member_email, c.intake_payload_json
+                  c.grievance_id, c.grievance_number, c.member_name, c.member_email, c.intake_payload_json
            FROM documents d
            JOIN cases c ON c.id = d.case_id
            WHERE d.docuseal_submission_id=?""",
@@ -160,10 +186,17 @@ async def webhook_docuseal(request: Request):
         pdf_path,
         signing_link,
         grievance_id,
+        grievance_number,
         member_name,
         member_email,
         intake_payload_json,
     ) = row
+    contract_label, incident_dt = resolve_contract_and_incident_date(intake_payload_json)
+    if not contract_label:
+        contract_label = resolve_contract_label(intake_payload_json)
+    deadline_days = deadline_days_for_contract(contract_label)
+    deadline_dt = calculate_deadline(incident_dt, deadline_days)
+    projected_grievance_number = grievance_number or grievance_id
     folder_member_name = build_case_folder_member_name(
         member_name,
         resolve_contract_label(intake_payload_json),
@@ -206,6 +239,7 @@ async def webhook_docuseal(request: Request):
     sharepoint_generated_url: str | None = None
     sharepoint_signed_url: str | None = None
     sharepoint_audit_url: str | None = None
+    audit_backup_locations_json: str | None = None
     sharepoint_case_folder: str | None = None
     sharepoint_case_web_url: str | None = None
 
@@ -250,17 +284,41 @@ async def webhook_docuseal(request: Request):
                 sharepoint_signed_url = uploaded_signed.web_url
 
             if audit_zip_path and Path(audit_zip_path).exists():
-                uploaded_audit = graph.upload_to_case_subfolder(
+                backup_outcome = fanout_audit_backups(
+                    graph=graph,
                     site_hostname=cfg.graph.site_hostname,
                     site_path=cfg.graph.site_path,
                     library=cfg.graph.document_library,
-                    case_folder_name=case_folder.folder_name,
                     case_parent_folder=cfg.graph.case_parent_folder,
-                    subfolder=cfg.graph.audit_subfolder,
+                    case_folder_name=case_folder.folder_name,
+                    primary_subfolder=cfg.graph.audit_subfolder,
+                    extra_subfolders=cfg.graph.audit_backup_subfolders,
+                    local_backup_roots=cfg.graph.audit_local_backup_roots,
                     filename=f"{doc_type}_audit.zip",
                     file_bytes=Path(audit_zip_path).read_bytes(),
                 )
-                sharepoint_audit_url = uploaded_audit.web_url
+                sharepoint_audit_url = backup_outcome.primary_web_url
+                audit_backup_locations_json = merge_backup_locations_json(None, backup_outcome)
+                if backup_outcome.failures:
+                    await db.add_event(
+                        case_id,
+                        document_id,
+                        "audit_backup_partial_failure",
+                        {
+                            "failure_count": len(backup_outcome.failures),
+                            "destinations": [failure.destination for failure in backup_outcome.failures],
+                        },
+                    )
+                else:
+                    await db.add_event(
+                        case_id,
+                        document_id,
+                        "audit_backup_completed",
+                        {
+                            "sharepoint_copy_count": len(backup_outcome.sharepoint_copies),
+                            "local_copy_count": len(backup_outcome.local_paths),
+                        },
+                    )
     except Exception as exc:
         await db.add_event(case_id, document_id, "sharepoint_upload_failed", {"error": str(exc)})
         logger.exception("sharepoint_upload_failed", extra={"correlation_id": case_id, "document_id": document_id})
@@ -268,7 +326,8 @@ async def webhook_docuseal(request: Request):
     await db.exec(
         """UPDATE documents
            SET status=?, completed_at_utc=?, signed_pdf_path=?, audit_zip_path=?,
-               sharepoint_generated_url=?, sharepoint_signed_url=?, sharepoint_audit_url=?
+               sharepoint_generated_url=?, sharepoint_signed_url=?, sharepoint_audit_url=?,
+               audit_backup_locations_json=?
            WHERE id=?""",
         (
             "signed",
@@ -278,6 +337,7 @@ async def webhook_docuseal(request: Request):
             sharepoint_generated_url,
             sharepoint_signed_url,
             sharepoint_audit_url,
+            audit_backup_locations_json,
             document_id,
         ),
     )
@@ -320,6 +380,11 @@ async def webhook_docuseal(request: Request):
     common_context = {
         "case_id": case_id,
         "grievance_id": grievance_id,
+        "projected_grievance_number": projected_grievance_number,
+        "contract_name": contract_label or "",
+        "incident_date": incident_dt.isoformat() if incident_dt else "",
+        "deadline_days": str(deadline_days or ""),
+        "deadline_date": deadline_dt.isoformat() if deadline_dt else "",
         "document_id": document_id,
         "document_type": doc_type,
         "docuseal_signing_url": docuseal_signing_url,
@@ -353,7 +418,7 @@ async def webhook_docuseal(request: Request):
                 attachments=attachments,
             )
 
-        if cfg.email.derek_email:
+        if cfg.require_approver_decision and cfg.email.derek_email:
             await notifications.send_one(
                 case_id=case_id,
                 document_id=document_id,
@@ -373,10 +438,42 @@ async def webhook_docuseal(request: Request):
         (case_id,),
     )
     if remaining and int(remaining[0]) == 0:
-        await db.exec(
-            "UPDATE cases SET status='pending_approval', approval_status='pending' WHERE id=?",
-            (case_id,),
-        )
+        if cfg.require_approver_decision:
+            await db.exec(
+                "UPDATE cases SET status='pending_approval', approval_status='pending' WHERE id=?",
+                (case_id,),
+            )
+        else:
+            approved_ts = utcnow()
+            await db.exec(
+                """UPDATE documents
+                   SET status='approved'
+                   WHERE case_id=?
+                     AND status IN ('signed', 'pending_approval', 'created')""",
+                (case_id,),
+            )
+            await db.exec(
+                """UPDATE cases
+                   SET status='approved',
+                       approval_status='approved',
+                       approved_at_utc=?,
+                       approver_email=?,
+                       approval_notes=?
+                   WHERE id=?
+                     AND approval_status!='rejected'""",
+                (
+                    approved_ts,
+                    "system@automation",
+                    "Auto-approved by workflow (require_approver_decision=false)",
+                    case_id,
+                ),
+            )
+            await db.add_event(
+                case_id,
+                None,
+                "case_auto_approved",
+                {"approved_at_utc": approved_ts},
+            )
 
     await db.add_event(case_id, document_id, "docuseal_completion_processed", {"receipt_key": receipt_key})
     await db.mark_receipt_handled("docuseal", receipt_key)

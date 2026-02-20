@@ -44,11 +44,12 @@ class DocuSealClient:
         return f"{cleaned or 'document'}.pdf"
 
     @staticmethod
-    def _placeholder_patterns() -> tuple[re.Pattern[str], re.Pattern[str]]:
-        return (
-            re.compile(r"^\{\{Sig_es_:signer(\d+):signature\}\}$", re.IGNORECASE),
-            re.compile(r"^\{\{Dte_es_:signer(\d+):date\}\}$", re.IGNORECASE),
-        )
+    def _placeholder_patterns() -> dict[str, re.Pattern[str]]:
+        return {
+            "signature": re.compile(r"^\{\{Sig_es_:signer(\d+):signature\}\}$", re.IGNORECASE),
+            "date": re.compile(r"^\{\{Dte_es_:signer(\d+):date\}\}$", re.IGNORECASE),
+            "email": re.compile(r"^\{\{Eml_es_:signer(\d+):email\}\}$", re.IGNORECASE),
+        }
 
     def _headers(self, *, is_json: bool = True) -> dict:
         headers = {"X-Auth-Token": self.api_token}
@@ -166,7 +167,7 @@ class DocuSealClient:
         if proc.returncode != 0:
             return {}
 
-        sig_re, date_re = self._placeholder_patterns()
+        patterns = self._placeholder_patterns()
         page_re = re.compile(r'<page[^>]*width="([0-9.]+)"[^>]*height="([0-9.]+)"', re.IGNORECASE)
         word_re = re.compile(
             r'<word[^>]*xMin="([0-9.]+)"[^>]*yMin="([0-9.]+)"[^>]*xMax="([0-9.]+)"[^>]*yMax="([0-9.]+)"[^>]*>(.*?)</word>',
@@ -191,15 +192,17 @@ class DocuSealClient:
                 continue
 
             token = unescape(word_match.group(5)).strip()
-            match = sig_re.match(token)
-            field_type = "signature"
-            if not match:
-                match = date_re.match(token)
-                field_type = "date"
-            if not match:
+            signer_index: int | None = None
+            field_type: str | None = None
+            for candidate_type, pattern in patterns.items():
+                match = pattern.match(token)
+                if match:
+                    signer_index = int(match.group(1))
+                    field_type = candidate_type
+                    break
+            if signer_index is None or field_type is None:
                 continue
 
-            signer_index = int(match.group(1))
             areas.setdefault((signer_index, field_type), []).append(
                 {
                     "x_min": float(word_match.group(1)),
@@ -222,6 +225,9 @@ class DocuSealClient:
         if field_type == "signature":
             min_w, min_h, pad_w, pad_h = 140.0, 28.0, 8.0, 4.0
             y_lift = 14.0
+        elif field_type == "email":
+            min_w, min_h, pad_w, pad_h = 180.0, 18.0, 6.0, 2.0
+            y_lift = 5.0
         else:
             min_w, min_h, pad_w, pad_h = 90.0, 18.0, 4.0, 2.0
             y_lift = 6.0
@@ -282,28 +288,30 @@ class DocuSealClient:
             if not submitter_uuid:
                 continue
 
-            for field_type in ("signature", "date"):
+            for field_type in ("signature", "date", "email"):
                 anchors = placeholder_areas.get((signer_idx, field_type), [])
                 if not anchors:
                     continue
-                rebuilt_fields.append(
-                    {
-                        "uuid": str(uuid4()),
-                        "submitter_uuid": submitter_uuid,
-                        "name": "",
-                        "type": field_type,
-                        "required": True,
-                        "preferences": {},
-                        "areas": [
-                            self._normalize_area(
-                                raw=anchor,
-                                field_type=field_type,
-                                attachment_uuid=attachment_uuid,
-                            )
-                            for anchor in anchors
-                        ],
-                    }
-                )
+                field_name = f"signer{signer_idx}_email" if field_type == "email" else ""
+                field_payload = {
+                    "uuid": str(uuid4()),
+                    "submitter_uuid": submitter_uuid,
+                    "name": field_name,
+                    "type": "text" if field_type == "email" else field_type,
+                    "required": field_type != "email",
+                    "preferences": {},
+                    "areas": [
+                        self._normalize_area(
+                            raw=anchor,
+                            field_type=field_type,
+                            attachment_uuid=attachment_uuid,
+                        )
+                        for anchor in anchors
+                    ],
+                }
+                if field_type == "email":
+                    field_payload["readonly"] = True
+                rebuilt_fields.append(field_payload)
 
         if not rebuilt_fields:
             return
@@ -314,6 +322,63 @@ class DocuSealClient:
             json={"fields": rebuilt_fields},
             timeout=self.timeout,
         )
+
+    def _resolve_signer_email_fields(self, *, template_id: str) -> dict[int, str]:
+        try:
+            resp = requests.get(
+                f"{self.base_url}/api/templates/{template_id}",
+                headers=self._headers(is_json=False),
+                timeout=self.timeout,
+            )
+        except Exception:
+            return {}
+        if not (200 <= resp.status_code < 300):
+            return {}
+
+        template_obj = self._json_object(resp)
+        fields = template_obj.get("fields")
+        submitters = template_obj.get("submitters")
+        if not isinstance(fields, list) or not isinstance(submitters, list):
+            return {}
+
+        uuid_to_signer_index: dict[str, int] = {}
+        for idx, submitter in enumerate(submitters, start=1):
+            if not isinstance(submitter, dict):
+                continue
+            submitter_uuid = str(submitter.get("uuid") or "").strip()
+            if submitter_uuid:
+                uuid_to_signer_index[submitter_uuid] = idx
+
+        signer_email_fields: dict[int, str] = {}
+        name_re = re.compile(r"^signer(\d+)_email$", re.IGNORECASE)
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            if str(field.get("type") or "").strip().lower() != "text":
+                continue
+            field_name = str(field.get("name") or "").strip()
+            match = name_re.match(field_name)
+            if not match:
+                continue
+            signer_idx = int(match.group(1))
+            submitter_uuid = str(field.get("submitter_uuid") or "").strip()
+            if submitter_uuid and submitter_uuid in uuid_to_signer_index:
+                signer_idx = uuid_to_signer_index[submitter_uuid]
+            signer_email_fields[signer_idx] = field_name
+
+        return signer_email_fields
+
+    @staticmethod
+    def _build_submitters_payload(signers: list[str], signer_email_fields: dict[int, str]) -> list[dict]:
+        submitters_payload: list[dict] = []
+        for idx, signer_email in enumerate(signers, start=1):
+            item: dict[str, object] = {"email": signer_email}
+            email_field_name = signer_email_fields.get(idx)
+            if email_field_name:
+                item["values"] = {email_field_name: signer_email}
+                item["readonly_fields"] = [email_field_name]
+            submitters_payload.append(item)
+        return submitters_payload
 
     def _rewrite_public_url(self, value: str | None) -> str | None:
         if not value:
@@ -411,11 +476,20 @@ class DocuSealClient:
                 "DocuSeal template resolution failed. Configure docuseal.default_template_id/template_ids."
             )
 
-        signer_objs = [{"email": s} for s in signers]
+        signer_email_fields = self._resolve_signer_email_fields(template_id=selected_template_id)
+        signer_objs = self._build_submitters_payload(signers, signer_email_fields)
+        plain_signer_objs = [{"email": s} for s in signers]
         payload_variants = [
             {
                 "template_id": selected_template_id,
                 "submitters": signer_objs,
+                "name": title,
+                "send_email": False,
+                "metadata": metadata or {},
+            },
+            {
+                "template_id": selected_template_id,
+                "submitters": plain_signer_objs,
                 "name": title,
                 "send_email": False,
                 "metadata": metadata or {},

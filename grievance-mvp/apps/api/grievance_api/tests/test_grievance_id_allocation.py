@@ -131,6 +131,8 @@ class AllocatorIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 generated_subfolder="Generated",
                 signed_subfolder="Signed",
                 audit_subfolder="Audit",
+                audit_backup_subfolders=(),
+                audit_local_backup_roots=(),
                 client_supplied_subfolder="Client supplied data",
             ),
             docuseal=DocuSealConfig(

@@ -65,6 +65,7 @@ def migrate(db_path: str) -> None:
         _ensure_column(con, "documents", "sharepoint_generated_url", "TEXT")
         _ensure_column(con, "documents", "sharepoint_signed_url", "TEXT")
         _ensure_column(con, "documents", "sharepoint_audit_url", "TEXT")
+        _ensure_column(con, "documents", "audit_backup_locations_json", "TEXT")
 
         doc_cols = _table_columns(con, "documents")
         if "pdf_sha256" not in doc_cols and "pdf_sa256" in doc_cols:

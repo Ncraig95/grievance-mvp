@@ -1,7 +1,7 @@
 ENV_FILE := .env
 COMPOSE := docker compose --env-file $(ENV_FILE)
 
-.PHONY: up down restart ps logs config pull cloudflare sync-docuseal-url smoke smoke-signed verify-download
+.PHONY: up down restart ps logs config pull cloudflare sync-docuseal-url sync-docuseal-webhook smoke smoke-signed verify-download
 
 up:
 	$(COMPOSE) up -d --build
@@ -29,6 +29,9 @@ cloudflare:
 
 sync-docuseal-url:
 	./sync-docuseal-public-url.sh
+
+sync-docuseal-webhook:
+	./sync-docuseal-webhook.sh
 
 smoke:
 	./scripts/smoke-e2e.sh

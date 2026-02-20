@@ -1,4 +1,7 @@
 hmac_shared_secret: REPLACE_WITH_LONG_RANDOM_SECRET
+log_level: INFO
+wait_for_grievance_number_before_signature: true
+require_approver_decision: true
 intake_auth:
   # Optional additional gate for /intake when HMAC is disabled.
   # Keep blank to disable this check.
@@ -20,6 +23,35 @@ doc_templates:
   true_intent_grievance_brief: /app/templates/docx/form_true_intent_grievance_brief_revised_05.20.21.docx
   disciplinary_grievance_brief: /app/templates/docx/form_disciplinary_grievance_brief_revised_05.19.21.docx
   bst_grievance_form_3g3a: /app/templates/docx/bst_grievance_form_3g3a.docx
+rendering:
+  normalize_split_placeholders: true
+  layout_policies:
+    statement_of_occurrence:
+      enabled: true
+      grievance_number_fallback: grievance_id
+      single_line_ellipsis: true
+      max_chars:
+        grievant_name: 32
+        work_address: 44
+        home_address: 44
+        personal_cell: 16
+        personal_email: 36
+        department: 20
+        title: 24
+        supervisor_name: 28
+        supervisor_phone: 18
+        supervisor_email: 36
+        grievants_uid: 18
+        article: 22
+        witness_1_name: 24
+        witness_1_title: 20
+        witness_1_phone: 18
+        witness_2_name: 24
+        witness_2_title: 20
+        witness_2_phone: 18
+        witness_3_name: 24
+        witness_3_title: 20
+        witness_3_phone: 18
 libreoffice_timeout_seconds: 45
 grievance_id:
   mode: auto
@@ -48,9 +80,16 @@ graph:
   generated_subfolder: Generated
   signed_subfolder: Signed
   audit_subfolder: Audit
+  # Optional extra SharePoint subfolders for additional audit copies.
+  # The app writes the same <doc_type>_audit.zip into each listed folder.
+  audit_backup_subfolders: []
+  # Optional local/NAS mirror roots. Example:
+  # - /mnt/triad-nas/grievance-backups
+  audit_local_backup_roots: []
   client_supplied_subfolder: Client supplied data
 email:
   enabled: true
+  test_mode: false
   sender_user_id: grievance-mailbox@REPLACE.onmicrosoft.com
   templates_dir: /app/templates/email
   internal_recipients:

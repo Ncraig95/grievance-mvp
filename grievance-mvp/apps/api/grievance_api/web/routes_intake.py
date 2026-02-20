@@ -6,7 +6,7 @@ import json
 import re
 import tempfile
 import textwrap
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -19,6 +19,7 @@ from ..core.ids import new_case_id, new_document_id, normalize_grievance_id
 from ..core.intake_auth import verify_intake_request_auth
 from ..db.db import Db, utcnow
 from ..services.case_folder_naming import build_case_folder_member_name
+from ..services.contract_timeline import parse_incident_date
 from ..services.doc_render import render_docx
 from ..services.grievance_id_allocator import GrievanceIdAllocationError, GrievanceIdAllocator
 from ..services.notification_service import NotificationService
@@ -41,6 +42,18 @@ _FIELD_KEY_SAFE = re.compile(r"[^A-Za-z0-9]+")
 _CLIENT_SUPPLIED_TOTAL_MAX_BYTES = 1_073_741_824
 _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 _DEFAULT_STATEMENT_WRAP_WIDTH = 95
+_DATE_FIELD_KEYS = {
+    "incident_date",
+    "incidentdate",
+    "seniority_date",
+    "senioritydate",
+    "ncs_date",
+    "ncsdate",
+    "request_date",
+    "requestdate",
+    "today_date",
+    "todaydate",
+}
 
 
 def _safe_name(value: str) -> str:
@@ -85,6 +98,29 @@ def _coerce_context_value(value: object) -> object:
     if isinstance(value, list):
         return ", ".join(str(v) for v in value if v is not None)
     return json.dumps(value, ensure_ascii=False)
+
+
+def _is_date_field_key(key: str) -> bool:
+    return _normalize_field_key(key) in _DATE_FIELD_KEYS
+
+
+def _format_context_date_value(value: object) -> object:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, bool):
+        return value
+
+    text = str(value).strip()
+    if not text:
+        return ""
+    parsed = parse_incident_date(text)
+    if parsed is None:
+        return text
+    return parsed.isoformat()
 
 
 def _coerce_positive_int(value: object, fallback: int) -> int:
@@ -175,6 +211,11 @@ def _apply_statement_defaults(
     grievance_number: str | None,
 ) -> None:
     member_name = f"{payload.grievant_firstname} {payload.grievant_lastname}".strip()
+    grievants_uid_seed = context.get("grievants_uid")
+    if grievants_uid_seed in (None, ""):
+        grievants_uid_seed = context.get("grievants uid")
+    if grievants_uid_seed in (None, ""):
+        grievants_uid_seed = grievance_id
     defaults: dict[str, object] = {
         "grievant_name": member_name,
         "work_address": payload.work_location or "",
@@ -189,9 +230,9 @@ def _apply_statement_defaults(
         "supervisor_phone": "",
         "supervisor_email": "",
         # Legacy placeholder in template includes a space.
-        "grievants uid": grievance_id,
-        "grievants_uid": grievance_id,
-        "incident_date": payload.incident_date or "",
+        "grievants uid": grievants_uid_seed,
+        "grievants_uid": grievants_uid_seed,
+        "incident_date": _format_context_date_value(payload.incident_date),
         "article": "",
         "statement_text": payload.narrative or "",
         "statement_continuation": "",
@@ -208,6 +249,74 @@ def _apply_statement_defaults(
     }
     for key, value in defaults.items():
         context.setdefault(key, value)
+
+
+def _clamp_with_ellipsis(value: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(value) <= max_chars:
+        return value
+    if max_chars == 1:
+        return "…"
+    body = value[: max_chars - 1].rstrip()
+    if not body:
+        body = value[: max_chars - 1]
+    return body + "…"
+
+
+def _apply_layout_policy_context(
+    *,
+    cfg,  # noqa: ANN001
+    doc_type: str,
+    context: dict[str, object],
+) -> dict[str, object]:
+    rendering_cfg = getattr(cfg, "rendering", None)
+    if rendering_cfg is None:
+        return {"policy_applied": False, "fallback_applied": False, "clamped_fields": []}
+
+    policy = rendering_cfg.layout_policies.get(doc_type)
+    if not policy or not policy.enabled:
+        return {"policy_applied": False, "fallback_applied": False, "clamped_fields": []}
+
+    fallback_applied = False
+    if policy.grievance_number_fallback == "grievance_id":
+        grievance_number = str(context.get("grievance_number", "") or "").strip()
+        if not grievance_number:
+            grievance_id = str(context.get("grievance_id", "") or "").strip()
+            if grievance_id:
+                context["grievance_number"] = grievance_id
+                fallback_applied = True
+
+    clamped_fields: list[str] = []
+    if policy.single_line_ellipsis:
+        for key, max_chars in policy.max_chars.items():
+            normalized_policy_key = _normalize_field_key(key)
+            target_keys: list[str] = []
+            for candidate in context.keys():
+                if _normalize_field_key(str(candidate)) == normalized_policy_key:
+                    target_keys.append(str(candidate))
+            if not target_keys and key in context:
+                target_keys.append(key)
+            if not target_keys:
+                continue
+
+            changed = False
+            for target_key in target_keys:
+                raw = context.get(target_key)
+                if raw is None:
+                    continue
+                text_value = str(raw)
+                clamped = _clamp_with_ellipsis(text_value, int(max_chars))
+                if clamped != text_value:
+                    context[target_key] = clamped
+                    changed = True
+
+            if changed:
+                clamped_fields.append(key)
+
+    return {
+        "policy_applied": True,
+        "fallback_applied": fallback_applied,
+        "clamped_fields": clamped_fields,
+    }
 
 
 def _validate_grievance_input_mode(grievance_mode: str, incoming_grievance_id: str) -> None:
@@ -401,13 +510,14 @@ def _resolve_document_command(cfg, document_command: str) -> DocumentRequest:  #
 
 def _build_template_context(
     *,
+    cfg,  # noqa: ANN001
     payload: IntakeRequest,
     case_id: str,
     grievance_id: str,
     document_id: str,
     doc_type: str,
     grievance_number: str | None,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], dict[str, object]]:
     payload_data = payload.model_dump(
         exclude={"documents", "template_data", "document_command", "client_supplied_files"}
     )
@@ -426,10 +536,12 @@ def _build_template_context(
 
     for key, raw_val in merged_fields.items():
         value = _coerce_context_value(raw_val)
+        normalized = _normalize_field_key(key)
+        if _is_date_field_key(normalized):
+            value = _format_context_date_value(value)
         if key not in protected_keys:
             context[key] = value
 
-        normalized = _normalize_field_key(key)
         if normalized and normalized not in context:
             context[normalized] = value
 
@@ -439,6 +551,9 @@ def _build_template_context(
         grievance_id=grievance_id,
         grievance_number=grievance_number,
     )
+    for ctx_key in tuple(context.keys()):
+        if _is_date_field_key(str(ctx_key)):
+            context[ctx_key] = _format_context_date_value(context.get(ctx_key))
 
     member_name = f"{payload.grievant_firstname} {payload.grievant_lastname}".strip()
     if member_name:
@@ -449,8 +564,13 @@ def _build_template_context(
     context.setdefault("today_date", today)
     context.setdefault("request_date", today)
     _apply_dynamic_statement_context(context)
+    layout_meta = _apply_layout_policy_context(
+        cfg=cfg,
+        doc_type=doc_type,
+        context=context,
+    )
 
-    return context
+    return context, layout_meta
 
 
 async def _load_case_status(db: Db, case_id: str) -> CaseStatusResponse:
@@ -495,11 +615,46 @@ async def intake(request: Request):
     graph = request.app.state.graph
     notifications: NotificationService = request.app.state.notifications
 
-    await verify_intake_request_auth(request, cfg.intake_auth)
-    body = await verify_hmac(request, cfg.hmac_shared_secret)
+    client_ip = request.client.host if request.client else ""
+    try:
+        await verify_intake_request_auth(request, cfg.intake_auth)
+    except HTTPException as exc:
+        logger.warning(
+            "intake_auth_failed",
+            extra={
+                "status_code": exc.status_code,
+                "client_ip": client_ip,
+                "path": str(request.url.path),
+            },
+        )
+        raise
+
+    try:
+        body = await verify_hmac(request, cfg.hmac_shared_secret)
+    except HTTPException as exc:
+        logger.warning(
+            "intake_hmac_failed",
+            extra={
+                "status_code": exc.status_code,
+                "client_ip": client_ip,
+                "path": str(request.url.path),
+            },
+        )
+        raise
     payload = IntakeRequest.model_validate_json(body)
 
     correlation_id = payload.request_id
+    logger.info(
+        "intake_received",
+        extra={
+            "correlation_id": correlation_id,
+            "request_id": payload.request_id,
+            "grievance_mode": cfg.grievance_id.mode,
+            "has_document_command": bool((payload.document_command or "").strip()),
+            "document_count": len(payload.documents or []),
+            "client_supplied_file_count": len(payload.client_supplied_files or []),
+        },
+    )
 
     existing = await db.fetchone(
         "SELECT id, grievance_id, status FROM cases WHERE intake_request_id=?",
@@ -587,6 +742,10 @@ async def intake(request: Request):
             if not dupe:
                 raise
             dupe_case_id, dupe_grievance_id, dupe_status = dupe
+            logger.info(
+                "intake_deduped_race",
+                extra={"correlation_id": correlation_id, "case_id": dupe_case_id},
+            )
             docs = await db.fetchall(
                 "SELECT id, doc_type, status, docuseal_signing_link FROM documents WHERE case_id=? ORDER BY created_at_utc",
                 (dupe_case_id,),
@@ -658,7 +817,8 @@ async def intake(request: Request):
         docx_path = str(ddir / f"{doc_name}.docx")
         pdf_path = str(ddir / f"{doc_name}.pdf")
 
-        context = _build_template_context(
+        context, layout_meta = _build_template_context(
+            cfg=cfg,
             payload=payload,
             case_id=case_id,
             grievance_id=grievance_id,
@@ -666,6 +826,19 @@ async def intake(request: Request):
             doc_type=doc_type,
             grievance_number=grievance_number,
         )
+        if layout_meta.get("policy_applied"):
+            await db.add_event(
+                case_id,
+                document_id,
+                "layout_policy_applied",
+                {
+                    "doc_type": doc_type,
+                    "policy_key": doc_type,
+                    "grievance_number_fallback_applied": bool(layout_meta.get("fallback_applied")),
+                    "clamped_field_count": len(layout_meta.get("clamped_fields", [])),
+                    "clamped_fields": list(layout_meta.get("clamped_fields", [])),
+                },
+            )
 
         alignment_pdf_bytes: bytes | None = None
         try:
@@ -678,6 +851,7 @@ async def intake(request: Request):
                         context,
                         anchor_docx_path,
                         strip_signature_placeholders=False,
+                        normalize_split_placeholders=cfg.rendering.normalize_split_placeholders,
                     )
                     anchor_pdf_path = docx_to_pdf(
                         anchor_docx_path,
@@ -695,9 +869,15 @@ async def intake(request: Request):
                     context,
                     docx_path,
                     strip_signature_placeholders=True,
+                    normalize_split_placeholders=cfg.rendering.normalize_split_placeholders,
                 )
             else:
-                render_docx(template_path, context, docx_path)
+                render_docx(
+                    template_path,
+                    context,
+                    docx_path,
+                    normalize_split_placeholders=cfg.rendering.normalize_split_placeholders,
+                )
             pdf_path = docx_to_pdf(docx_path, str(ddir), cfg.libreoffice_timeout_seconds)
             pdf_bytes = Path(pdf_path).read_bytes()
             pdf_sha = hashlib.sha256(pdf_bytes).hexdigest()
@@ -762,7 +942,10 @@ async def intake(request: Request):
 
         if doc_req.requires_signature:
             signer_order = normalize_signers(doc_req.signers, _preferred_signer_email(payload))
-            if not grievance_number:
+            requires_grievance_number_gate = (
+                cfg.wait_for_grievance_number_before_signature and not grievance_number
+            )
+            if requires_grievance_number_gate:
                 status = "pending_grievance_number"
                 any_signature_queued = True
                 await db.exec(
@@ -798,9 +981,14 @@ async def intake(request: Request):
                 any_signature_requested = any_signature_requested or status == "sent_for_signature"
                 any_failed = any_failed or status == "failed"
         else:
-            status = "pending_approval"
+            if cfg.require_approver_decision:
+                status = "pending_approval"
+                event_type = "no_signature_required"
+            else:
+                status = "approved"
+                event_type = "no_signature_auto_approved"
             await db.exec("UPDATE documents SET status=? WHERE id=?", (status, document_id))
-            await db.add_event(case_id, document_id, "no_signature_required", {})
+            await db.add_event(case_id, document_id, event_type, {})
 
         doc_statuses.append(
             DocumentStatus(document_id=document_id, doc_type=doc_type, status=status, signing_link=signing_link)
@@ -813,9 +1001,28 @@ async def intake(request: Request):
     elif any_failed:
         case_status = "failed"
     else:
-        case_status = "pending_approval"
+        case_status = "pending_approval" if cfg.require_approver_decision else "approved"
 
-    await db.exec("UPDATE cases SET status=? WHERE id=?", (case_status, case_id))
+    if cfg.require_approver_decision:
+        await db.exec("UPDATE cases SET status=? WHERE id=?", (case_status, case_id))
+    else:
+        await db.exec(
+            "UPDATE cases SET status=?, approval_status='approved', approved_at_utc=?, approver_email=? WHERE id=?",
+            (case_status, utcnow(), "system@automation", case_id),
+        )
     await db.add_event(case_id, None, "intake_completed", {"status": case_status, "document_count": len(doc_statuses)})
+    logger.info(
+        "intake_completed",
+        extra={
+            "correlation_id": correlation_id,
+            "case_id": case_id,
+            "grievance_id": grievance_id,
+            "status": case_status,
+            "document_count": len(doc_statuses),
+            "signature_requested": any_signature_requested,
+            "signature_queued": any_signature_queued,
+            "has_failures": any_failed,
+        },
+    )
 
     return IntakeResponse(case_id=case_id, grievance_id=grievance_id, status=case_status, documents=doc_statuses)
