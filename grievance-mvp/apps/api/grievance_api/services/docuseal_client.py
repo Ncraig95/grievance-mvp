@@ -46,10 +46,19 @@ class DocuSealClient:
     @staticmethod
     def _placeholder_patterns() -> dict[str, re.Pattern[str]]:
         return {
-            "signature": re.compile(r"^\{\{Sig_es_:signer(\d+):signature\}\}$", re.IGNORECASE),
-            "date": re.compile(r"^\{\{Dte_es_:signer(\d+):date\}\}$", re.IGNORECASE),
-            "email": re.compile(r"^\{\{Eml_es_:signer(\d+):email\}\}$", re.IGNORECASE),
+            # pdftotext -bbox often strips surrounding braces from placeholders, so
+            # we match the inner marker token and normalize optional braces separately.
+            "signature": re.compile(r"^Sig_es_:signer(\d+):signature$", re.IGNORECASE),
+            "date": re.compile(r"^Dte_es_:signer(\d+):date$", re.IGNORECASE),
+            "email": re.compile(r"^Eml_es_:signer(\d+):email$", re.IGNORECASE),
         }
+
+    @staticmethod
+    def _normalize_placeholder_token(token: str) -> str:
+        cleaned = (token or "").strip()
+        if cleaned.startswith("{{") and cleaned.endswith("}}"):
+            cleaned = cleaned[2:-2]
+        return cleaned.strip()
 
     def _headers(self, *, is_json: bool = True) -> dict:
         headers = {"X-Auth-Token": self.api_token}
@@ -191,7 +200,9 @@ class DocuSealClient:
             if not word_match or page_index < 0:
                 continue
 
-            token = unescape(word_match.group(5)).strip()
+            token = self._normalize_placeholder_token(unescape(word_match.group(5)))
+            if not token:
+                continue
             signer_index: int | None = None
             field_type: str | None = None
             for candidate_type, pattern in patterns.items():

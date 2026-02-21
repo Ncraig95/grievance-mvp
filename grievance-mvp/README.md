@@ -172,7 +172,63 @@ cd grievance-mvp
 ./sync-docuseal-webhook.sh https://api.cwa3106.org/webhook/docuseal
 ```
 
-## 6) Smoke tests
+## 6) Autostart + self-heal
+
+Use systemd for boot startup plus a watchdog timer.
+
+Install (Ubuntu host):
+
+```bash
+cd grievance-mvp
+sudo ./scripts/install-systemd-services.sh
+```
+
+What gets installed:
+- `grievance-mvp.service` (runs `docker compose up -d` at boot)
+- `grievance-mvp-watchdog.timer` (runs every 2 minutes)
+- `grievance-mvp-watchdog.service` (calls `scripts/watchdog-restart.sh`)
+
+Watchdog behavior:
+- checks `WATCHDOG_HEALTH_URL` (default `http://127.0.0.1:8080/healthz`)
+- increments failure counter on each failed check
+- auto-runs `docker compose up -d` after `WATCHDOG_FAILURE_THRESHOLD` failures (default `3`)
+- enforces cooldown with `WATCHDOG_RESTART_COOLDOWN_SECONDS` (default `600`)
+- optionally sends an internal Graph alert email (`WATCHDOG_ALERT_EMAIL=true`)
+- optional popup/wall notification (`WATCHDOG_ALERT_POPUP=true`)
+
+Override switch (disable auto-restart):
+
+```bash
+cd grievance-mvp
+make watchdog-disable
+```
+
+Re-enable:
+
+```bash
+cd grievance-mvp
+make watchdog-enable
+```
+
+Manual status/check:
+
+```bash
+cd grievance-mvp
+make watchdog-status
+make watchdog-check
+```
+
+Main watchdog env vars (`grievance-mvp/.env`):
+- `WATCHDOG_HEALTH_URL`
+- `WATCHDOG_FAILURE_THRESHOLD`
+- `WATCHDOG_RESTART_COOLDOWN_SECONDS`
+- `WATCHDOG_CURL_TIMEOUT_SECONDS`
+- `WATCHDOG_POST_RESTART_HEALTH_RETRIES`
+- `WATCHDOG_POST_RESTART_HEALTH_DELAY_SECONDS`
+- `WATCHDOG_ALERT_EMAIL`
+- `WATCHDOG_ALERT_POPUP`
+
+## 7) Smoke tests
 
 Local end-to-end smoke (intake -> docs -> approval -> docuseal local/external checks):
 
@@ -220,7 +276,7 @@ cd grievance-mvp
 ./scripts/verify-docuseal-download.sh
 ```
 
-## 7) Microsoft Graph requirements
+## 8) Microsoft Graph requirements
 
 Mail (app-owned delivery):
 - `Mail.Send`
@@ -233,7 +289,7 @@ SharePoint:
 Least privilege:
 - Restrict mailbox scope with Exchange application access policy to the authorized sender mailbox.
 
-## 8) Security notes
+## 9) Security notes
 
 - Do not commit secrets.
 - Keep secrets in:
@@ -267,7 +323,7 @@ Rules:
 - If both methods are configured, both checks are enforced.
 - Cloudflare ID/secret must either both be set or both be blank.
 
-## 9) Key API endpoints
+## 10) Key API endpoints
 
 - `GET /healthz`
 - `POST /intake`
@@ -348,6 +404,75 @@ Example file item:
 {
   "file_name": "supporting-evidence.pdf",
   "download_url": "https://<tenant>.sharepoint.com/.../download?...token..."
+}
+```
+
+## 10b) Power Automate setup (BellSouth Meeting Request)
+
+Use:
+- `document_command: "bellsouth_meeting_request"`
+- `grievance_id`: existing grievance number whose SharePoint folder already exists
+
+Folder resolution behavior for BellSouth:
+- Matches only folders named exactly `<grievance_id>` or starting with `<grievance_id> ` under `graph.case_parent_folder`.
+- `422`: no matching folder.
+- `409`: multiple matching folders (response includes `candidates` list).
+- Folder is never auto-created in this mode.
+
+Default signer behavior for BellSouth:
+- If `documents[].signers` is provided, that wins.
+- Else uses `template_data.union_rep_email`.
+- Else falls back to `grievant_email`.
+- If no valid signer resolves, signature send is marked failed for that document.
+
+Required/expected `template_data` keys for this template:
+- `to`
+- `request_date`
+- `grievant_names`
+- `grievants_attending`
+- `grievants_in_attendance`
+- `date_grievance_occurred`
+- `issue_contract_section`
+- `informal_meeting_date`
+- `meeting_requested_date`
+- `meeting_requested_time`
+- `meeting_requested_place`
+- `union_rep_email` (default signer source)
+- `union_rep_attending`
+- `union_reps_in_attendance`
+- `company_reps_in_attendance`
+- `additional_info`
+- `reply_to_name_1`
+- `reply_to_name_2`
+- `reply_to_address_1`
+- `reply_to_address_2`
+
+BellSouth payload example:
+
+```json
+{
+  "request_id": "forms-@{triggerOutputs()?['body/responseId']}",
+  "document_command": "bellsouth_meeting_request",
+  "grievance_id": "@{outputs('Get_response_details')?['body/r_grievance_id']}",
+  "contract": "BellSouth",
+  "grievant_firstname": "@{outputs('Get_response_details')?['body/r_first_name']}",
+  "grievant_lastname": "@{outputs('Get_response_details')?['body/r_last_name']}",
+  "grievant_email": "@{outputs('Get_response_details')?['body/r_grievant_email']}",
+  "grievant_phone": "@{outputs('Get_response_details')?['body/r_phone']}",
+  "incident_date": "@{outputs('Get_response_details')?['body/r_incident_date']}",
+  "narrative": "@{outputs('Get_response_details')?['body/r_narrative']}",
+  "template_data": {
+    "union_rep_email": "@{outputs('Get_response_details')?['body/r_union_rep_email']}",
+    "to": "@{outputs('Get_response_details')?['body/r_to']}",
+    "request_date": "@{outputs('Get_response_details')?['body/r_request_date']}",
+    "grievant_names": "@{outputs('Get_response_details')?['body/r_grievant_names']}",
+    "date_grievance_occurred": "@{outputs('Get_response_details')?['body/r_date_grievance_occurred']}",
+    "issue_contract_section": "@{outputs('Get_response_details')?['body/r_issue_contract_section']}",
+    "meeting_requested_date": "@{outputs('Get_response_details')?['body/r_meeting_requested_date']}",
+    "meeting_requested_time": "@{outputs('Get_response_details')?['body/r_meeting_requested_time']}",
+    "meeting_requested_place": "@{outputs('Get_response_details')?['body/r_meeting_requested_place']}",
+    "additional_info": "@{outputs('Get_response_details')?['body/r_additional_info']}"
+  }
 }
 ```
 

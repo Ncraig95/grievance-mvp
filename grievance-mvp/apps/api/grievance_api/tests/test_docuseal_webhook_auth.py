@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import unittest
 
-from grievance_api.web.routes_webhook import verify_docuseal_webhook
+from grievance_api.web.routes_webhook import _build_receipt_key, verify_docuseal_webhook
 
 
 class DocuSealWebhookAuthTests(unittest.TestCase):
@@ -33,6 +33,22 @@ class DocuSealWebhookAuthTests(unittest.TestCase):
     def test_invalid_token_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             verify_docuseal_webhook(b"{}", {"X-Webhook-Token": "wrong"}, "expected")
+
+    def test_receipt_key_uses_event_id_when_present(self) -> None:
+        payload = {"event_id": "abc123", "event_type": "submission.completed", "data": {"id": 42}}
+        key = _build_receipt_key(payload, b'{"event_id":"abc123"}', "42")
+        self.assertEqual(key, "event:abc123")
+
+    def test_receipt_key_does_not_collapse_distinct_events_on_same_submission(self) -> None:
+        viewed_body = b'{"event_type":"form.viewed","data":{"id":33}}'
+        completed_body = b'{"event_type":"submission.completed","data":{"id":33}}'
+        viewed_key = _build_receipt_key({"event_type": "form.viewed", "data": {"id": 33}}, viewed_body, "33")
+        completed_key = _build_receipt_key(
+            {"event_type": "submission.completed", "data": {"id": 33}},
+            completed_body,
+            "33",
+        )
+        self.assertNotEqual(viewed_key, completed_key)
 
 
 if __name__ == "__main__":
