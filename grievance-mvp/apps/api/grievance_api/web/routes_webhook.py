@@ -17,6 +17,13 @@ from ..services.case_folder_naming import build_case_folder_member_name, resolve
 from ..services.contract_timeline import calculate_deadline, deadline_days_for_contract, resolve_contract_and_incident_date
 from ..services.graph_mail import MailAttachment
 from ..services.notification_service import NotificationService
+from ..services.staged_signature_workflow import (
+    create_or_send_stage,
+    is_3g3a_staged,
+    record_stage_artifact,
+    stage_alignment_pdf_path,
+    stage_file_path,
+)
 
 router = APIRouter()
 
@@ -246,7 +253,7 @@ async def webhook_docuseal(request: Request):
         return {"ok": True, "handled": False, "reason": "missing_submission_id"}
 
     row = await db.fetchone(
-        """SELECT d.id, d.case_id, d.doc_type, d.signer_order_json, d.pdf_path, d.docuseal_signing_link,
+        """SELECT d.id, d.case_id, d.doc_type, d.template_key, d.signer_order_json, d.pdf_path, d.docuseal_signing_link,
                   c.grievance_id, c.grievance_number, c.member_name, c.member_email, c.intake_payload_json,
                   c.sharepoint_case_folder, c.sharepoint_case_web_url
            FROM documents d
@@ -263,6 +270,7 @@ async def webhook_docuseal(request: Request):
         document_id,
         case_id,
         doc_type,
+        template_key,
         signer_order_json,
         pdf_path,
         signing_link,
@@ -304,6 +312,247 @@ async def webhook_docuseal(request: Request):
         )
         return {"ok": True, "deduped": True, "reason": "completion_already_processed"}
     try:
+        stage_row = await db.get_document_stage_by_submission(submission_id=submission_id)
+        if stage_row and is_3g3a_staged(cfg=cfg, doc_type=doc_type, template_key=template_key):
+            stage_id = int(stage_row[0])
+            stage_no = int(stage_row[3])
+            stage_status = str(stage_row[5] or "")
+            if stage_status == "completed":
+                await db.mark_receipt_handled("docuseal", completion_receipt_key)
+                await db.mark_receipt_handled("docuseal", receipt_key)
+                return {"ok": True, "deduped": True, "reason": "stage_already_completed"}
+
+            case_dir = Path(cfg.data_root) / case_id
+            doc_dir = case_dir / document_id
+            doc_dir.mkdir(parents=True, exist_ok=True)
+            stage_dir = doc_dir / "Stages" / f"Stage{stage_no}"
+            stage_dir.mkdir(parents=True, exist_ok=True)
+
+            staged_signed_bytes: bytes | None = None
+            staged_audit_bytes: bytes | None = None
+            staged_audit_ext = ".zip"
+            submission_details: dict | None = None
+
+            try:
+                artifacts = docuseal.download_completed_artifacts(submission_id=submission_id)
+                maybe_submission = artifacts.get("submission")
+                if isinstance(maybe_submission, dict):
+                    submission_details = maybe_submission
+                zip_bytes = artifacts.get("completed_zip_bytes")
+                if isinstance(zip_bytes, (bytes, bytearray)) and len(zip_bytes) > 0:
+                    staged_audit_bytes = bytes(zip_bytes)
+                    extracted = _extract_first_pdf(staged_audit_bytes)
+                    if extracted:
+                        _, staged_signed_bytes = extracted
+            except Exception as exc:
+                await db.add_event(
+                    case_id,
+                    document_id,
+                    "document_stage_artifact_download_failed",
+                    {"stage_no": stage_no, "error": str(exc)},
+                )
+
+            if staged_signed_bytes is None:
+                doc_urls = _iter_document_urls(payload)
+                if not doc_urls and submission_details:
+                    doc_urls = _iter_document_urls(submission_details)
+                if doc_urls:
+                    staged_signed_bytes = _download_public_bytes(doc_urls[0])
+
+            if staged_audit_bytes is None:
+                audit_url = _find_audit_url(payload)
+                if not audit_url and submission_details:
+                    audit_url = _find_audit_url(submission_details)
+                downloaded_audit = _download_public_bytes(audit_url)
+                if downloaded_audit:
+                    staged_audit_bytes = downloaded_audit
+                    staged_audit_ext = ".zip" if downloaded_audit[:2] == b"PK" else ".pdf"
+
+            if staged_signed_bytes:
+                signed_path = stage_file_path(
+                    case_dir=case_dir,
+                    document_id=document_id,
+                    stage_no=stage_no,
+                    filename=f"{doc_type}_stage{stage_no}_signed.pdf",
+                )
+                signed_path.parent.mkdir(parents=True, exist_ok=True)
+                signed_path.write_bytes(staged_signed_bytes)
+                await record_stage_artifact(
+                    db=db,
+                    stage_id=stage_id,
+                    artifact_type="pdf_signed",
+                    storage_backend="local",
+                    storage_path=str(signed_path),
+                    content_bytes=staged_signed_bytes,
+                )
+
+            if staged_audit_bytes:
+                audit_path = stage_file_path(
+                    case_dir=case_dir,
+                    document_id=document_id,
+                    stage_no=stage_no,
+                    filename=f"{doc_type}_stage{stage_no}_audit{staged_audit_ext}",
+                )
+                audit_path.parent.mkdir(parents=True, exist_ok=True)
+                audit_path.write_bytes(staged_audit_bytes)
+                await record_stage_artifact(
+                    db=db,
+                    stage_id=stage_id,
+                    artifact_type="audit",
+                    storage_backend="local",
+                    storage_path=str(audit_path),
+                    content_bytes=staged_audit_bytes,
+                )
+
+            if cfg.graph.site_hostname and cfg.graph.site_path and cfg.graph.document_library:
+                try:
+                    if existing_case_folder_name:
+                        case_folder = graph.find_case_folder_by_grievance_id_exact(
+                            site_hostname=cfg.graph.site_hostname,
+                            site_path=cfg.graph.site_path,
+                            library=cfg.graph.document_library,
+                            case_parent_folder=cfg.graph.case_parent_folder,
+                            grievance_id=grievance_id,
+                        )
+                    else:
+                        case_folder = graph.ensure_case_folder(
+                            site_hostname=cfg.graph.site_hostname,
+                            site_path=cfg.graph.site_path,
+                            library=cfg.graph.document_library,
+                            case_parent_folder=cfg.graph.case_parent_folder,
+                            grievance_id=grievance_id,
+                            member_name=folder_member_name,
+                        )
+                    if staged_signed_bytes:
+                        signed_upload = graph.upload_to_case_subfolder(
+                            site_hostname=cfg.graph.site_hostname,
+                            site_path=cfg.graph.site_path,
+                            library=cfg.graph.document_library,
+                            case_folder_name=case_folder.folder_name,
+                            case_parent_folder=cfg.graph.case_parent_folder,
+                            subfolder=cfg.graph.signed_subfolder,
+                            filename=f"{doc_type}_{document_id}_stage{stage_no}_signed.pdf",
+                            file_bytes=staged_signed_bytes,
+                        )
+                        await record_stage_artifact(
+                            db=db,
+                            stage_id=stage_id,
+                            artifact_type="pdf_signed",
+                            storage_backend="sharepoint",
+                            storage_path=signed_upload.web_url or signed_upload.path,
+                            content_bytes=staged_signed_bytes,
+                        )
+                    if staged_audit_bytes:
+                        audit_upload = graph.upload_to_case_subfolder(
+                            site_hostname=cfg.graph.site_hostname,
+                            site_path=cfg.graph.site_path,
+                            library=cfg.graph.document_library,
+                            case_folder_name=case_folder.folder_name,
+                            case_parent_folder=cfg.graph.case_parent_folder,
+                            subfolder=cfg.graph.audit_subfolder,
+                            filename=f"{doc_type}_{document_id}_stage{stage_no}_audit{staged_audit_ext}",
+                            file_bytes=staged_audit_bytes,
+                        )
+                        await record_stage_artifact(
+                            db=db,
+                            stage_id=stage_id,
+                            artifact_type="audit",
+                            storage_backend="sharepoint",
+                            storage_path=audit_upload.web_url or audit_upload.path,
+                            content_bytes=staged_audit_bytes,
+                        )
+                except Exception as exc:
+                    await db.add_event(
+                        case_id,
+                        document_id,
+                        "document_stage_sharepoint_upload_failed",
+                        {"stage_no": stage_no, "error": str(exc)},
+                    )
+
+            await db.replace_document_stage_fields(document_stage_id=stage_id, fields={"webhook_payload": payload})
+            await db.complete_document_stage(stage_id=stage_id)
+            await db.add_event(
+                case_id,
+                document_id,
+                "document_stage_completed",
+                {"stage_no": stage_no, "stage_id": stage_id},
+            )
+
+            if stage_no < 3:
+                signer_order: list[str] = []
+                try:
+                    parsed_signers = json.loads(signer_order_json or "[]")
+                    if isinstance(parsed_signers, list):
+                        signer_order = [str(s).strip() for s in parsed_signers if str(s).strip()]
+                except Exception:
+                    signer_order = []
+                if len(signer_order) < 3:
+                    await db.exec("UPDATE documents SET status='failed' WHERE id=?", (document_id,))
+                    await db.add_event(
+                        case_id,
+                        document_id,
+                        "document_stage_advance_failed",
+                        {"stage_no": stage_no, "reason": "missing_signers"},
+                    )
+                    await db.mark_receipt_handled("docuseal", completion_receipt_key)
+                    await db.mark_receipt_handled("docuseal", receipt_key)
+                    return {"ok": True, "handled": True, "reason": "stage_advance_failed"}
+
+                next_stage_no = stage_no + 1
+                next_base_pdf: bytes | None = staged_signed_bytes
+                if not next_base_pdf and pdf_path and Path(pdf_path).exists():
+                    next_base_pdf = Path(pdf_path).read_bytes()
+
+                align_path = stage_alignment_pdf_path(
+                    case_dir=case_dir,
+                    document_id=document_id,
+                    stage_no=next_stage_no,
+                )
+                if not next_base_pdf or not align_path.exists():
+                    await db.exec("UPDATE documents SET status='failed' WHERE id=?", (document_id,))
+                    await db.add_event(
+                        case_id,
+                        document_id,
+                        "document_stage_advance_failed",
+                        {
+                            "stage_no": stage_no,
+                            "reason": "missing_next_stage_base_or_alignment",
+                            "alignment_path": str(align_path),
+                        },
+                    )
+                    await db.mark_receipt_handled("docuseal", completion_receipt_key)
+                    await db.mark_receipt_handled("docuseal", receipt_key)
+                    return {"ok": True, "handled": True, "reason": "stage_advance_failed"}
+
+                next_alignment_pdf = align_path.read_bytes()
+                next_outcome = await create_or_send_stage(
+                    cfg=cfg,
+                    db=db,
+                    logger=logger,
+                    docuseal=docuseal,
+                    notifications=notifications,
+                    case_id=case_id,
+                    grievance_id=grievance_id,
+                    document_id=document_id,
+                    doc_type=doc_type,
+                    template_key=template_key,
+                    pdf_bytes=next_base_pdf,
+                    alignment_pdf_bytes=next_alignment_pdf,
+                    signer_email=signer_order[next_stage_no - 1],
+                    full_signer_chain=signer_order,
+                    stage_no=next_stage_no,
+                    correlation_id=case_id,
+                    idempotency_prefix=f"webhook-stage:{case_id}:{document_id}:{next_stage_no}",
+                )
+                if next_outcome.status.startswith("sent_for_signature"):
+                    await db.exec("UPDATE cases SET status='awaiting_signatures' WHERE id=?", (case_id,))
+                else:
+                    await db.exec("UPDATE documents SET status='failed' WHERE id=?", (document_id,))
+
+                await db.mark_receipt_handled("docuseal", completion_receipt_key)
+                await db.mark_receipt_handled("docuseal", receipt_key)
+                return {"ok": True, "handled": True, "stage_no": stage_no, "next_status": next_outcome.status}
+
         case_dir = Path(cfg.data_root) / case_id
         doc_dir = case_dir / document_id
         doc_dir.mkdir(parents=True, exist_ok=True)

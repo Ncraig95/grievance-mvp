@@ -21,6 +21,7 @@ from grievance_api.web.routes_intake import (
     _preferred_signer_email_for_doc,
     _resolve_document_command,
 )
+from grievance_api.services.staged_signature_workflow import is_3g3a_staged
 
 
 class BellSouthCommandTests(unittest.TestCase):
@@ -101,6 +102,25 @@ class BellSouthCommandTests(unittest.TestCase):
         self.assertFalse(
             _doc_uses_auto_grievance_id(
                 DocumentRequest(doc_type="bellsouth_meeting_request", template_key="bellsouth_formal_grievance_meeting_request")
+            )
+        )
+
+    def test_bellsouth_is_not_staged_3g3a(self) -> None:
+        cfg = SimpleNamespace(
+            document_policies={
+                "bst_grievance_form_3g3a": DocumentPolicyConfig(
+                    folder_resolution="default",
+                    default_signer_field="",
+                    default_requires_signature=True,
+                    staged_flow_enabled=True,
+                )
+            }
+        )
+        self.assertFalse(
+            is_3g3a_staged(
+                cfg=cfg,
+                doc_type="bellsouth_meeting_request",
+                template_key="bellsouth_formal_grievance_meeting_request",
             )
         )
 

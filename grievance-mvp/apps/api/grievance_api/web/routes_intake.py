@@ -4,11 +4,13 @@ import base64
 import hashlib
 import json
 import re
+import shutil
 import tempfile
 import textwrap
 from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlparse
+from zipfile import ZipFile
 
 import requests
 
@@ -27,6 +29,11 @@ from ..services.notification_service import NotificationService
 from ..services.pdf_convert import docx_to_pdf
 from ..services.sharepoint_graph import CaseFolderAmbiguousError, CaseFolderNotFoundError
 from ..services.signature_workflow import normalize_signers, send_document_for_signature
+from ..services.staged_signature_workflow import (
+    create_or_send_stage,
+    is_3g3a_staged,
+    normalize_3g3a_signers,
+)
 from .models import (
     CaseStatusResponse,
     ClientSuppliedFile,
@@ -65,6 +72,10 @@ _BELL_SOUTH_TBD_KEYS = (
     "meeting_requested_time",
     "meeting_requested_place",
 )
+_STAGE_SIGNATURE_PLACEHOLDER_RE = re.compile(
+    r"{{\s*(Sig_es_:signer(?P<sig>\d+):signature|Dte_es_:signer(?P<dte>\d+):date|Eml_es_:signer(?P<eml>\d+):email)\s*}}",
+    flags=re.IGNORECASE,
+)
 
 _DOC_COMMAND_ALIASES: dict[str, str] = {
     "bellsouth_formal_grievance_meeting_request": "bellsouth_meeting_request",
@@ -102,6 +113,63 @@ def _safe_display_name(value: str) -> str:
     cleaned = _DISPLAY_FILENAME_SAFE.sub("", (value or "").strip())
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned or "unknown"
+
+
+def _stage_alignment_path(*, doc_dir: Path, stage_no: int) -> Path:
+    return doc_dir / "stage_alignments" / f"stage{int(stage_no)}_alignment.pdf"
+
+
+def _rewrite_signature_placeholders_for_stage(xml_text: str, *, stage_no: int) -> str:
+    source_signer = int(stage_no)
+
+    def _replace(match: re.Match[str]) -> str:
+        inner = match.group(1)
+        signer_raw = match.group("sig") or match.group("dte") or match.group("eml")
+        if not signer_raw:
+            return ""
+        signer_no = int(signer_raw)
+        if signer_no != source_signer:
+            return ""
+        remapped = re.sub(r"signer\d+", "signer1", inner, flags=re.IGNORECASE)
+        return "{{" + remapped + "}}"
+
+    return _STAGE_SIGNATURE_PLACEHOLDER_RE.sub(_replace, xml_text)
+
+
+def _create_stage_alignment_pdf_from_anchor_docx(
+    *,
+    anchor_docx_path: str,
+    doc_dir: Path,
+    stage_no: int,
+    libreoffice_timeout_seconds: int,
+) -> bytes:
+    stage_anchor_docx_path = doc_dir / "stage_alignments" / f"stage{int(stage_no)}_anchor.docx"
+    stage_anchor_docx_path.parent.mkdir(parents=True, exist_ok=True)
+    stage_anchor_pdf_path: str | None = None
+    try:
+        with ZipFile(anchor_docx_path, "r") as zin, ZipFile(stage_anchor_docx_path, "w") as zout:
+            for info in zin.infolist():
+                data = zin.read(info.filename)
+                if info.filename.startswith("word/") and info.filename.endswith(".xml"):
+                    patched = data.decode("utf-8", errors="ignore")
+                    patched = _rewrite_signature_placeholders_for_stage(
+                        patched,
+                        stage_no=stage_no,
+                    )
+                    data = patched.encode("utf-8")
+                zout.writestr(info, data)
+        stage_anchor_pdf_path = docx_to_pdf(
+            str(stage_anchor_docx_path),
+            str(stage_anchor_docx_path.parent),
+            libreoffice_timeout_seconds,
+        )
+        stage_bytes = Path(stage_anchor_pdf_path).read_bytes()
+        _stage_alignment_path(doc_dir=doc_dir, stage_no=stage_no).write_bytes(stage_bytes)
+        return stage_bytes
+    finally:
+        stage_anchor_docx_path.unlink(missing_ok=True)
+        if stage_anchor_pdf_path:
+            Path(stage_anchor_pdf_path).unlink(missing_ok=True)
 
 
 def _build_document_basename(*, doc_type: str, grievance_id: str, member_name: str) -> str:
@@ -476,6 +544,92 @@ def _sanitize_intake_payload_for_storage(payload: IntakeRequest) -> str:
         )
     body["client_supplied_files"] = sanitized_client_files
     return json.dumps(body, ensure_ascii=False)
+
+
+def _archive_failed_document_for_review(
+    *,
+    cfg,  # noqa: ANN001
+    case_id: str,
+    document_id: str,
+    doc_type: str,
+    grievance_id: str,
+    reason: str,
+    details: dict[str, object],
+    working_dir: Path,
+) -> Path:
+    failed_root = Path(cfg.data_root) / "failed_processes" / case_id / document_id
+    failed_root.mkdir(parents=True, exist_ok=True)
+
+    for candidate in working_dir.glob("*"):
+        if not candidate.is_file():
+            continue
+        target = failed_root / candidate.name
+        try:
+            shutil.copy2(candidate, target)
+        except Exception:
+            continue
+
+    summary = {
+        "case_id": case_id,
+        "document_id": document_id,
+        "doc_type": doc_type,
+        "grievance_id": grievance_id,
+        "reason": reason,
+        "details": details,
+        "source_working_dir": str(working_dir),
+    }
+    (failed_root / "failure_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return failed_root
+
+
+async def _mirror_failed_archive_to_sharepoint(
+    *,
+    cfg,  # noqa: ANN001
+    db: Db,
+    graph,  # noqa: ANN001
+    case_id: str,
+    document_id: str,
+    archive_dir: Path,
+) -> None:
+    if not (cfg.graph.site_hostname and cfg.graph.site_path and cfg.graph.document_library):
+        return
+    base_folder = (cfg.graph.failed_processes_folder or "").strip().strip("/")
+    if not base_folder:
+        return
+
+    target_folder = f"{base_folder}/{case_id}/{document_id}"
+    uploaded = 0
+    for item in sorted(archive_dir.glob("*")):
+        if not item.is_file():
+            continue
+        uploaded_ref = graph.upload_local_file_to_folder_path(
+            site_hostname=cfg.graph.site_hostname,
+            site_path=cfg.graph.site_path,
+            library=cfg.graph.document_library,
+            folder_path=target_folder,
+            filename=item.name,
+            local_path=str(item),
+        )
+        uploaded += 1
+        await db.add_event(
+            case_id,
+            document_id,
+            "failed_archive_sharepoint_file_uploaded",
+            {
+                "filename": item.name,
+                "path": uploaded_ref.path,
+                "web_url": uploaded_ref.web_url,
+            },
+        )
+    await db.add_event(
+        case_id,
+        document_id,
+        "failed_archive_sharepoint_uploaded",
+        {"target_folder": target_folder, "file_count": uploaded},
+    )
 
 
 def _normalize_name_fields(raw_payload: dict[str, object]) -> dict[str, object]:
@@ -1183,6 +1337,27 @@ async def intake(request: Request):
                         cfg.libreoffice_timeout_seconds,
                     )
                     alignment_pdf_bytes = Path(anchor_pdf_path).read_bytes()
+                    if is_3g3a_staged(cfg=cfg, doc_type=doc_type, template_key=doc_req.template_key):
+                        # Build stage-specific alignment PDFs so each stage can activate only its own fields.
+                        stage1_bytes = _create_stage_alignment_pdf_from_anchor_docx(
+                            anchor_docx_path=anchor_docx_path,
+                            doc_dir=ddir,
+                            stage_no=1,
+                            libreoffice_timeout_seconds=cfg.libreoffice_timeout_seconds,
+                        )
+                        _create_stage_alignment_pdf_from_anchor_docx(
+                            anchor_docx_path=anchor_docx_path,
+                            doc_dir=ddir,
+                            stage_no=2,
+                            libreoffice_timeout_seconds=cfg.libreoffice_timeout_seconds,
+                        )
+                        _create_stage_alignment_pdf_from_anchor_docx(
+                            anchor_docx_path=anchor_docx_path,
+                            doc_dir=ddir,
+                            stage_no=3,
+                            libreoffice_timeout_seconds=cfg.libreoffice_timeout_seconds,
+                        )
+                        alignment_pdf_bytes = stage1_bytes
                 finally:
                     Path(anchor_docx_path).unlink(missing_ok=True)
                     if anchor_pdf_path:
@@ -1207,6 +1382,16 @@ async def intake(request: Request):
             pdf_sha = hashlib.sha256(pdf_bytes).hexdigest()
         except Exception as exc:
             any_failed = True
+            failed_archive_path = _archive_failed_document_for_review(
+                cfg=cfg,
+                case_id=case_id,
+                document_id=document_id,
+                doc_type=doc_type,
+                grievance_id=grievance_id,
+                reason="render_failed",
+                details={"error": str(exc), "template_path": template_path},
+                working_dir=ddir,
+            )
             await db.exec(
                 """INSERT INTO documents(
                      id, case_id, created_at_utc, doc_type, template_key, status,
@@ -1229,8 +1414,29 @@ async def intake(request: Request):
                 case_id,
                 document_id,
                 "render_failed",
-                {"error": str(exc), "doc_type": doc_type, "template_path": template_path},
+                {
+                    "error": str(exc),
+                    "doc_type": doc_type,
+                    "template_path": template_path,
+                    "failed_archive_path": str(failed_archive_path),
+                },
             )
+            try:
+                await _mirror_failed_archive_to_sharepoint(
+                    cfg=cfg,
+                    db=db,
+                    graph=graph,
+                    case_id=case_id,
+                    document_id=document_id,
+                    archive_dir=failed_archive_path,
+                )
+            except Exception as mirror_exc:
+                await db.add_event(
+                    case_id,
+                    document_id,
+                    "failed_archive_sharepoint_upload_failed",
+                    {"error": str(mirror_exc)},
+                )
             logger.exception("render_failed", extra={"correlation_id": correlation_id, "doc_type": doc_type})
             doc_statuses.append(DocumentStatus(document_id=document_id, doc_type=doc_type, status="failed"))
             continue
@@ -1265,6 +1471,57 @@ async def intake(request: Request):
         signing_link: str | None = None
 
         if doc_req.requires_signature:
+            if is_3g3a_staged(cfg=cfg, doc_type=doc_type, template_key=doc_req.template_key):
+                staged_signers = normalize_3g3a_signers(doc_req.signers)
+                if not staged_signers:
+                    any_failed = True
+                    await db.exec("UPDATE documents SET status=?, signer_order_json=? WHERE id=?", ("failed", "[]", document_id))
+                    await db.add_event(
+                        case_id,
+                        document_id,
+                        "staged_signature_signers_required",
+                        {
+                            "doc_type": doc_type,
+                            "required_count": 3,
+                            "provided_count": len(doc_req.signers or []),
+                        },
+                    )
+                    doc_statuses.append(
+                        DocumentStatus(document_id=document_id, doc_type=doc_type, status="failed", signing_link=None)
+                    )
+                    continue
+                await db.exec(
+                    "UPDATE documents SET signer_order_json=? WHERE id=?",
+                    (json.dumps(staged_signers, ensure_ascii=False), document_id),
+                )
+                stage_outcome = await create_or_send_stage(
+                    cfg=cfg,
+                    db=db,
+                    logger=logger,
+                    docuseal=docuseal,
+                    notifications=notifications,
+                    case_id=case_id,
+                    grievance_id=grievance_id,
+                    document_id=document_id,
+                    doc_type=doc_type,
+                    template_key=doc_req.template_key,
+                    pdf_bytes=pdf_bytes,
+                    alignment_pdf_bytes=alignment_pdf_bytes,
+                    signer_email=staged_signers[0],
+                    full_signer_chain=staged_signers,
+                    stage_no=1,
+                    correlation_id=correlation_id,
+                    idempotency_prefix=f"intake-stage:{case_id}:{document_id}:1",
+                )
+                status = stage_outcome.status
+                signing_link = stage_outcome.signing_link
+                any_signature_requested = any_signature_requested or status.startswith("sent_for_signature")
+                any_failed = any_failed or status == "failed"
+                doc_statuses.append(
+                    DocumentStatus(document_id=document_id, doc_type=doc_type, status=status, signing_link=signing_link)
+                )
+                continue
+
             preferred_signer, signer_source = _preferred_signer_email_for_doc(
                 payload=payload,
                 doc_type=doc_type,
@@ -1274,13 +1531,43 @@ async def intake(request: Request):
             signer_order = normalize_signers(doc_req.signers, preferred_signer)
             if not signer_order:
                 any_failed = True
+                failed_archive_path = _archive_failed_document_for_review(
+                    cfg=cfg,
+                    case_id=case_id,
+                    document_id=document_id,
+                    doc_type=doc_type,
+                    grievance_id=grievance_id,
+                    reason="signature_signer_resolution_failed",
+                    details={"signer_source": signer_source},
+                    working_dir=ddir,
+                )
                 await db.exec("UPDATE documents SET status=? WHERE id=?", ("failed", document_id))
                 await db.add_event(
                     case_id,
                     document_id,
                     "signature_signer_resolution_failed",
-                    {"doc_type": doc_type, "signer_source": signer_source},
+                    {
+                        "doc_type": doc_type,
+                        "signer_source": signer_source,
+                        "failed_archive_path": str(failed_archive_path),
+                    },
                 )
+                try:
+                    await _mirror_failed_archive_to_sharepoint(
+                        cfg=cfg,
+                        db=db,
+                        graph=graph,
+                        case_id=case_id,
+                        document_id=document_id,
+                        archive_dir=failed_archive_path,
+                    )
+                except Exception as mirror_exc:
+                    await db.add_event(
+                        case_id,
+                        document_id,
+                        "failed_archive_sharepoint_upload_failed",
+                        {"error": str(mirror_exc)},
+                    )
                 doc_statuses.append(
                     DocumentStatus(document_id=document_id, doc_type=doc_type, status="failed", signing_link=None)
                 )
@@ -1329,6 +1616,39 @@ async def intake(request: Request):
                 signing_link = outcome.signing_link
                 any_signature_requested = any_signature_requested or status == "sent_for_signature"
                 any_failed = any_failed or status == "failed"
+                if status == "failed":
+                    failed_archive_path = _archive_failed_document_for_review(
+                        cfg=cfg,
+                        case_id=case_id,
+                        document_id=document_id,
+                        doc_type=doc_type,
+                        grievance_id=grievance_id,
+                        reason="signature_submission_failed",
+                        details={"template_key": doc_req.template_key or "", "signer_count": len(signer_order)},
+                        working_dir=ddir,
+                    )
+                    await db.add_event(
+                        case_id,
+                        document_id,
+                        "failed_document_archived",
+                        {"failed_archive_path": str(failed_archive_path), "reason": "signature_submission_failed"},
+                    )
+                    try:
+                        await _mirror_failed_archive_to_sharepoint(
+                            cfg=cfg,
+                            db=db,
+                            graph=graph,
+                            case_id=case_id,
+                            document_id=document_id,
+                            archive_dir=failed_archive_path,
+                        )
+                    except Exception as mirror_exc:
+                        await db.add_event(
+                            case_id,
+                            document_id,
+                            "failed_archive_sharepoint_upload_failed",
+                            {"error": str(mirror_exc)},
+                        )
         else:
             if cfg.require_approver_decision:
                 status = "pending_approval"

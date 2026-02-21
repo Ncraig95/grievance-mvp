@@ -425,7 +425,17 @@ Equivalent full command names also work:
 - `true_intent_grievance_brief`
 - `disciplinary_grievance_brief`
 
-`bst_grievance_form_3g3a` is intentionally excluded until its DOCX tags are finalized.
+`bst_grievance_form_3g3a` now has a staged integration guide for questions 1-10:
+- `docs/power-automate/bst_grievance_form_3g3a.md`
+- `docs/power-automate/examples/bst_grievance_form_3g3a.payload.json`
+
+3G3A staged flow behavior:
+- Enabled only when `document_policies.bst_grievance_form_3g3a.staged_flow_enabled=true`.
+- Requires explicit `documents[0].signers` with 3 emails in order:
+  1. local union
+  2. second-level manager
+  3. union final disposition
+- Intake sends stage 1 only; webhook completion auto-advances stages 2 and 3.
 
 Minimum payload pattern for all commands:
 

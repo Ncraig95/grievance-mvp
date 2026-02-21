@@ -472,3 +472,58 @@ class GraphUploader:
             web_url=uploaded.get("webUrl"),
             path=normalized_path,
         )
+
+    def upload_local_file_to_folder_path(
+        self,
+        *,
+        site_hostname: str,
+        site_path: str,
+        library: str,
+        folder_path: str,
+        filename: str,
+        local_path: str,
+    ) -> UploadedFileRef:
+        drive_id = self._drive_id(site_hostname, site_path, library)
+        _, normalized_folder = self._ensure_folder_chain(drive_id, folder_path)
+        normalized_path = "/".join(
+            part for part in [self._encode_path(normalized_folder), quote(filename, safe="")] if part
+        )
+
+        if self.dry_run:
+            return UploadedFileRef(
+                drive_id=drive_id,
+                item_id=f"dryrun-{filename}",
+                web_url=f"https://dryrun/{normalized_path}",
+                path=normalized_path,
+            )
+
+        size = os.path.getsize(local_path)
+        if size <= _SIMPLE_UPLOAD_MAX_BYTES:
+            with open(local_path, "rb") as f:
+                put = self._request(
+                    "PUT",
+                    f"/drives/{drive_id}/root:/{normalized_path}:/content",
+                    data=f.read(),
+                )
+        else:
+            session = self._request(
+                "POST",
+                f"/drives/{drive_id}/root:/{normalized_path}:/createUploadSession",
+                payload={
+                    "item": {
+                        "@microsoft.graph.conflictBehavior": "rename",
+                        "name": filename,
+                    }
+                },
+            )
+            upload_url = str(session.get("uploadUrl", "")).strip()
+            if not upload_url:
+                raise RuntimeError("Graph upload session missing uploadUrl")
+            put = self._upload_with_session(upload_url=upload_url, local_path=local_path)
+
+        return UploadedFileRef(
+            drive_id=drive_id,
+            item_id=str(put.get("id", "")),
+            web_url=put.get("webUrl"),
+            path=normalized_path,
+        )

@@ -2,7 +2,7 @@
 
 This folder contains per-document setup guides for the intake API.
 
-Supported guides (excluding `bst_grievance_form_3g3a`):
+Supported guides:
 
 - `statement_of_occurrence.md`
 - `bellsouth_meeting_request.md`
@@ -10,6 +10,7 @@ Supported guides (excluding `bst_grievance_form_3g3a`):
 - `grievance_data_request.md`
 - `true_intent_grievance_brief.md`
 - `disciplinary_grievance_brief.md`
+- `bst_grievance_form_3g3a.md` (Q1-Q10 staging guide)
 
 ## Common flow pattern (all docs)
 
@@ -40,4 +41,5 @@ Use `template_data` for document-specific placeholders.
 
 - Do not send `grievance_id` when system is in auto ID mode, except for docs that intentionally target an existing case folder (BellSouth/Mobility meeting requests).
 - Signature tags in DOCX (for example `Sig_es_:signer1:signature`) are template anchors; do not create Forms questions for those.
+- For 3-step sequential signature flows (like 3G3A), pass explicit signer order in `documents[0].signers`.
 - If you retry the same Forms response, keep the same `request_id` to avoid duplicates.

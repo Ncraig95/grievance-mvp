@@ -113,3 +113,55 @@ ON outbound_emails(case_id, document_scope_id, template_key, recipient_email, id
 
 CREATE INDEX IF NOT EXISTS idx_outbound_emails_case
 ON outbound_emails(case_id);
+
+CREATE TABLE IF NOT EXISTS document_stages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  case_id TEXT NOT NULL,
+  document_id TEXT NOT NULL,
+  stage_no INTEGER NOT NULL,
+  stage_key TEXT NOT NULL,
+  status TEXT NOT NULL,
+  signer_email TEXT NOT NULL,
+  docuseal_submission_id TEXT,
+  docuseal_signing_link TEXT,
+  source_payload_json TEXT NOT NULL DEFAULT '{}',
+  started_at_utc TEXT NOT NULL,
+  completed_at_utc TEXT,
+  failed_at_utc TEXT,
+  UNIQUE(document_id, stage_no),
+  FOREIGN KEY (case_id) REFERENCES cases (id),
+  FOREIGN KEY (document_id) REFERENCES documents (id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_stages_submission_id
+ON document_stages(docuseal_submission_id);
+
+CREATE INDEX IF NOT EXISTS idx_document_stages_document_id
+ON document_stages(document_id);
+
+CREATE TABLE IF NOT EXISTS document_stage_artifacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_stage_id INTEGER NOT NULL,
+  artifact_type TEXT NOT NULL,
+  storage_backend TEXT NOT NULL,
+  storage_path TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  created_at_utc TEXT NOT NULL,
+  FOREIGN KEY (document_stage_id) REFERENCES document_stages (id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_stage_artifacts_stage_type
+ON document_stage_artifacts(document_stage_id, artifact_type);
+
+CREATE TABLE IF NOT EXISTS document_stage_field_values (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_stage_id INTEGER NOT NULL,
+  field_key TEXT NOT NULL,
+  field_value TEXT NOT NULL,
+  created_at_utc TEXT NOT NULL,
+  FOREIGN KEY (document_stage_id) REFERENCES document_stages (id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_stage_field_values_stage
+ON document_stage_field_values(document_stage_id);
