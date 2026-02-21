@@ -62,11 +62,27 @@ _DATE_FIELD_KEYS = {
 
 _DOC_COMMAND_ALIASES: dict[str, str] = {
     "bellsouth_formal_grievance_meeting_request": "bellsouth_meeting_request",
+    "mobility_meeting_request": "mobility_formal_grievance_meeting_request",
+    "grievance_data_request": "grievance_data_request_form",
+    "true_intent_brief": "true_intent_grievance_brief",
+    "disciplinary_brief": "disciplinary_grievance_brief",
 }
 _DOC_TEMPLATE_FALLBACKS: dict[str, tuple[str, ...]] = {
     "bellsouth_meeting_request": (
         "bellsouth_meeting_request",
         "bellsouth_formal_grievance_meeting_request",
+    ),
+    "mobility_formal_grievance_meeting_request": (
+        "mobility_formal_grievance_meeting_request",
+    ),
+    "grievance_data_request_form": (
+        "grievance_data_request_form",
+    ),
+    "true_intent_grievance_brief": (
+        "true_intent_grievance_brief",
+    ),
+    "disciplinary_grievance_brief": (
+        "disciplinary_grievance_brief",
     ),
 }
 
@@ -84,12 +100,19 @@ def _safe_display_name(value: str) -> str:
 
 def _build_document_basename(*, doc_type: str, grievance_id: str, member_name: str) -> str:
     normalized_type = doc_type.strip().lower()
+    member = _safe_display_name(member_name).lower()
     if normalized_type == "statement_of_occurrence":
-        member = _safe_display_name(member_name).lower()
         return f"{grievance_id} - {member} - statement"
     if normalized_type == "bellsouth_meeting_request":
-        member = _safe_display_name(member_name).lower()
         return f"{grievance_id} - {member} - bellsouth meeting request"
+    if normalized_type == "mobility_formal_grievance_meeting_request":
+        return f"{grievance_id} - {member} - mobility meeting request"
+    if normalized_type == "grievance_data_request_form":
+        return f"{grievance_id} - {member} - grievance data request"
+    if normalized_type == "true_intent_grievance_brief":
+        return f"{grievance_id} - {member} - true intent grievance brief"
+    if normalized_type == "disciplinary_grievance_brief":
+        return f"{grievance_id} - {member} - disciplinary grievance brief"
     return _safe_name(doc_type)
 
 

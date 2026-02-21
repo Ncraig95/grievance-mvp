@@ -407,6 +407,56 @@ Example file item:
 }
 ```
 
+## 10a) Document Command Catalog (3g3a excluded)
+
+These are ready for intake integration now:
+
+- `statement_of_occurrence` -> `statement_of_occurrence fixed.docx`
+- `bellsouth_meeting_request` -> `Bellsouth-Telecommunications-formal-grievance-meeting-request.docx`
+- `mobility_meeting_request` -> `mobility-formal-grievance-meeting-request.docx`
+- `grievance_data_request` -> `grievance_data_request_form.docx`
+- `true_intent_brief` -> `form_true_intent_grievance_brief_revised_05.20.21.docx`
+- `disciplinary_brief` -> `form_disciplinary_grievance_brief_revised_05.19.21.docx`
+
+Equivalent full command names also work:
+
+- `mobility_formal_grievance_meeting_request`
+- `grievance_data_request_form`
+- `true_intent_grievance_brief`
+- `disciplinary_grievance_brief`
+
+`bst_grievance_form_3g3a` is intentionally excluded until its DOCX tags are finalized.
+
+Minimum payload pattern for all commands:
+
+```json
+{
+  "request_id": "forms-<unique-response-id>",
+  "document_command": "true_intent_brief",
+  "contract": "CWA",
+  "grievant_firstname": "John",
+  "grievant_lastname": "Doe",
+  "grievant_email": "john@example.com",
+  "narrative": "Base narrative text",
+  "template_data": {
+    "union_rep_email": "rep@example.com"
+  }
+}
+```
+
+Recommendation:
+- Pass every template placeholder value via `template_data` using the exact tag name from the DOCX.
+- For meeting-request docs, include `template_data.union_rep_email` so signer routing is deterministic.
+
+Detailed per-document setup guides:
+- `docs/power-automate/README.md`
+- `docs/power-automate/statement_of_occurrence.md`
+- `docs/power-automate/bellsouth_meeting_request.md`
+- `docs/power-automate/mobility_meeting_request.md`
+- `docs/power-automate/grievance_data_request.md`
+- `docs/power-automate/true_intent_grievance_brief.md`
+- `docs/power-automate/disciplinary_grievance_brief.md`
+
 ## 10b) Power Automate setup (BellSouth Meeting Request)
 
 Use:
