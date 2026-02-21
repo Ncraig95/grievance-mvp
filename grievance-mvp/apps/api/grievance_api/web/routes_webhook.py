@@ -383,6 +383,10 @@ async def webhook_docuseal(request: Request):
         generated_pdf_path = Path(pdf_path) if pdf_path else None
         try:
             if cfg.graph.site_hostname and cfg.graph.site_path and cfg.graph.document_library:
+                generated_upload_name = f"{doc_type}_{document_id}.pdf"
+                signed_upload_name = f"{doc_type}_{document_id}_signed.pdf"
+                audit_ext = Path(audit_file_name).suffix or ".zip"
+                audit_upload_name = f"{doc_type}_{document_id}_audit{audit_ext}"
                 if existing_case_folder_name:
                     case_folder = graph.find_case_folder_by_grievance_id_exact(
                         site_hostname=cfg.graph.site_hostname,
@@ -402,6 +406,17 @@ async def webhook_docuseal(request: Request):
                     )
                 sharepoint_case_folder = case_folder.folder_name
                 sharepoint_case_web_url = case_folder.web_url or existing_case_folder_web_url
+                await db.add_event(
+                    case_id,
+                    document_id,
+                    "sharepoint_upload_target_resolved",
+                    {
+                        "folder_id": case_folder.folder_id,
+                        "folder_name": case_folder.folder_name,
+                        "folder_web_url": sharepoint_case_web_url,
+                        "case_parent_folder": cfg.graph.case_parent_folder,
+                    },
+                )
 
                 if generated_pdf_path and generated_pdf_path.exists():
                     uploaded_generated = graph.upload_to_case_subfolder(
@@ -411,10 +426,21 @@ async def webhook_docuseal(request: Request):
                         case_folder_name=case_folder.folder_name,
                         case_parent_folder=cfg.graph.case_parent_folder,
                         subfolder=cfg.graph.generated_subfolder,
-                        filename=f"{doc_type}.pdf",
+                        filename=generated_upload_name,
                         file_bytes=generated_pdf_path.read_bytes(),
                     )
                     sharepoint_generated_url = uploaded_generated.web_url
+                    await db.add_event(
+                        case_id,
+                        document_id,
+                        "sharepoint_generated_uploaded",
+                        {
+                            "filename": generated_upload_name,
+                            "subfolder": cfg.graph.generated_subfolder,
+                            "path": uploaded_generated.path,
+                            "web_url": uploaded_generated.web_url,
+                        },
+                    )
 
                 if signed_pdf_bytes:
                     uploaded_signed = graph.upload_to_case_subfolder(
@@ -424,10 +450,21 @@ async def webhook_docuseal(request: Request):
                         case_folder_name=case_folder.folder_name,
                         case_parent_folder=cfg.graph.case_parent_folder,
                         subfolder=cfg.graph.signed_subfolder,
-                        filename=f"{doc_type}_signed.pdf",
+                        filename=signed_upload_name,
                         file_bytes=signed_pdf_bytes,
                     )
                     sharepoint_signed_url = uploaded_signed.web_url
+                    await db.add_event(
+                        case_id,
+                        document_id,
+                        "sharepoint_signed_uploaded",
+                        {
+                            "filename": signed_upload_name,
+                            "subfolder": cfg.graph.signed_subfolder,
+                            "path": uploaded_signed.path,
+                            "web_url": uploaded_signed.web_url,
+                        },
+                    )
 
                 if audit_zip_path and Path(audit_zip_path).exists():
                     backup_outcome = fanout_audit_backups(
@@ -440,11 +477,23 @@ async def webhook_docuseal(request: Request):
                         primary_subfolder=cfg.graph.audit_subfolder,
                         extra_subfolders=cfg.graph.audit_backup_subfolders,
                         local_backup_roots=cfg.graph.audit_local_backup_roots,
-                        filename=audit_file_name,
+                        filename=audit_upload_name,
                         file_bytes=Path(audit_zip_path).read_bytes(),
                     )
                     sharepoint_audit_url = backup_outcome.primary_web_url
                     audit_backup_locations_json = merge_backup_locations_json(None, backup_outcome)
+                    await db.add_event(
+                        case_id,
+                        document_id,
+                        "sharepoint_audit_uploaded",
+                        {
+                            "filename": audit_upload_name,
+                            "subfolder": cfg.graph.audit_subfolder,
+                            "primary_web_url": backup_outcome.primary_web_url,
+                            "sharepoint_copy_count": len(backup_outcome.sharepoint_copies),
+                            "local_copy_count": len(backup_outcome.local_paths),
+                        },
+                    )
                     if backup_outcome.failures:
                         await db.add_event(
                             case_id,

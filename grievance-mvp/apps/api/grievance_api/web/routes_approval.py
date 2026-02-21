@@ -271,6 +271,17 @@ async def decide_approval(case_id: str, body: ApprovalDecisionRequest, request: 
                     "UPDATE cases SET sharepoint_case_folder=?, sharepoint_case_web_url=? WHERE id=?",
                     (case_folder.folder_name, case_folder.web_url, case_id),
                 )
+                await db.add_event(
+                    case_id,
+                    None,
+                    "sharepoint_upload_target_resolved",
+                    {
+                        "folder_id": case_folder.folder_id,
+                        "folder_name": case_folder.folder_name,
+                        "folder_web_url": case_folder.web_url,
+                        "case_parent_folder": cfg.graph.case_parent_folder,
+                    },
+                )
 
                 docs = await db.fetchall(
                     """SELECT id, doc_type, pdf_path, signed_pdf_path, audit_zip_path,
@@ -298,6 +309,8 @@ async def decide_approval(case_id: str, body: ApprovalDecisionRequest, request: 
                     new_signed = sp_signed
                     new_audit = sp_audit
                     new_audit_backups = sp_audit_backups
+                    generated_upload_name = f"{doc_type}_{document_id}.pdf"
+                    signed_upload_name = f"{doc_type}_{document_id}_signed.pdf"
 
                     if pdf_path and Path(pdf_path).exists() and not sp_generated:
                         uploaded_generated = graph.upload_to_case_subfolder(
@@ -307,10 +320,21 @@ async def decide_approval(case_id: str, body: ApprovalDecisionRequest, request: 
                             case_folder_name=case_folder.folder_name,
                             case_parent_folder=cfg.graph.case_parent_folder,
                             subfolder=cfg.graph.generated_subfolder,
-                            filename=f"{doc_type}.pdf",
+                            filename=generated_upload_name,
                             file_bytes=Path(pdf_path).read_bytes(),
                         )
                         new_generated = uploaded_generated.web_url
+                        await db.add_event(
+                            case_id,
+                            document_id,
+                            "sharepoint_generated_uploaded",
+                            {
+                                "filename": generated_upload_name,
+                                "subfolder": cfg.graph.generated_subfolder,
+                                "path": uploaded_generated.path,
+                                "web_url": uploaded_generated.web_url,
+                            },
+                        )
 
                     if signed_pdf_path and Path(signed_pdf_path).exists() and not sp_signed:
                         uploaded_signed = graph.upload_to_case_subfolder(
@@ -320,12 +344,25 @@ async def decide_approval(case_id: str, body: ApprovalDecisionRequest, request: 
                             case_folder_name=case_folder.folder_name,
                             case_parent_folder=cfg.graph.case_parent_folder,
                             subfolder=cfg.graph.signed_subfolder,
-                            filename=f"{doc_type}_signed.pdf",
+                            filename=signed_upload_name,
                             file_bytes=Path(signed_pdf_path).read_bytes(),
                         )
                         new_signed = uploaded_signed.web_url
+                        await db.add_event(
+                            case_id,
+                            document_id,
+                            "sharepoint_signed_uploaded",
+                            {
+                                "filename": signed_upload_name,
+                                "subfolder": cfg.graph.signed_subfolder,
+                                "path": uploaded_signed.path,
+                                "web_url": uploaded_signed.web_url,
+                            },
+                        )
 
                     if audit_zip_path and Path(audit_zip_path).exists():
+                        audit_ext = Path(audit_zip_path).suffix or ".zip"
+                        audit_upload_name = f"{doc_type}_{document_id}_audit{audit_ext}"
                         backup_outcome = fanout_audit_backups(
                             graph=graph,
                             site_hostname=cfg.graph.site_hostname,
@@ -336,12 +373,24 @@ async def decide_approval(case_id: str, body: ApprovalDecisionRequest, request: 
                             primary_subfolder=cfg.graph.audit_subfolder,
                             extra_subfolders=cfg.graph.audit_backup_subfolders,
                             local_backup_roots=cfg.graph.audit_local_backup_roots,
-                            filename=f"{doc_type}_audit.zip",
+                            filename=audit_upload_name,
                             file_bytes=Path(audit_zip_path).read_bytes(),
                         )
                         if backup_outcome.primary_web_url:
                             new_audit = backup_outcome.primary_web_url
                         new_audit_backups = merge_backup_locations_json(sp_audit_backups, backup_outcome)
+                        await db.add_event(
+                            case_id,
+                            document_id,
+                            "sharepoint_audit_uploaded",
+                            {
+                                "filename": audit_upload_name,
+                                "subfolder": cfg.graph.audit_subfolder,
+                                "primary_web_url": backup_outcome.primary_web_url,
+                                "sharepoint_copy_count": len(backup_outcome.sharepoint_copies),
+                                "local_copy_count": len(backup_outcome.local_paths),
+                            },
+                        )
                         if backup_outcome.failures:
                             await db.add_event(
                                 case_id,

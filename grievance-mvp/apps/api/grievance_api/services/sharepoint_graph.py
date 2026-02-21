@@ -217,15 +217,30 @@ class GraphUploader:
     def _create_child_folder(self, drive_id: str, folder_id: str, name: str) -> dict:
         if self.dry_run:
             return {"id": f"dryrun-{name}", "name": name, "webUrl": f"https://dryrun/{name}"}
-        return self._request(
-            "POST",
-            f"/drives/{drive_id}/items/{folder_id}/children",
-            payload={
-                "name": name,
-                "folder": {},
-                "@microsoft.graph.conflictBehavior": "rename",
+        endpoint = f"/drives/{drive_id}/items/{folder_id}/children"
+        payload = {
+            "name": name,
+            "folder": {},
+            # Never auto-rename folders. If it already exists, re-use existing.
+            "@microsoft.graph.conflictBehavior": "fail",
+        }
+        url = f"https://graph.microsoft.com/v1.0{endpoint}"
+        resp = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {self.token()}",
+                "Content-Type": "application/json",
             },
+            json=payload,
+            timeout=self.timeout_seconds,
         )
+        if 200 <= resp.status_code < 300:
+            return resp.json() if resp.content else {}
+        if resp.status_code in {409, 412}:
+            existing = self._find_child_folder(drive_id, folder_id, name)
+            if existing is not None:
+                return existing
+        raise RuntimeError(f"Graph request failed (POST {endpoint}): {resp.status_code} {resp.text[:500]}")
 
     def _ensure_folder_chain(self, drive_id: str, folder_path: str) -> tuple[str, str]:
         folder_id = self._root_folder_id(drive_id)

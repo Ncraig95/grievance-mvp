@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+from fastapi import HTTPException
+
 from grievance_api.core.config import DocumentPolicyConfig
 from grievance_api.services.sharepoint_graph import (
     CaseFolderAmbiguousError,
@@ -13,7 +15,9 @@ from grievance_api.web.models import DocumentRequest, IntakeRequest
 from grievance_api.web.routes_intake import (
     _build_document_basename,
     _build_template_context,
+    _doc_uses_auto_grievance_id,
     _doc_requires_existing_exact_folder,
+    _validate_existing_folder_mode,
     _preferred_signer_email_for_doc,
     _resolve_document_command,
 )
@@ -83,6 +87,23 @@ class BellSouthCommandTests(unittest.TestCase):
         )
         self.assertTrue(_doc_requires_existing_exact_folder(cfg=cfg, doc_req=doc_req))
 
+    def test_existing_folder_mode_requires_incoming_grievance_id(self) -> None:
+        with self.assertRaises(HTTPException) as ctx:
+            _validate_existing_folder_mode("")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_auto_grievance_id_is_statement_only(self) -> None:
+        self.assertTrue(
+            _doc_uses_auto_grievance_id(
+                DocumentRequest(doc_type="statement_of_occurrence", template_key="statement_of_occurrence")
+            )
+        )
+        self.assertFalse(
+            _doc_uses_auto_grievance_id(
+                DocumentRequest(doc_type="bellsouth_meeting_request", template_key="bellsouth_formal_grievance_meeting_request")
+            )
+        )
+
 
 class BellSouthSignerTests(unittest.TestCase):
     def test_union_rep_email_is_default_signer(self) -> None:
@@ -143,6 +164,34 @@ class BellSouthSignerTests(unittest.TestCase):
         self.assertEqual(signer, "grievant@example.com")
         self.assertEqual(source, "default.grievant_email")
 
+    def test_union_rep_email_signer_works_when_grievant_email_missing(self) -> None:
+        cfg = SimpleNamespace(
+            document_policies={
+                "bellsouth_meeting_request": DocumentPolicyConfig(
+                    folder_resolution="existing_exact_grievance_id",
+                    default_signer_field="union_rep_email",
+                    default_requires_signature=True,
+                )
+            }
+        )
+        payload = IntakeRequest(
+            request_id="req-2b",
+            contract="BellSouth",
+            grievant_firstname="John",
+            grievant_lastname="Doe",
+            narrative="test",
+            template_data={"union_rep_email": "grievances@cwa3106.com"},
+        )
+
+        signer, source = _preferred_signer_email_for_doc(
+            payload=payload,
+            doc_type="bellsouth_meeting_request",
+            template_key="bellsouth_formal_grievance_meeting_request",
+            cfg=cfg,
+        )
+        self.assertEqual(signer, "grievances@cwa3106.com")
+        self.assertEqual(source, "template_data.union_rep_email")
+
 
 class BellSouthContextTests(unittest.TestCase):
     def test_template_context_populates_bellsouth_fields(self) -> None:
@@ -176,7 +225,94 @@ class BellSouthContextTests(unittest.TestCase):
         self.assertEqual(context["to"], "Labor Relations")
         self.assertEqual(context["grievant_names"], "John Doe")
         self.assertEqual(context["date_grievance_occurred"], "2026-02-20")
-        self.assertEqual(context["meeting_requested_date"], "2026-02-21")
+        self.assertEqual(context["meeting_requested_date"], "02/21/2026")
+
+    def test_meeting_requested_fields_default_to_tbd_when_missing(self) -> None:
+        payload = IntakeRequest(
+            request_id="req-4",
+            contract="BellSouth",
+            grievant_firstname="John",
+            grievant_lastname="Doe",
+            grievant_email="john@example.com",
+            narrative="Meeting request context",
+            template_data={},
+        )
+        cfg = SimpleNamespace(rendering=SimpleNamespace(layout_policies={}))
+
+        context, _ = _build_template_context(
+            cfg=cfg,
+            payload=payload,
+            case_id="C1",
+            grievance_id="2026001",
+            document_id="D1",
+            doc_type="bellsouth_meeting_request",
+            grievance_number=None,
+        )
+        self.assertEqual(context["meeting_requested_date"], "TBD")
+        self.assertEqual(context["meeting_requested_time"], "TBD")
+        self.assertEqual(context["meeting_requested_place"], "TBD")
+
+    def test_meeting_requested_fields_default_to_tbd_when_empty_or_null(self) -> None:
+        payload = IntakeRequest(
+            request_id="req-5",
+            contract="BellSouth",
+            grievant_firstname="John",
+            grievant_lastname="Doe",
+            grievant_email="john@example.com",
+            narrative="Meeting request context",
+            template_data={
+                "meeting_requested_date": "",
+                "meeting_requested_time": None,
+                "meeting_requested_place": "null",
+            },
+        )
+        cfg = SimpleNamespace(rendering=SimpleNamespace(layout_policies={}))
+
+        context, _ = _build_template_context(
+            cfg=cfg,
+            payload=payload,
+            case_id="C1",
+            grievance_id="2026001",
+            document_id="D1",
+            doc_type="bellsouth_meeting_request",
+            grievance_number=None,
+        )
+        self.assertEqual(context["meeting_requested_date"], "TBD")
+        self.assertEqual(context["meeting_requested_time"], "TBD")
+        self.assertEqual(context["meeting_requested_place"], "TBD")
+
+    def test_meeting_requested_fields_preserve_literal_tbd(self) -> None:
+        payload = IntakeRequest(
+            request_id="req-6",
+            contract="BellSouth",
+            grievant_firstname="John",
+            grievant_lastname="Doe",
+            grievant_email="john@example.com",
+            narrative="Meeting request context",
+            template_data={
+                "meeting_requested_date": "TBD",
+                "meeting_requested_time": "TBD",
+                "meeting_requested_place": "TBD",
+                "reply_to_name_1": "CWA Local 3106",
+                "reply_to_address_1": "4076 Union Hall Pl",
+            },
+        )
+        cfg = SimpleNamespace(rendering=SimpleNamespace(layout_policies={}))
+
+        context, _ = _build_template_context(
+            cfg=cfg,
+            payload=payload,
+            case_id="C1",
+            grievance_id="2026001",
+            document_id="D1",
+            doc_type="bellsouth_meeting_request",
+            grievance_number=None,
+        )
+        self.assertEqual(context["meeting_requested_date"], "TBD")
+        self.assertEqual(context["meeting_requested_time"], "TBD")
+        self.assertEqual(context["meeting_requested_place"], "TBD")
+        self.assertEqual(context["reply_to_name_1"], "CWA Local 3106")
+        self.assertEqual(context["reply_to_address_1"], "4076 Union Hall Pl")
 
 
 class FolderMatcherTests(unittest.TestCase):

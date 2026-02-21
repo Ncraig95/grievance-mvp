@@ -36,7 +36,7 @@ class IntakeRequest(BaseModel):
     contract: str = Field(..., description="AT&T or COJ (or other)")
     grievant_firstname: str
     grievant_lastname: str
-    grievant_email: str
+    grievant_email: str | None = None
     grievant_phone: str | None = None
     work_location: str | None = None
     supervisor: str | None = None

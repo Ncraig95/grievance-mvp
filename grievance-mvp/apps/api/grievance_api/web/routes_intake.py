@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import requests
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import ValidationError
 
 from ..core.hmac_auth import verify_hmac
 from ..core.ids import new_case_id, new_document_id, normalize_grievance_id
@@ -57,8 +58,13 @@ _DATE_FIELD_KEYS = {
     "todaydate",
     "date_grievance_occurred",
     "informal_meeting_date",
-    "meeting_requested_date",
 }
+
+_BELL_SOUTH_TBD_KEYS = (
+    "meeting_requested_date",
+    "meeting_requested_time",
+    "meeting_requested_place",
+)
 
 _DOC_COMMAND_ALIASES: dict[str, str] = {
     "bellsouth_formal_grievance_meeting_request": "bellsouth_meeting_request",
@@ -345,7 +351,7 @@ def _apply_bellsouth_defaults(*, context: dict[str, object], payload: IntakeRequ
         "date_grievance_occurred": _pick("date_grievance_occurred", "incident_date", fallback=str(payload.incident_date or "")),
         "issue_contract_section": _pick("issue_contract_section", "article", fallback=""),
         "informal_meeting_date": _pick("informal_meeting_date", fallback=""),
-        "meeting_requested_date": _pick("meeting_requested_date", fallback=today),
+        "meeting_requested_date": _pick("meeting_requested_date", fallback=""),
         "meeting_requested_time": _pick("meeting_requested_time", fallback=""),
         "meeting_requested_place": _pick("meeting_requested_place", fallback=""),
         "union_rep_attending": _pick("union_rep_attending", fallback=""),
@@ -359,6 +365,13 @@ def _apply_bellsouth_defaults(*, context: dict[str, object], payload: IntakeRequ
     }
     for key, value in defaults.items():
         context.setdefault(key, value)
+
+    # Safety-net for Power Automate autofill: allow missing/empty/null and normalize to plain-text TBD.
+    for key in _BELL_SOUTH_TBD_KEYS:
+        raw = context.get(key)
+        text = "" if raw is None else str(raw).strip()
+        if not text or text.lower() == "null":
+            context[key] = "TBD"
 
 
 def _clamp_with_ellipsis(value: str, max_chars: int) -> str:
@@ -442,6 +455,14 @@ def _validate_grievance_input_mode(grievance_mode: str, incoming_grievance_id: s
         )
 
 
+def _validate_existing_folder_mode(incoming_grievance_id: str) -> None:
+    if not incoming_grievance_id:
+        raise HTTPException(
+            status_code=400,
+            detail="grievance_id is required for existing-folder document flows",
+        )
+
+
 def _sanitize_intake_payload_for_storage(payload: IntakeRequest) -> str:
     body = payload.model_dump(exclude_none=True)
     sanitized_client_files: list[dict[str, object]] = []
@@ -455,6 +476,46 @@ def _sanitize_intake_payload_for_storage(payload: IntakeRequest) -> str:
         )
     body["client_supplied_files"] = sanitized_client_files
     return json.dumps(body, ensure_ascii=False)
+
+
+def _normalize_name_fields(raw_payload: dict[str, object]) -> dict[str, object]:
+    out = dict(raw_payload)
+    first = str(out.get("grievant_firstname", "") or "").strip()
+    last = str(out.get("grievant_lastname", "") or "").strip()
+    if first and last:
+        return out
+
+    full_name_candidates = [
+        out.get("grievant_name"),
+        out.get("grievant_full_name"),
+        out.get("member_name"),
+    ]
+    template_data = out.get("template_data")
+    if isinstance(template_data, dict):
+        full_name_candidates.extend(
+            [
+                template_data.get("grievant_name"),
+                template_data.get("grievant_full_name"),
+                template_data.get("member_name"),
+            ]
+        )
+
+    full_name = ""
+    for candidate in full_name_candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            full_name = candidate.strip()
+            break
+    if not full_name:
+        return out
+
+    parts = full_name.split()
+    if not first and parts:
+        out["grievant_firstname"] = parts[0]
+    if not last and len(parts) >= 2:
+        out["grievant_lastname"] = " ".join(parts[1:])
+    if not last and len(parts) == 1:
+        out["grievant_lastname"] = "Unknown"
+    return out
 
 
 def _decode_base64_payload(value: str) -> bytes:
@@ -663,6 +724,13 @@ def _doc_requires_existing_exact_folder(*, cfg, doc_req: DocumentRequest) -> boo
     return policy.folder_resolution == "existing_exact_grievance_id"
 
 
+def _doc_uses_auto_grievance_id(doc_req: DocumentRequest) -> bool:
+    doc_type = (doc_req.doc_type or "").strip().lower()
+    template_key = (doc_req.template_key or "").strip().lower()
+    statement_keys = {"statement_of_occurrence", "grievance_form"}
+    return doc_type in statement_keys or template_key in statement_keys
+
+
 def _build_template_context(
     *,
     cfg,  # noqa: ANN001
@@ -798,7 +866,30 @@ async def intake(request: Request):
             },
         )
         raise
-    payload = IntakeRequest.model_validate_json(body)
+    try:
+        raw_payload = json.loads(body.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+
+    if not isinstance(raw_payload, dict):
+        raise HTTPException(status_code=400, detail="intake payload must be a JSON object")
+
+    normalized_payload = _normalize_name_fields(raw_payload)
+    try:
+        payload = IntakeRequest.model_validate(normalized_payload)
+    except ValidationError as exc:
+        details = []
+        for err in exc.errors():
+            loc = ".".join(str(part) for part in err.get("loc", []))
+            msg = str(err.get("msg", "invalid field"))
+            details.append({"field": loc, "message": msg})
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "intake validation failed",
+                "errors": details,
+            },
+        ) from exc
 
     correlation_id = payload.request_id
     logger.info(
@@ -843,11 +934,35 @@ async def intake(request: Request):
     incoming_grievance_id = (payload.grievance_id or "").strip()
     grievance_mode = cfg.grievance_id.mode
 
-    _validate_grievance_input_mode(grievance_mode, incoming_grievance_id)
+    if payload.documents:
+        doc_requests = payload.documents
+    elif (payload.document_command or "").strip():
+        doc_requests = [_resolve_document_command(cfg, payload.document_command or "")]
+    else:
+        doc_requests = [DocumentRequest(doc_type="grievance_form", requires_signature=True)]
+
+    requires_existing_folder = any(
+        _doc_requires_existing_exact_folder(cfg=cfg, doc_req=req) for req in doc_requests
+    )
+    uses_auto_id_flow = all(_doc_uses_auto_grievance_id(req) for req in doc_requests)
+
+    if requires_existing_folder:
+        _validate_existing_folder_mode(incoming_grievance_id)
+    elif uses_auto_id_flow:
+        _validate_grievance_input_mode(grievance_mode, incoming_grievance_id)
+    elif not incoming_grievance_id:
+        raise HTTPException(
+            status_code=400,
+            detail="grievance_id is required for non-statement document flows",
+        )
 
     sharepoint_case_folder: str | None = None
     sharepoint_case_web_url: str | None = None
-    if grievance_mode == "manual":
+    if requires_existing_folder:
+        grievance_id = normalize_grievance_id(incoming_grievance_id) or incoming_grievance_id
+    elif not uses_auto_id_flow:
+        grievance_id = normalize_grievance_id(incoming_grievance_id) or incoming_grievance_id
+    elif grievance_mode == "manual":
         grievance_id = normalize_grievance_id(incoming_grievance_id) or incoming_grievance_id
     else:
         allocator = GrievanceIdAllocator(
@@ -868,16 +983,6 @@ async def intake(request: Request):
         sharepoint_case_folder = allocation.case_folder_name
         sharepoint_case_web_url = allocation.case_folder_web_url
 
-    if payload.documents:
-        doc_requests = payload.documents
-    elif (payload.document_command or "").strip():
-        doc_requests = [_resolve_document_command(cfg, payload.document_command or "")]
-    else:
-        doc_requests = [DocumentRequest(doc_type="grievance_form", requires_signature=True)]
-
-    requires_existing_folder = any(
-        _doc_requires_existing_exact_folder(cfg=cfg, doc_req=req) for req in doc_requests
-    )
     if requires_existing_folder:
         try:
             folder_ref = graph.find_case_folder_by_grievance_id_exact(
