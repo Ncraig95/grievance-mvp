@@ -39,15 +39,6 @@
     "q5_informal_meeting_date": "2026-02-22",
     "q5_3g3r_issued_date": "2026-02-23",
     "q5_second_level_meeting_date": "2026-02-24",
-    "q5_union_rep_name_attuid": "Rep Name / ATTUID",
-    "q6_company_statement": "",
-    "q7_proposed_disposition_second_level": "",
-    "q7_company_rep_name_attuid": "",
-    "q8_union_disposition": "",
-    "q8_union_rep_name_attuid": "",
-    "q9_mediation_requested_date": "",
-    "q9_mediation_held_date": "",
-    "q9_mediator_name": "",
-    "q10_true_intent_exists": "No"
+    "q5_union_rep_name_attuid": "Rep Name / ATTUID"
   }
 }

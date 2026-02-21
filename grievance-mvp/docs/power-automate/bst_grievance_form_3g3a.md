@@ -4,6 +4,21 @@
 
 - `bst_grievance_form_3g3a`
 
+## Scope locked for this phase
+
+- Only tag/fill content up to Question 10.
+- Do not automate district/state sections after Question 10 yet.
+- Keep those later sections printable/manual.
+
+## Required workflow sequence (signing order)
+
+1. Local union signs first (`signer1`).
+2. 2nd level manager signs second (`signer2`).
+3. Union signs decision third (`signer3`).
+
+Use explicit signer order in payload:
+- `documents[0].signers = [local_union_email, second_level_manager_email, union_decision_email]`
+
 ## Microsoft Forms blueprint
 
 Form name:
@@ -177,82 +192,25 @@ Required: `Yes`
 Helper text: `Email for final union signature/disposition step.`
 Payload key: `documents[0].signers[2]`
 
-### Optional capture for later stages (recommended now)
+### Do not collect these in Forms (DocuSeal handles them)
 
-26. Question text: `Q6 Company Statement (optional pre-capture)`
-Question type: `Long text`
-Required: `No`
-Helper text: `Optional now; can be completed by manager in stage 2 if blank.`
-Payload key: `template_data.q6_company_statement`
+- Q6 Company Statement
+- Q7 Proposed Disposition - Second Level
+- Q7 Company Representative Name and ATTUID
+- Q8 Union Disposition
+- Q8 Union Representative Name and ATTUID
+- Q9 Mediation Requested Date
+- Q9 Mediation Held Date
+- Q9 Mediator Name
+- Q10 True Intent Question Exists
 
-27. Question text: `Q7 Proposed Disposition - Second Level (optional pre-capture)`
-Question type: `Long text`
-Required: `No`
-Helper text: `Optional now; can be completed by manager in stage 2 if blank.`
-Payload key: `template_data.q7_proposed_disposition_second_level`
-
-28. Question text: `Q7 Company Representative Name and ATTUID (optional pre-capture)`
-Question type: `Text`
-Required: `No`
-Helper text: `Optional now; can be completed by manager in stage 2 if blank.`
-Payload key: `template_data.q7_company_rep_name_attuid`
-
-29. Question text: `Q8 Union Disposition (optional pre-capture)`
-Question type: `Choice`
-Required: `No`
-Choices: `Accepted`, `Rejected`, `Appealed`, `Requested Mediation`
-Helper text: `Optional now; can be completed in stage 3 if blank.`
-Payload key: `template_data.q8_union_disposition`
-
-30. Question text: `Q8 Union Representative Name and ATTUID (optional pre-capture)`
-Question type: `Text`
-Required: `No`
-Helper text: `Optional now; can be completed in stage 3 if blank.`
-Payload key: `template_data.q8_union_rep_name_attuid`
-
-31. Question text: `Q9 Mediation Requested Date (optional pre-capture)`
-Question type: `Date`
-Required: `No`
-Helper text: `Optional now; can be completed in stage 3 if blank.`
-Payload key: `template_data.q9_mediation_requested_date`
-
-32. Question text: `Q9 Mediation Held Date (optional pre-capture)`
-Question type: `Date`
-Required: `No`
-Helper text: `Optional now; can be completed in stage 3 if blank.`
-Payload key: `template_data.q9_mediation_held_date`
-
-33. Question text: `Q9 Mediator Name (optional pre-capture)`
-Question type: `Text`
-Required: `No`
-Helper text: `Optional now; can be completed in stage 3 if blank.`
-Payload key: `template_data.q9_mediator_name`
-
-34. Question text: `Q10 True Intent Question Exists`
-Question type: `Choice`
-Required: `Yes`
-Choices: `Yes`, `No`
-Helper text: `Question 10 true intent indicator.`
-Payload key: `template_data.q10_true_intent_exists`
-
-## Scope locked for this phase
-
-- Only tag/fill content up to Question 10.
-- Do not automate district/state sections after Question 10 yet.
-- Keep those later sections printable/manual.
-
-## Required workflow sequence (signing order)
-
-1. Local union signs first (`signer1`).
-2. 2nd level manager signs second (`signer2`).
-3. Union signs decision third (`signer3`).
-
-Use explicit signer order in payload:
-- `documents[0].signers = [local_union_email, second_level_manager_email, union_decision_email]`
+Important:
+- Do not include Q6-Q10 keys in `template_data` for this flow.
+- Stage 2 and stage 3 users type those values directly in DocuSeal fields.
 
 ## Word tagging standard (use this exactly)
 
-Use plain Jinja tags for text fields:
+Use plain Jinja tags for base fields (Q1-Q5):
 - `{{ q1_grievance_type }}`
 - `{{ q1_occurred_date }}`
 - `{{ q1_city_state }}`
@@ -272,15 +230,6 @@ Use plain Jinja tags for text fields:
 - `{{ q5_3g3r_issued_date }}`
 - `{{ q5_second_level_meeting_date }}`
 - `{{ q5_union_rep_name_attuid }}`
-- `{{ q6_company_statement }}`
-- `{{ q7_proposed_disposition_second_level }}`
-- `{{ q7_company_rep_name_attuid }}`
-- `{{ q8_union_disposition }}`
-- `{{ q8_union_rep_name_attuid }}`
-- `{{ q9_mediation_requested_date }}`
-- `{{ q9_mediation_held_date }}`
-- `{{ q9_mediator_name }}`
-- `{{ q10_true_intent_exists }}`
 
 Use DocuSeal anchor tags for signatures/dates/emails:
 - Step 1 union:
@@ -296,21 +245,40 @@ Use DocuSeal anchor tags for signatures/dates/emails:
   - `{{Dte_es_:signer3:date}}`
   - `{{Eml_es_:signer3:email}}`
 
-## Line-stability rules (to avoid visual break issues)
+Use DocuSeal text anchors for stage-owned Q6-Q10 fields:
+- Stage 2 manager:
+  - `{{Txt_es_:signer2:q6_company_statement}}`
+  - `{{Txt_es_:signer2:q7_proposed_disposition_second_level}}`
+  - `{{Txt_es_:signer2:q7_company_rep_name_attuid}}`
+- Stage 3 union final:
+  - `{{Txt_es_:signer3:q8_union_disposition}}`
+  - `{{Txt_es_:signer3:q8_union_rep_name_attuid}}`
+  - `{{Txt_es_:signer3:q9_mediation_requested_date}}`
+  - `{{Txt_es_:signer3:q9_mediation_held_date}}`
+  - `{{Txt_es_:signer3:q9_mediator_name}}`
+  - `{{Txt_es_:signer3:q10_true_intent_exists}}`
 
-1. Replace old `FORMTEXT` controls with plain text runs before inserting `{{ }}` tags.
-2. Put each tag in one run (do not split tag across formatting changes).
-3. Keep underlines as paragraph/table borders, not underlined spaces.
-4. Keep long narrative fields (`q3_union_statement`, `q6_company_statement`, `q7_proposed_disposition_second_level`) in dedicated multiline areas.
+## Line-stability rules
+
+1. Replace old `FORMTEXT` controls with plain text runs before inserting tags.
+2. Put each tag in one run (do not split a tag across formatting changes).
+3. Keep lines as paragraph/table borders, not underlined spaces.
+4. Place Q6/Q7/Q8-Q10 text anchors inside bounded text areas wide enough for wrapping.
 5. Keep date-like values as text tags, not Word date controls.
 
-## Power Automate mapping (questions 1-10)
+### Q6-Q10 line-wrap behavior (DocuSeal-owned)
 
-Map Forms answers into `template_data` keys above using exact key names.
+Use this placement pattern so typed text stays on lines:
+1. Put each `Txt_es_...` tag at the top-left of the intended write area.
+2. Keep the tag in normal body text (not floating shape text).
+3. For multiline blocks, leave enough vertical line area below the tag.
+4. Do not split a single field across multiple different tags unless you truly want separate inputs.
 
-Recommended dropdown/text values:
-- `q8_union_disposition`: `Accepted`, `Rejected`, `Appealed`, `Requested Mediation`
-- `q10_true_intent_exists`: `Yes` or `No`
+Current auto-sizing hints in the app:
+- `q6_company_statement`: wide + tall multiline field.
+- `q7_proposed_disposition_second_level`: wide multiline field.
+- `q8_union_disposition`: wide multiline field.
+- Other Q7/Q8/Q9/Q10 text fields are treated as single-line/small text boxes.
 
 ## HTTP body skeleton
 
@@ -356,16 +324,7 @@ Recommended dropdown/text values:
     "q5_informal_meeting_date": "<yyyy-mm-dd>",
     "q5_3g3r_issued_date": "<yyyy-mm-dd>",
     "q5_second_level_meeting_date": "<yyyy-mm-dd>",
-    "q5_union_rep_name_attuid": "<name/attuid>",
-    "q6_company_statement": "",
-    "q7_proposed_disposition_second_level": "",
-    "q7_company_rep_name_attuid": "<name/attuid>",
-    "q8_union_disposition": "",
-    "q8_union_rep_name_attuid": "<name/attuid>",
-    "q9_mediation_requested_date": "",
-    "q9_mediation_held_date": "",
-    "q9_mediator_name": "",
-    "q10_true_intent_exists": "No"
+    "q5_union_rep_name_attuid": "<name/attuid>"
   }
 }
 ```

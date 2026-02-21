@@ -73,7 +73,7 @@ _BELL_SOUTH_TBD_KEYS = (
     "meeting_requested_place",
 )
 _STAGE_SIGNATURE_PLACEHOLDER_RE = re.compile(
-    r"{{\s*(Sig_es_:signer(?P<sig>\d+):signature|Dte_es_:signer(?P<dte>\d+):date|Eml_es_:signer(?P<eml>\d+):email)\s*}}",
+    r"{{\s*(Sig_es_:signer(?P<sig>\d+):signature|Dte_es_:signer(?P<dte>\d+):date|Eml_es_:signer(?P<eml>\d+):email|Txt_es_:signer(?P<txt>\d+):(?P<txt_name>[A-Za-z0-9_]+))\s*}}",
     flags=re.IGNORECASE,
 )
 
@@ -124,7 +124,7 @@ def _rewrite_signature_placeholders_for_stage(xml_text: str, *, stage_no: int) -
 
     def _replace(match: re.Match[str]) -> str:
         inner = match.group(1)
-        signer_raw = match.group("sig") or match.group("dte") or match.group("eml")
+        signer_raw = match.group("sig") or match.group("dte") or match.group("eml") or match.group("txt")
         if not signer_raw:
             return ""
         signer_no = int(signer_raw)

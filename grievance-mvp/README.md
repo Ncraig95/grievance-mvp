@@ -436,6 +436,7 @@ Equivalent full command names also work:
   2. second-level manager
   3. union final disposition
 - Intake sends stage 1 only; webhook completion auto-advances stages 2 and 3.
+- Q6-Q10 are DocuSeal-owned fill fields in stages 2/3 (`Txt_es_` tags), not Power Automate prefill fields.
 
 Minimum payload pattern for all commands:
 

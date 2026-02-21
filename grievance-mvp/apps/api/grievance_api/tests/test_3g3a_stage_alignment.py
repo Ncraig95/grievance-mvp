@@ -30,6 +30,17 @@ class StageAlignmentPlaceholderTests(unittest.TestCase):
         self.assertNotIn("signer2", out.lower())
         self.assertNotIn("signer3", out.lower())
 
+    def test_stage2_remaps_text_tags(self) -> None:
+        src = (
+            "{{Txt_es_:signer1:q5_union_rep_name_attuid}}"
+            "{{Txt_es_:signer2:q6_company_statement}}"
+            "{{Txt_es_:signer3:q8_union_disposition}}"
+        )
+        out = _rewrite_signature_placeholders_for_stage(src, stage_no=2)
+        self.assertIn("{{Txt_es_:signer1:q6_company_statement}}", out)
+        self.assertNotIn("q5_union_rep_name_attuid", out)
+        self.assertNotIn("q8_union_disposition", out)
+
 
 if __name__ == "__main__":
     unittest.main()
