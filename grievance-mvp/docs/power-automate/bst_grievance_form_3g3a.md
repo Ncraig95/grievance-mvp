@@ -26,12 +26,12 @@ Required: `Yes`
 Helper text: `Existing folder/case grievance number, e.g. 2026001.`
 Payload key: `grievance_id`
 
-2. Question text: `Contract`
-Question type: `Choice`
-Required: `Yes`
-Choices: `BellSouth`
-Helper text: `Keep this as BellSouth.`
-Payload key: `contract`
+2. Question text: Contract
+Question type: Choice
+Required: Yes
+Choices: BST, Utilities
+Helper text: Select the local contract bucket for this 3G3A intake.
+Payload key: contract
 
 3. Question text: `Request Summary`
 Question type: `Long text`
