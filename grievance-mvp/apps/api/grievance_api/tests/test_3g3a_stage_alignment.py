@@ -41,6 +41,27 @@ class StageAlignmentPlaceholderTests(unittest.TestCase):
         self.assertNotIn("q5_union_rep_name_attuid", out)
         self.assertNotIn("q8_union_disposition", out)
 
+    def test_stage1_strips_other_signers_and_keeps_true_intent_for_signer1(self) -> None:
+        src = (
+            "{{ Sig_es_:signer1:signature }}"
+            "{{ Txt_es_:signer2:q6_company_statement }}"
+            "{{ Sig_es_:signer3:signature_true_intent }}"
+        )
+        out = _rewrite_signature_placeholders_for_stage(src, stage_no=1)
+        self.assertIn("{{Sig_es_:signer1:signature}}", out)
+        self.assertNotIn("q6_company_statement", out)
+        self.assertNotIn("signature_true_intent", out)
+
+    def test_stage3_remaps_true_intent_tags_to_signer1(self) -> None:
+        src = (
+            "{{ Sig_es_:signer2:signature_true_intent }}"
+            "{{ Dte_es_:signer3:date_true_intent }}"
+        )
+        out = _rewrite_signature_placeholders_for_stage(src, stage_no=3)
+        self.assertIn("{{Dte_es_:signer1:date_true_intent}}", out)
+        self.assertNotIn("signer2", out.lower())
+        self.assertNotIn("signer3", out.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

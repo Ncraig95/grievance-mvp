@@ -131,7 +131,7 @@ _3G3A_CHOICE_GROUPS: tuple[dict[str, object], ...] = (
     },
 )
 _STAGE_SIGNATURE_PLACEHOLDER_RE = re.compile(
-    r"{{\s*(Sig_es_:signer(?P<sig>\d+):signature|Dte_es_:signer(?P<dte>\d+):date|Eml_es_:signer(?P<eml>\d+):email|Txt_es_:signer(?P<txt>\d+):(?P<txt_name>[A-Za-z0-9_]+))\s*}}",
+    r"{{\s*(?P<tag>(?P<prefix>Sig|Dte|Eml|Txt)_es_:signer(?P<signer>\d+):(?P<field>[A-Za-z0-9_]+))\s*}}",
     flags=re.IGNORECASE,
 )
 
@@ -181,14 +181,10 @@ def _rewrite_signature_placeholders_for_stage(xml_text: str, *, stage_no: int) -
     source_signer = int(stage_no)
 
     def _replace(match: re.Match[str]) -> str:
-        inner = match.group(1)
-        signer_raw = match.group("sig") or match.group("dte") or match.group("eml") or match.group("txt")
-        if not signer_raw:
-            return ""
-        signer_no = int(signer_raw)
+        signer_no = int(match.group("signer"))
         if signer_no != source_signer:
             return ""
-        remapped = re.sub(r"signer\d+", "signer1", inner, flags=re.IGNORECASE)
+        remapped = re.sub(r"signer\d+", "signer1", match.group("tag"), count=1, flags=re.IGNORECASE)
         return "{{" + remapped + "}}"
 
     return _STAGE_SIGNATURE_PLACEHOLDER_RE.sub(_replace, xml_text)
@@ -540,6 +536,16 @@ def _apply_3g3a_defaults(*, context: dict[str, object], grievance_id: str) -> No
         for marker_field in markers.values():
             marker_key = str(marker_field)
             context[marker_key] = _CHECKED_MARK if marker_key == chosen_marker else _UNCHECKED_MARK
+
+    # Q1 "Other" free-text should only print when Other is selected.
+    q1_selected = _pick("q1_choice", "q1_grievance_type", fallback="")
+    q1_selected_normalized = _normalize_field_key(q1_selected).replace("_", " ")
+    q1_is_other = q1_selected_normalized == "other"
+    if q1_is_other:
+        q1_other_text = _pick("q1_other_text", "q1_other", "q1_grievance_type", fallback="")
+        context["q1_grievance_type"] = q1_other_text if q1_other_text else ""
+    else:
+        context["q1_grievance_type"] = ""
 
     # Stable wrapping/clamping for fixed-layout narrative sections.
     for field_key, policy in _3G3A_WRAP_POLICIES.items():

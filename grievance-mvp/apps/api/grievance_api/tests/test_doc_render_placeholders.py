@@ -31,6 +31,24 @@ class DocRenderPlaceholderTests(unittest.TestCase):
         )
         self.assertEqual(rendered, xml)
 
+    def test_text_signature_tags_are_stripped_for_signing_output(self) -> None:
+        xml = "<w:t>{{ Txt_es_:signer2:q6_company_statement }}</w:t>"
+        rendered = _replace_leftover_placeholders(
+            xml,
+            {},
+            strip_signature_placeholders=True,
+        )
+        self.assertEqual(rendered, "<w:t></w:t>")
+
+    def test_true_intent_signature_tags_are_stripped_for_signing_output(self) -> None:
+        xml = "<w:t>{{ Sig_es_:signer3:signature_true_intent }}</w:t>"
+        rendered = _replace_leftover_placeholders(
+            xml,
+            {},
+            strip_signature_placeholders=True,
+        )
+        self.assertEqual(rendered, "<w:t></w:t>")
+
     def test_split_placeholder_across_runs_is_normalized(self) -> None:
         xml = (
             "<w:r><w:t>{{ </w:t></w:r>"

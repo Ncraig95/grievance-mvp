@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libreoffice \
     poppler-utils \
     fonts-dejavu-core \
+    fonts-liberation \
+    fonts-liberation2 \
     ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 

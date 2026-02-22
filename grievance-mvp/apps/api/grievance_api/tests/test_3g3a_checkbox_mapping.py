@@ -13,6 +13,16 @@ class ThreeGThreeACheckboxMappingTests(unittest.TestCase):
         self.assertEqual(context["q1_is_billing_mark"], "☐")
         self.assertEqual(context["q1_is_utility_operations_mark"], "☐")
         self.assertEqual(context["q1_is_other_mark"], "☐")
+        self.assertEqual(context["q1_grievance_type"], "")
+
+    def test_q1_other_text_only_prints_when_other_is_selected(self) -> None:
+        context: dict[str, object] = {
+            "q1_choice": "Other",
+            "q1_grievance_type": "Legacy Routing",
+        }
+        _apply_3g3a_defaults(context=context, grievance_id="2026001")
+        self.assertEqual(context["q1_is_other_mark"], "☒")
+        self.assertEqual(context["q1_grievance_type"], "Legacy Routing")
 
     def test_q8_and_q10_choice_aliases_work(self) -> None:
         context: dict[str, object] = {
