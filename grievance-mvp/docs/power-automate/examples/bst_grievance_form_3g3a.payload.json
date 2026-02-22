@@ -21,6 +21,8 @@
     }
   ],
   "template_data": {
+    "local_grievance_number": "2026001",
+    "q1_choice": "BST",
     "q1_grievance_type": "BST",
     "q1_occurred_date": "2026-02-21",
     "q1_city_state": "Jacksonville, FL",
@@ -39,6 +41,9 @@
     "q5_informal_meeting_date": "2026-02-22",
     "q5_3g3r_issued_date": "2026-02-23",
     "q5_second_level_meeting_date": "2026-02-24",
-    "q5_union_rep_name_attuid": "Rep Name / ATTUID"
+    "q5_union_rep_name_attuid": "Rep Name / ATTUID",
+    "q8_union_disposition_choice": "Requested Mediation",
+    "q10_company_true_intent_choice": "Yes",
+    "q10_union_true_intent_choice": "No"
   }
 }

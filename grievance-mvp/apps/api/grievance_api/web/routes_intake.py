@@ -72,6 +72,64 @@ _BELL_SOUTH_TBD_KEYS = (
     "meeting_requested_time",
     "meeting_requested_place",
 )
+_CHECKED_MARK = "☒"
+_UNCHECKED_MARK = "☐"
+_3G3A_WRAP_POLICIES: dict[str, dict[str, int]] = {
+    # Render-time safety rails for long free-text blocks in fixed form sections.
+    "q3_union_statement": {"max_chars": 1800, "wrap_width": 88},
+    "q4_contract_basis": {"max_chars": 700, "wrap_width": 88},
+    # Legacy/pre-fill compatibility if these are ever provided in payload.
+    "q6_company_statement": {"max_chars": 1800, "wrap_width": 88},
+    "q7_proposed_disposition_second_level": {"max_chars": 1200, "wrap_width": 88},
+    "q8_union_disposition": {"max_chars": 1200, "wrap_width": 88},
+}
+_3G3A_CHOICE_GROUPS: tuple[dict[str, object], ...] = (
+    {
+        "source_keys": ("q1_choice", "q1_grievance_type"),
+        "markers": {
+            "bst": "q1_is_bst_mark",
+            "billing": "q1_is_billing_mark",
+            "utility operations": "q1_is_utility_operations_mark",
+            "utility_ops": "q1_is_utility_operations_mark",
+            "uo": "q1_is_utility_operations_mark",
+            "other": "q1_is_other_mark",
+        },
+    },
+    {
+        "source_keys": ("q8_union_disposition_choice", "q8_union_disposition"),
+        "markers": {
+            "accepted": "q8_is_accepted_mark",
+            "rejected": "q8_is_rejected_mark",
+            "appealed": "q8_is_appealed_mark",
+            "requested mediation": "q8_is_requested_mediation_mark",
+            "requested_mediation": "q8_is_requested_mediation_mark",
+        },
+    },
+    {
+        "source_keys": (
+            "q10_company_true_intent_choice",
+            "q10_company_true_intent_exists",
+            "q10_true_intent_choice",
+            "q10_true_intent_exists",
+        ),
+        "markers": {
+            "yes": "q10_company_is_yes_mark",
+            "no": "q10_company_is_no_mark",
+        },
+    },
+    {
+        "source_keys": (
+            "q10_union_true_intent_choice",
+            "q10_union_true_intent_exists",
+            "q10_true_intent_choice",
+            "q10_true_intent_exists",
+        ),
+        "markers": {
+            "yes": "q10_union_is_yes_mark",
+            "no": "q10_union_is_no_mark",
+        },
+    },
+)
 _STAGE_SIGNATURE_PLACEHOLDER_RE = re.compile(
     r"{{\s*(Sig_es_:signer(?P<sig>\d+):signature|Dte_es_:signer(?P<dte>\d+):date|Eml_es_:signer(?P<eml>\d+):email|Txt_es_:signer(?P<txt>\d+):(?P<txt_name>[A-Za-z0-9_]+))\s*}}",
     flags=re.IGNORECASE,
@@ -440,6 +498,68 @@ def _apply_bellsouth_defaults(*, context: dict[str, object], payload: IntakeRequ
         text = "" if raw is None else str(raw).strip()
         if not text or text.lower() == "null":
             context[key] = "TBD"
+
+
+def _apply_3g3a_defaults(*, context: dict[str, object], grievance_id: str) -> None:
+    def _pick(*keys: str, fallback: str = "") -> str:
+        for key in keys:
+            raw = context.get(key)
+            if raw is None:
+                continue
+            text = str(raw).strip()
+            if text:
+                return text
+        return fallback
+
+    # Explicit local grievance number on form; fallback to grievance_id.
+    context.setdefault(
+        "local_grievance_number",
+        _pick("local_grievance_number", "local_grievance_id", fallback=grievance_id),
+    )
+
+    # Single-choice checkbox groups rendered as text marks.
+    for group in _3G3A_CHOICE_GROUPS:
+        markers = group.get("markers")
+        if not isinstance(markers, dict) or not markers:
+            continue
+        for marker_field in markers.values():
+            context.setdefault(str(marker_field), _UNCHECKED_MARK)
+
+        selected = _pick(*[str(k) for k in group.get("source_keys", ())], fallback="")
+        if not selected:
+            continue
+        selected_normalized = _normalize_field_key(selected).replace("_", " ")
+        chosen_marker = None
+        for candidate, marker_field in markers.items():
+            candidate_normalized = _normalize_field_key(str(candidate)).replace("_", " ")
+            if selected_normalized == candidate_normalized:
+                chosen_marker = str(marker_field)
+                break
+        if not chosen_marker:
+            continue
+        for marker_field in markers.values():
+            marker_key = str(marker_field)
+            context[marker_key] = _CHECKED_MARK if marker_key == chosen_marker else _UNCHECKED_MARK
+
+    # Stable wrapping/clamping for fixed-layout narrative sections.
+    for field_key, policy in _3G3A_WRAP_POLICIES.items():
+        raw = context.get(field_key)
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if not text:
+            continue
+        max_chars = int(policy.get("max_chars", 0))
+        wrap_width = max(1, int(policy.get("wrap_width", 88)))
+        if max_chars > 0 and len(text) > max_chars:
+            text = text[: max_chars - 1].rstrip() + "…"
+        wrapped = textwrap.fill(
+            text,
+            width=wrap_width,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        context[field_key] = wrapped
 
 
 def _clamp_with_ellipsis(value: str, max_chars: int) -> str:
@@ -930,6 +1050,8 @@ def _build_template_context(
     )
     if doc_type == "bellsouth_meeting_request":
         _apply_bellsouth_defaults(context=context, payload=payload)
+    if doc_type == "bst_grievance_form_3g3a":
+        _apply_3g3a_defaults(context=context, grievance_id=grievance_id)
     for ctx_key in tuple(context.keys()):
         if _is_date_field_key(str(ctx_key)):
             context[ctx_key] = _format_context_date_value(context.get(ctx_key))
