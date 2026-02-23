@@ -5,6 +5,7 @@ import json
 from fastapi import APIRouter, HTTPException, Request
 
 from ..db.db import Db
+from ..services.contract_timeline import calculate_deadline, deadline_days_for_contract, resolve_contract_and_incident_date
 from ..services.notification_service import NotificationService
 from .models import ResendNotificationRequest, ResendNotificationResult
 
@@ -40,13 +41,16 @@ async def resend_notification(case_id: str, body: ResendNotificationRequest, req
     notifications: NotificationService = request.app.state.notifications
 
     case_row = await db.fetchone(
-        "SELECT grievance_id, member_name, member_email, status FROM cases WHERE id=?",
+        "SELECT grievance_id, grievance_number, member_name, member_email, status, intake_payload_json FROM cases WHERE id=?",
         (case_id,),
     )
     if not case_row:
         raise HTTPException(status_code=404, detail="case_id not found")
 
-    grievance_id, member_name, member_email, case_status = case_row
+    grievance_id, grievance_number, member_name, member_email, case_status, intake_payload_json = case_row
+    contract_label, incident_dt = resolve_contract_and_incident_date(intake_payload_json)
+    deadline_days = deadline_days_for_contract(contract_label)
+    deadline_dt = calculate_deadline(incident_dt, deadline_days)
 
     document_id = body.document_id
     doc_type = ""
@@ -97,6 +101,11 @@ async def resend_notification(case_id: str, body: ResendNotificationRequest, req
     base_context = {
         "case_id": case_id,
         "grievance_id": grievance_id,
+        "projected_grievance_number": grievance_number or grievance_id,
+        "contract_name": contract_label or "",
+        "incident_date": incident_dt.isoformat() if incident_dt else "",
+        "deadline_days": str(deadline_days or ""),
+        "deadline_date": deadline_dt.isoformat() if deadline_dt else "",
         "document_id": document_id or "",
         "document_type": doc_type,
         "member_name": member_name,

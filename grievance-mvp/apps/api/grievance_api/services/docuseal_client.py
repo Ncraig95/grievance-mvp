@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import re
+import subprocess
+import tempfile
 from dataclasses import dataclass
+from html import unescape
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import requests
 
@@ -14,6 +19,14 @@ class DocuSealSubmission:
     raw: dict
 
 
+_TEXT_FIELD_DIMENSION_HINTS: dict[str, dict[str, float]] = {
+    # 3G3A stage-owned multiline blocks.
+    "q6_company_statement": {"min_w": 430.0, "min_h": 132.0},
+    "q7_proposed_disposition_second_level": {"min_w": 430.0, "min_h": 108.0},
+    "q8_union_disposition": {"min_w": 430.0, "min_h": 108.0},
+}
+
+
 class DocuSealClient:
     def __init__(
         self,
@@ -21,17 +34,411 @@ class DocuSealClient:
         api_token: str,
         timeout: int = 30,
         public_base_url: str | None = None,
+        web_base_url: str | None = None,
+        web_email: str | None = None,
+        web_password: str | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_token = api_token
         self.timeout = timeout
         self.public_base_url = (public_base_url or "").rstrip("/") or None
+        self.web_base_url = (web_base_url or "").rstrip("/") or None
+        self.web_email = (web_email or "").strip() or None
+        self.web_password = (web_password or "").strip() or None
+
+    @staticmethod
+    def _safe_filename(value: str) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", (value or "").strip()).strip("_.")
+        return f"{cleaned or 'document'}.pdf"
+
+    @staticmethod
+    def _placeholder_patterns() -> dict[str, re.Pattern[str]]:
+        return {
+            # pdftotext -bbox often strips surrounding braces from placeholders, so
+            # we match the inner marker token and normalize optional braces separately.
+            "signature": re.compile(r"^Sig_es_:signer(\d+):signature$", re.IGNORECASE),
+            "date": re.compile(r"^Dte_es_:signer(\d+):date$", re.IGNORECASE),
+            "email": re.compile(r"^Eml_es_:signer(\d+):email$", re.IGNORECASE),
+            "text": re.compile(r"^Txt_es_:signer(\d+):([A-Za-z0-9_]+)$", re.IGNORECASE),
+        }
+
+    @staticmethod
+    def _normalize_placeholder_token(token: str) -> str:
+        cleaned = (token or "").strip()
+        if cleaned.startswith("{{") and cleaned.endswith("}}"):
+            cleaned = cleaned[2:-2]
+        return cleaned.strip()
 
     def _headers(self, *, is_json: bool = True) -> dict:
         headers = {"X-Auth-Token": self.api_token}
         if is_json:
             headers["Content-Type"] = "application/json"
         return headers
+
+    @staticmethod
+    def _extract_csrf_token(html_text: str) -> str:
+        # Prefer form token first; fall back to meta token if form is not present.
+        for pattern in (
+            r'name="authenticity_token"\s+value="([^"]+)"',
+            r'name="csrf-token"\s+content="([^"]+)"',
+        ):
+            match = re.search(pattern, html_text)
+            if match:
+                return unescape(match.group(1))
+        raise RuntimeError("DocuSeal CSRF token not found in HTML response")
+
+    @staticmethod
+    def _json_object(resp: requests.Response) -> dict:
+        payload = resp.json()
+        if isinstance(payload, dict):
+            return payload
+        if isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, dict):
+                    return item
+        return {}
+
+    def _clone_and_replace_template(
+        self,
+        *,
+        base_template_id: str,
+        upload_pdf_bytes: bytes,
+        alignment_pdf_bytes: bytes | None,
+        title: str,
+    ) -> str:
+        web_base = self.web_base_url or self.public_base_url
+        if not web_base:
+            raise RuntimeError(
+                "DocuSeal clone-and-replace requires docuseal.public_base_url or docuseal.web_base_url"
+            )
+        if not self.web_email or not self.web_password:
+            raise RuntimeError(
+                "DocuSeal clone-and-replace requires web credentials. Set DOCUSEAL_WEB_EMAIL and DOCUSEAL_WEB_PASSWORD."
+            )
+
+        sess = requests.Session()
+
+        sign_in_page = sess.get(f"{web_base}/sign_in", timeout=self.timeout)
+        sign_in_page.raise_for_status()
+        sign_in_token = self._extract_csrf_token(sign_in_page.text)
+
+        sign_in_resp = sess.post(
+            f"{web_base}/sign_in",
+            data={
+                "authenticity_token": sign_in_token,
+                "user[email]": self.web_email,
+                "user[password]": self.web_password,
+            },
+            allow_redirects=False,
+            timeout=self.timeout,
+        )
+        if sign_in_resp.status_code not in {200, 302, 303}:
+            raise RuntimeError(f"DocuSeal web sign-in failed: {sign_in_resp.status_code} {sign_in_resp.text[:400]}")
+        if sign_in_resp.status_code == 200 and "Invalid Email or password" in sign_in_resp.text:
+            raise RuntimeError("DocuSeal web sign-in failed: invalid credentials")
+
+        edit_resp = sess.get(f"{web_base}/templates/{base_template_id}/edit", timeout=self.timeout)
+        edit_resp.raise_for_status()
+        csrf_token = self._extract_csrf_token(edit_resp.text)
+
+        files = {
+            "files[]": (
+                self._safe_filename(title),
+                upload_pdf_bytes,
+                "application/pdf",
+            )
+        }
+        clone_resp = sess.post(
+            f"{web_base}/templates/{base_template_id}/clone_and_replace",
+            headers={
+                "Accept": "application/json",
+                "X-Requested-With": "XMLHttpRequest",
+                "X-CSRF-Token": csrf_token,
+            },
+            files=files,
+            timeout=self.timeout,
+        )
+        if not (200 <= clone_resp.status_code < 300):
+            raise RuntimeError(f"DocuSeal clone-and-replace failed: {clone_resp.status_code} {clone_resp.text[:400]}")
+
+        obj = self._json_object(clone_resp)
+        template_id = str(obj.get("id") or "").strip()
+        if not template_id:
+            raise RuntimeError("DocuSeal clone-and-replace response missing template id")
+        self._apply_placeholder_field_alignment(
+            template_id=template_id,
+            pdf_bytes=alignment_pdf_bytes or upload_pdf_bytes,
+        )
+        return template_id
+
+    def _extract_placeholder_areas(self, *, pdf_bytes: bytes) -> dict[tuple[int, str], list[dict]]:
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as src:
+            src.write(pdf_bytes)
+            src.flush()
+            proc = subprocess.run(
+                ["pdftotext", "-bbox", src.name, "-"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+        if proc.returncode != 0:
+            return {}
+
+        patterns = self._placeholder_patterns()
+        page_re = re.compile(r'<page[^>]*width="([0-9.]+)"[^>]*height="([0-9.]+)"', re.IGNORECASE)
+        word_re = re.compile(
+            r'<word[^>]*xMin="([0-9.]+)"[^>]*yMin="([0-9.]+)"[^>]*xMax="([0-9.]+)"[^>]*yMax="([0-9.]+)"[^>]*>(.*?)</word>',
+            re.IGNORECASE,
+        )
+
+        areas: dict[tuple[int, str], list[dict]] = {}
+        page_index = -1
+        page_w = 0.0
+        page_h = 0.0
+
+        for line in proc.stdout.splitlines():
+            page_match = page_re.search(line)
+            if page_match:
+                page_index += 1
+                page_w = float(page_match.group(1))
+                page_h = float(page_match.group(2))
+                continue
+
+            word_match = word_re.search(line)
+            if not word_match or page_index < 0:
+                continue
+
+            token = self._normalize_placeholder_token(unescape(word_match.group(5)))
+            if not token:
+                continue
+            signer_index: int | None = None
+            field_key: str | None = None
+            for candidate_type, pattern in patterns.items():
+                match = pattern.match(token)
+                if match:
+                    signer_index = int(match.group(1))
+                    if candidate_type == "text":
+                        field_name = str(match.group(2) or "").strip()
+                        if not field_name:
+                            break
+                        field_key = f"text:{field_name}"
+                    else:
+                        field_key = candidate_type
+                    break
+            if signer_index is None or field_key is None:
+                continue
+
+            areas.setdefault((signer_index, field_key), []).append(
+                {
+                    "x_min": float(word_match.group(1)),
+                    "y_min": float(word_match.group(2)),
+                    "x_max": float(word_match.group(3)),
+                    "y_max": float(word_match.group(4)),
+                    "page": page_index,
+                    "page_w": page_w,
+                    "page_h": page_h,
+                }
+            )
+
+        return areas
+
+    @staticmethod
+    def _normalize_area(
+        *,
+        raw: dict,
+        field_type: str,
+        attachment_uuid: str,
+        field_name: str = "",
+    ) -> dict:
+        word_w = max(1.0, raw["x_max"] - raw["x_min"])
+        word_h = max(1.0, raw["y_max"] - raw["y_min"])
+
+        if field_type == "signature":
+            min_w, min_h, pad_w, pad_h = 140.0, 28.0, 8.0, 4.0
+            y_lift = 14.0
+        elif field_type == "text":
+            min_w, min_h, pad_w, pad_h = 220.0, 24.0, 4.0, 2.0
+            y_lift = 2.0
+            hint = _TEXT_FIELD_DIMENSION_HINTS.get(field_name.lower())
+            if hint:
+                min_w = float(hint.get("min_w", min_w))
+                min_h = float(hint.get("min_h", min_h))
+        elif field_type == "email":
+            min_w, min_h, pad_w, pad_h = 180.0, 18.0, 6.0, 2.0
+            y_lift = 5.0
+        else:
+            min_w, min_h, pad_w, pad_h = 90.0, 18.0, 4.0, 2.0
+            y_lift = 6.0
+
+        x = max(0.0, raw["x_min"] - 2.0)
+        y = max(0.0, raw["y_min"] - y_lift)
+        w = max(min_w, word_w + 2 * pad_w)
+        h = max(min_h, word_h + 2 * pad_h)
+
+        if x + w > raw["page_w"]:
+            w = max(1.0, raw["page_w"] - x)
+        if y + h > raw["page_h"]:
+            h = max(1.0, raw["page_h"] - y)
+
+        return {
+            "x": x / raw["page_w"],
+            "y": y / raw["page_h"],
+            "w": w / raw["page_w"],
+            "h": h / raw["page_h"],
+            "attachment_uuid": attachment_uuid,
+            "page": int(raw["page"]),
+        }
+
+    def _apply_placeholder_field_alignment(self, *, template_id: str, pdf_bytes: bytes) -> None:
+        placeholder_areas = self._extract_placeholder_areas(pdf_bytes=pdf_bytes)
+        if not placeholder_areas:
+            return
+
+        template_resp = requests.get(
+            f"{self.base_url}/api/templates/{template_id}",
+            headers=self._headers(is_json=False),
+            timeout=self.timeout,
+        )
+        if not (200 <= template_resp.status_code < 300):
+            return
+
+        template_obj = self._json_object(template_resp)
+        submitters = template_obj.get("submitters")
+        schema = template_obj.get("schema")
+        if not isinstance(submitters, list) or not submitters:
+            return
+        if not isinstance(schema, list) or not schema or not isinstance(schema[0], dict):
+            return
+        attachment_uuid = str(schema[0].get("attachment_uuid") or "").strip()
+        if not attachment_uuid:
+            return
+
+        rebuilt_fields: list[dict] = []
+        signer_indexes = sorted({signer_idx for signer_idx, _ in placeholder_areas.keys()})
+        for signer_idx in signer_indexes:
+            submitter_pos = signer_idx - 1
+            if submitter_pos < 0 or submitter_pos >= len(submitters):
+                continue
+            submitter = submitters[submitter_pos]
+            if not isinstance(submitter, dict):
+                continue
+            submitter_uuid = str(submitter.get("uuid") or "").strip()
+            if not submitter_uuid:
+                continue
+
+            signer_fields = [
+                (field_key, anchors)
+                for (cur_signer, field_key), anchors in placeholder_areas.items()
+                if cur_signer == signer_idx
+            ]
+            signer_fields.sort(key=lambda item: item[0])
+            for field_key, anchors in signer_fields:
+                if not anchors:
+                    continue
+                field_type = field_key
+                field_name = ""
+                required = True
+                readonly = False
+                preferences: dict[str, object] = {}
+                if field_key.startswith("text:"):
+                    field_type = "text"
+                    field_name = field_key.split(":", 1)[1]
+                    required = False
+                    preferences = {"multiline": True}
+                elif field_key == "email":
+                    field_type = "text"
+                    field_name = f"signer{signer_idx}_email"
+                    required = False
+                    readonly = True
+
+                field_payload = {
+                    "uuid": str(uuid4()),
+                    "submitter_uuid": submitter_uuid,
+                    "name": field_name,
+                    "type": field_type,
+                    "required": required,
+                    "preferences": preferences,
+                    "areas": [
+                        self._normalize_area(
+                            raw=anchor,
+                            field_type=field_type,
+                            attachment_uuid=attachment_uuid,
+                            field_name=field_name,
+                        )
+                        for anchor in anchors
+                    ],
+                }
+                if readonly:
+                    field_payload["readonly"] = True
+                rebuilt_fields.append(field_payload)
+
+        if not rebuilt_fields:
+            return
+
+        requests.patch(
+            f"{self.base_url}/api/templates/{template_id}",
+            headers=self._headers(is_json=True),
+            json={"fields": rebuilt_fields},
+            timeout=self.timeout,
+        )
+
+    def _resolve_signer_email_fields(self, *, template_id: str) -> dict[int, str]:
+        try:
+            resp = requests.get(
+                f"{self.base_url}/api/templates/{template_id}",
+                headers=self._headers(is_json=False),
+                timeout=self.timeout,
+            )
+        except Exception:
+            return {}
+        if not (200 <= resp.status_code < 300):
+            return {}
+
+        template_obj = self._json_object(resp)
+        fields = template_obj.get("fields")
+        submitters = template_obj.get("submitters")
+        if not isinstance(fields, list) or not isinstance(submitters, list):
+            return {}
+
+        uuid_to_signer_index: dict[str, int] = {}
+        for idx, submitter in enumerate(submitters, start=1):
+            if not isinstance(submitter, dict):
+                continue
+            submitter_uuid = str(submitter.get("uuid") or "").strip()
+            if submitter_uuid:
+                uuid_to_signer_index[submitter_uuid] = idx
+
+        signer_email_fields: dict[int, str] = {}
+        name_re = re.compile(r"^signer(\d+)_email$", re.IGNORECASE)
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            if str(field.get("type") or "").strip().lower() != "text":
+                continue
+            field_name = str(field.get("name") or "").strip()
+            match = name_re.match(field_name)
+            if not match:
+                continue
+            signer_idx = int(match.group(1))
+            submitter_uuid = str(field.get("submitter_uuid") or "").strip()
+            if submitter_uuid and submitter_uuid in uuid_to_signer_index:
+                signer_idx = uuid_to_signer_index[submitter_uuid]
+            signer_email_fields[signer_idx] = field_name
+
+        return signer_email_fields
+
+    @staticmethod
+    def _build_submitters_payload(signers: list[str], signer_email_fields: dict[int, str]) -> list[dict]:
+        submitters_payload: list[dict] = []
+        for idx, signer_email in enumerate(signers, start=1):
+            item: dict[str, object] = {"email": signer_email}
+            email_field_name = signer_email_fields.get(idx)
+            if email_field_name:
+                item["values"] = {email_field_name: signer_email}
+                item["readonly_fields"] = [email_field_name]
+            submitters_payload.append(item)
+        return submitters_payload
 
     def _rewrite_public_url(self, value: str | None) -> str | None:
         if not value:
@@ -87,6 +494,7 @@ class DocuSealClient:
         self,
         *,
         pdf_bytes: bytes,
+        alignment_pdf_bytes: bytes | None = None,
         signers: list[str],
         title: str,
         metadata: dict[str, str] | None = None,
@@ -95,8 +503,15 @@ class DocuSealClient:
         if not signers:
             raise RuntimeError("DocuSeal submission requires at least one signer")
 
-        selected_template_id: str | None = str(template_id) if template_id is not None else None
-        if not selected_template_id:
+        selected_template_id: str | None = str(template_id).strip() if template_id is not None else None
+        if selected_template_id:
+            selected_template_id = self._clone_and_replace_template(
+                base_template_id=selected_template_id,
+                upload_pdf_bytes=pdf_bytes,
+                alignment_pdf_bytes=alignment_pdf_bytes,
+                title=title,
+            )
+        else:
             files = {"files[0]": ("document.pdf", pdf_bytes, "application/pdf")}
             create_template = requests.post(
                 f"{self.base_url}/api/templates",
@@ -106,36 +521,35 @@ class DocuSealClient:
             )
             if 200 <= create_template.status_code < 300:
                 template_obj = self._first_object(create_template.json())
-                selected_template_id = str(template_obj.get("id") or template_obj.get("template_id") or "")
-            elif create_template.status_code == 404:
-                # API template creation may be disabled in some deployments; use an existing template id instead.
-                templates = requests.get(
-                    f"{self.base_url}/api/templates",
-                    headers=self._headers(is_json=False),
-                    timeout=self.timeout,
-                )
-                templates.raise_for_status()
-                data = templates.json().get("data", [])
-                for item in data:
-                    if not isinstance(item, dict):
-                        continue
-                    fields = item.get("fields")
-                    if isinstance(fields, list) and fields:
-                        selected_template_id = str(item.get("id") or "")
-                        break
+                selected_template_id = str(template_obj.get("id") or template_obj.get("template_id") or "").strip()
             else:
-                create_template.raise_for_status()
+                details = create_template.text[:400]
+                if create_template.status_code in {404, 422} and "Pro Edition" in details:
+                    raise RuntimeError(
+                        "DocuSeal API template upload is unavailable on this deployment. "
+                        "Configure docuseal.default_template_id and DOCUSEAL_WEB_EMAIL/DOCUSEAL_WEB_PASSWORD."
+                    )
+                raise RuntimeError(f"DocuSeal template create failed: {create_template.status_code} {details}")
 
         if not selected_template_id:
             raise RuntimeError(
-                "DocuSeal template resolution failed. Configure docuseal.default_template_id/template_ids with a template containing signature fields."
+                "DocuSeal template resolution failed. Configure docuseal.default_template_id/template_ids."
             )
 
-        signer_objs = [{"email": s} for s in signers]
+        signer_email_fields = self._resolve_signer_email_fields(template_id=selected_template_id)
+        signer_objs = self._build_submitters_payload(signers, signer_email_fields)
+        plain_signer_objs = [{"email": s} for s in signers]
         payload_variants = [
             {
                 "template_id": selected_template_id,
                 "submitters": signer_objs,
+                "name": title,
+                "send_email": False,
+                "metadata": metadata or {},
+            },
+            {
+                "template_id": selected_template_id,
+                "submitters": plain_signer_objs,
                 "name": title,
                 "send_email": False,
                 "metadata": metadata or {},

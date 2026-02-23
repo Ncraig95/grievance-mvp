@@ -114,6 +114,24 @@ class Db:
         )
         return bool(row and int(row[0]) == 1)
 
+    async def try_claim_receipt(self, provider: str, receipt_key: str, raw_body: str) -> bool:
+        now = utcnow()
+        async with aiosqlite.connect(self.db_path) as con:
+            await con.execute("BEGIN IMMEDIATE")
+            await con.execute(
+                "INSERT OR IGNORE INTO webhook_receipts(provider, receipt_key, ts_utc, raw_body, handled) VALUES(?,?,?,?,0)",
+                (provider, receipt_key, now, raw_body),
+            )
+            cur = await con.execute(
+                """UPDATE webhook_receipts
+                   SET handled=2, ts_utc=?, raw_body=?
+                   WHERE provider=? AND receipt_key=? AND handled=0""",
+                (now, raw_body, provider, receipt_key),
+            )
+            claimed = cur.rowcount > 0
+            await con.commit()
+            return claimed
+
     async def store_receipt(self, provider: str, receipt_key: str, raw_body: str) -> None:
         await self.exec(
             "INSERT OR IGNORE INTO webhook_receipts(provider, receipt_key, ts_utc, raw_body, handled) VALUES(?,?,?,?,0)",
@@ -123,6 +141,12 @@ class Db:
     async def mark_receipt_handled(self, provider: str, receipt_key: str) -> None:
         await self.exec(
             "UPDATE webhook_receipts SET handled=1 WHERE provider=? AND receipt_key=?",
+            (provider, receipt_key),
+        )
+
+    async def release_receipt_claim(self, provider: str, receipt_key: str) -> None:
+        await self.exec(
+            "UPDATE webhook_receipts SET handled=0 WHERE provider=? AND receipt_key=? AND handled=2",
             (provider, receipt_key),
         )
 
@@ -224,3 +248,111 @@ class Db:
             "UPDATE outbound_emails SET status='failed', updated_at_utc=?, metadata_json=? WHERE id=?",
             (now, json.dumps({"error": error_message}, ensure_ascii=False), row_id),
         )
+
+    async def create_document_stage(
+        self,
+        *,
+        case_id: str,
+        document_id: str,
+        stage_no: int,
+        stage_key: str,
+        status: str,
+        signer_email: str,
+        source_payload: dict | None = None,
+    ) -> int:
+        return await self.insert(
+            """INSERT INTO document_stages(
+                 case_id, document_id, stage_no, stage_key, status, signer_email, source_payload_json, started_at_utc
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                case_id,
+                document_id,
+                int(stage_no),
+                stage_key,
+                status,
+                signer_email,
+                json.dumps(source_payload or {}, ensure_ascii=False),
+                utcnow(),
+            ),
+        )
+
+    async def get_document_stage(self, *, document_id: str, stage_no: int):
+        return await self.fetchone(
+            """SELECT id, case_id, document_id, stage_no, stage_key, status, signer_email,
+                      docuseal_submission_id, docuseal_signing_link, source_payload_json,
+                      started_at_utc, completed_at_utc, failed_at_utc
+               FROM document_stages
+               WHERE document_id=? AND stage_no=?""",
+            (document_id, int(stage_no)),
+        )
+
+    async def get_document_stage_by_submission(self, *, submission_id: str):
+        return await self.fetchone(
+            """SELECT id, case_id, document_id, stage_no, stage_key, status, signer_email,
+                      docuseal_submission_id, docuseal_signing_link, source_payload_json,
+                      started_at_utc, completed_at_utc, failed_at_utc
+               FROM document_stages
+               WHERE docuseal_submission_id=?""",
+            (submission_id,),
+        )
+
+    async def update_document_stage_submission(
+        self,
+        *,
+        stage_id: int,
+        status: str,
+        submission_id: str,
+        signing_link: str | None,
+    ) -> None:
+        await self.exec(
+            """UPDATE document_stages
+               SET status=?, docuseal_submission_id=?, docuseal_signing_link=?
+               WHERE id=?""",
+            (status, submission_id, signing_link, int(stage_id)),
+        )
+
+    async def complete_document_stage(self, *, stage_id: int) -> None:
+        await self.exec(
+            "UPDATE document_stages SET status='completed', completed_at_utc=? WHERE id=?",
+            (utcnow(), int(stage_id)),
+        )
+
+    async def fail_document_stage(self, *, stage_id: int, status: str = "failed") -> None:
+        await self.exec(
+            "UPDATE document_stages SET status=?, failed_at_utc=? WHERE id=?",
+            (status, utcnow(), int(stage_id)),
+        )
+
+    async def create_document_stage_artifact(
+        self,
+        *,
+        document_stage_id: int,
+        artifact_type: str,
+        storage_backend: str,
+        storage_path: str,
+        sha256: str,
+        size_bytes: int,
+    ) -> int:
+        return await self.insert(
+            """INSERT INTO document_stage_artifacts(
+                 document_stage_id, artifact_type, storage_backend, storage_path, sha256, size_bytes, created_at_utc
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                int(document_stage_id),
+                artifact_type,
+                storage_backend,
+                storage_path,
+                sha256,
+                int(size_bytes),
+                utcnow(),
+            ),
+        )
+
+    async def replace_document_stage_fields(self, *, document_stage_id: int, fields: dict[str, object]) -> None:
+        await self.exec("DELETE FROM document_stage_field_values WHERE document_stage_id=?", (int(document_stage_id),))
+        for key, value in fields.items():
+            await self.exec(
+                """INSERT INTO document_stage_field_values(document_stage_id, field_key, field_value, created_at_utc)
+                   VALUES(?,?,?,?)""",
+                (int(document_stage_id), str(key), json.dumps(value, ensure_ascii=False), utcnow()),
+            )

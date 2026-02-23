@@ -57,6 +57,7 @@ async def send_document_for_signature(
     doc_type: str,
     template_key: str | None,
     pdf_bytes: bytes,
+    alignment_pdf_bytes: bytes | None,
     signer_order: list[str],
     correlation_id: str,
     idempotency_prefix: str,
@@ -78,6 +79,7 @@ async def send_document_for_signature(
     try:
         submission = docuseal.create_submission(
             pdf_bytes=pdf_bytes,
+            alignment_pdf_bytes=alignment_pdf_bytes,
             signers=normalized_signers,
             title=f"Grievance {grievance_id} - {doc_type}",
             metadata={

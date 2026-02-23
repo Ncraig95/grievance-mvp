@@ -128,12 +128,25 @@ class NotificationService:
             )
 
         rendered = self.template_store.render(template_key, context)
+        subject = rendered.subject
+        text_body = rendered.text_body
+        html_body = rendered.html_body
+        if self.email_cfg.test_mode:
+            if not subject.upper().startswith("[TEST]"):
+                subject = f"[TEST] {subject}"
+            test_text_banner = "TEST MESSAGE: this is a test workflow email.\n\n"
+            text_body = f"{test_text_banner}{text_body}"
+            if html_body:
+                html_body = (
+                    "<p><strong>TEST MESSAGE:</strong> this is a test workflow email.</p>"
+                    f"{html_body}"
+                )
         try:
             sent = self.mailer.send_mail(
                 to_recipients=[recipient],
-                subject=rendered.subject,
-                text_body=rendered.text_body,
-                html_body=rendered.html_body,
+                subject=subject,
+                text_body=text_body,
+                html_body=html_body,
                 attachments=attachments,
                 custom_headers={
                     "X-Case-ID": case_id,

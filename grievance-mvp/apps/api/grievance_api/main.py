@@ -5,6 +5,7 @@ import logging
 from fastapi import FastAPI
 
 from .core.config import load_config
+from .core.intake_auth import validate_intake_auth_config
 from .core.logging import setup_logging
 from .db.db import Db
 from .db.migrate import migrate
@@ -21,8 +22,9 @@ from .web.routes_webhook import router as webhook_router
 
 
 def create_app() -> FastAPI:
-    setup_logging()
     cfg = load_config("/app/config/config.yaml")
+    setup_logging(cfg.log_level)
+    validate_intake_auth_config(cfg.intake_auth)
 
     migrate(cfg.db_path)
 
@@ -36,6 +38,9 @@ def create_app() -> FastAPI:
         cfg.docuseal.base_url,
         cfg.docuseal.api_token,
         public_base_url=cfg.docuseal.public_base_url,
+        web_base_url=cfg.docuseal.web_base_url,
+        web_email=cfg.docuseal.web_email,
+        web_password=cfg.docuseal.web_password,
     )
 
     app.state.graph = GraphUploader(
@@ -48,6 +53,8 @@ def create_app() -> FastAPI:
 
     app.state.mailer = None
     if cfg.email.enabled:
+        if not cfg.email.internal_recipients:
+            raise RuntimeError("email.internal_recipients must contain at least one address when email.enabled=true")
         if not cfg.email.sender_user_id:
             raise RuntimeError("email.sender_user_id must be set when email.enabled=true")
         app.state.mailer = GraphMailer(

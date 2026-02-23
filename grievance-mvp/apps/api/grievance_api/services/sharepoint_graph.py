@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
 import msal
 import requests
+
+_SIMPLE_UPLOAD_MAX_BYTES = 250 * 1024 * 1024
+_UPLOAD_SESSION_CHUNK_BYTES = 10 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -22,6 +26,21 @@ class UploadedFileRef:
     item_id: str
     web_url: str | None
     path: str
+
+
+class CaseFolderLookupError(RuntimeError):
+    pass
+
+
+class CaseFolderNotFoundError(CaseFolderLookupError):
+    pass
+
+
+class CaseFolderAmbiguousError(CaseFolderLookupError):
+    def __init__(self, grievance_id: str, candidates: list[str]):
+        super().__init__(f"multiple case folders matched grievance_id '{grievance_id}'")
+        self.grievance_id = grievance_id
+        self.candidates = candidates
 
 
 class GraphUploader:
@@ -89,6 +108,49 @@ class GraphUploader:
             return {}
         raise RuntimeError(f"Graph request failed ({method} {endpoint}): {r.status_code} {r.text[:500]}")
 
+    def _upload_with_session(self, *, upload_url: str, local_path: str) -> dict:
+        size = os.path.getsize(local_path)
+        if size <= 0:
+            raise RuntimeError("Cannot upload empty file via session")
+
+        with open(local_path, "rb") as f:
+            start = 0
+            while start < size:
+                chunk = f.read(_UPLOAD_SESSION_CHUNK_BYTES)
+                if not chunk:
+                    break
+                end = start + len(chunk) - 1
+                resp = requests.put(
+                    upload_url,
+                    headers={
+                        "Content-Length": str(len(chunk)),
+                        "Content-Range": f"bytes {start}-{end}/{size}",
+                    },
+                    data=chunk,
+                    timeout=self.timeout_seconds,
+                )
+                if resp.status_code in {200, 201}:
+                    if resp.content:
+                        return resp.json()
+                    return {}
+                if resp.status_code == 202:
+                    next_start = end + 1
+                    try:
+                        body = resp.json()
+                        ranges = body.get("nextExpectedRanges")
+                        if isinstance(ranges, list) and ranges:
+                            token = str(ranges[0]).split("-", 1)[0]
+                            next_start = int(token)
+                    except Exception:
+                        pass
+                    start = next_start
+                    f.seek(start)
+                    continue
+                raise RuntimeError(
+                    f"Graph upload session failed: {resp.status_code} {resp.text[:500]}"
+                )
+        raise RuntimeError("Graph upload session did not complete")
+
     @staticmethod
     def _encode_path(path: str) -> str:
         return "/".join(quote(part, safe="") for part in path.strip("/").split("/") if part)
@@ -155,15 +217,30 @@ class GraphUploader:
     def _create_child_folder(self, drive_id: str, folder_id: str, name: str) -> dict:
         if self.dry_run:
             return {"id": f"dryrun-{name}", "name": name, "webUrl": f"https://dryrun/{name}"}
-        return self._request(
-            "POST",
-            f"/drives/{drive_id}/items/{folder_id}/children",
-            payload={
-                "name": name,
-                "folder": {},
-                "@microsoft.graph.conflictBehavior": "rename",
+        endpoint = f"/drives/{drive_id}/items/{folder_id}/children"
+        payload = {
+            "name": name,
+            "folder": {},
+            # Never auto-rename folders. If it already exists, re-use existing.
+            "@microsoft.graph.conflictBehavior": "fail",
+        }
+        url = f"https://graph.microsoft.com/v1.0{endpoint}"
+        resp = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {self.token()}",
+                "Content-Type": "application/json",
             },
+            json=payload,
+            timeout=self.timeout_seconds,
         )
+        if 200 <= resp.status_code < 300:
+            return resp.json() if resp.content else {}
+        if resp.status_code in {409, 412}:
+            existing = self._find_child_folder(drive_id, folder_id, name)
+            if existing is not None:
+                return existing
+        raise RuntimeError(f"Graph request failed (POST {endpoint}): {resp.status_code} {resp.text[:500]}")
 
     def _ensure_folder_chain(self, drive_id: str, folder_path: str) -> tuple[str, str]:
         folder_id = self._root_folder_id(drive_id)
@@ -175,6 +252,14 @@ class GraphUploader:
                 existing = self._create_child_folder(drive_id, folder_id, part)
             folder_id = str(existing["id"])
         return folder_id, "/".join(current_path_parts)
+
+    @staticmethod
+    def _matches_grievance_id_prefix(*, grievance_id: str, folder_name: str) -> bool:
+        wanted = (grievance_id or "").strip().lower()
+        candidate = (folder_name or "").strip().lower()
+        if not wanted or not candidate:
+            return False
+        return candidate == wanted or candidate.startswith(f"{wanted} ")
 
     def ensure_case_folder(
         self,
@@ -242,6 +327,41 @@ class GraphUploader:
                 names.append(name)
         return names
 
+    def find_case_folder_by_grievance_id_exact(
+        self,
+        *,
+        site_hostname: str,
+        site_path: str,
+        library: str,
+        case_parent_folder: str,
+        grievance_id: str,
+    ) -> CaseFolderRef:
+        drive_id = self._drive_id(site_hostname, site_path, library)
+        parent_id, _ = self._ensure_folder_chain(drive_id, case_parent_folder)
+        matches: list[dict] = []
+        for child in self._list_children(drive_id, parent_id):
+            if "folder" not in child:
+                continue
+            name = str(child.get("name", "")).strip()
+            if self._matches_grievance_id_prefix(grievance_id=grievance_id, folder_name=name):
+                matches.append(child)
+
+        if not matches:
+            raise CaseFolderNotFoundError(
+                f"no case folder matched grievance_id '{grievance_id}' in '{case_parent_folder}'"
+            )
+        if len(matches) > 1:
+            candidates = [str(item.get("name", "")).strip() for item in matches]
+            raise CaseFolderAmbiguousError(grievance_id, candidates)
+
+        selected = matches[0]
+        return CaseFolderRef(
+            drive_id=drive_id,
+            folder_id=str(selected.get("id", "")),
+            folder_name=str(selected.get("name", "")).strip(),
+            web_url=selected.get("webUrl"),
+        )
+
     def upload_to_case_subfolder(
         self,
         *,
@@ -279,6 +399,128 @@ class GraphUploader:
             f"/drives/{drive_id}/root:/{normalized_path}:/content",
             data=file_bytes,
         )
+        return UploadedFileRef(
+            drive_id=drive_id,
+            item_id=str(put.get("id", "")),
+            web_url=put.get("webUrl"),
+            path=normalized_path,
+        )
+
+    def upload_local_file_to_case_subfolder(
+        self,
+        *,
+        site_hostname: str,
+        site_path: str,
+        library: str,
+        case_folder_name: str,
+        case_parent_folder: str,
+        subfolder: str,
+        filename: str,
+        local_path: str,
+    ) -> UploadedFileRef:
+        drive_id = self._drive_id(site_hostname, site_path, library)
+        full_folder = "/".join(
+            part.strip("/")
+            for part in (case_parent_folder, case_folder_name, subfolder)
+            if part and part.strip("/")
+        )
+        _, normalized_folder = self._ensure_folder_chain(drive_id, full_folder)
+        normalized_path = "/".join(
+            part for part in [self._encode_path(normalized_folder), quote(filename, safe="")] if part
+        )
+
+        if self.dry_run:
+            return UploadedFileRef(
+                drive_id=drive_id,
+                item_id=f"dryrun-{filename}",
+                web_url=f"https://dryrun/{normalized_path}",
+                path=normalized_path,
+            )
+
+        file_size = os.path.getsize(local_path)
+        if file_size <= _SIMPLE_UPLOAD_MAX_BYTES:
+            put = self._request(
+                "PUT",
+                f"/drives/{drive_id}/root:/{normalized_path}:/content",
+                data=Path(local_path).read_bytes(),
+            )
+            return UploadedFileRef(
+                drive_id=drive_id,
+                item_id=str(put.get("id", "")),
+                web_url=put.get("webUrl"),
+                path=normalized_path,
+            )
+
+        session = self._request(
+            "POST",
+            f"/drives/{drive_id}/root:/{normalized_path}:/createUploadSession",
+            payload={
+                "item": {
+                    "@microsoft.graph.conflictBehavior": "rename",
+                    "name": filename,
+                }
+            },
+        )
+        upload_url = str(session.get("uploadUrl", "")).strip()
+        if not upload_url:
+            raise RuntimeError("Graph upload session response missing uploadUrl")
+
+        uploaded = self._upload_with_session(upload_url=upload_url, local_path=local_path)
+        return UploadedFileRef(
+            drive_id=drive_id,
+            item_id=str(uploaded.get("id", "")),
+            web_url=uploaded.get("webUrl"),
+            path=normalized_path,
+        )
+
+    def upload_local_file_to_folder_path(
+        self,
+        *,
+        site_hostname: str,
+        site_path: str,
+        library: str,
+        folder_path: str,
+        filename: str,
+        local_path: str,
+    ) -> UploadedFileRef:
+        drive_id = self._drive_id(site_hostname, site_path, library)
+        _, normalized_folder = self._ensure_folder_chain(drive_id, folder_path)
+        normalized_path = "/".join(
+            part for part in [self._encode_path(normalized_folder), quote(filename, safe="")] if part
+        )
+
+        if self.dry_run:
+            return UploadedFileRef(
+                drive_id=drive_id,
+                item_id=f"dryrun-{filename}",
+                web_url=f"https://dryrun/{normalized_path}",
+                path=normalized_path,
+            )
+
+        size = os.path.getsize(local_path)
+        if size <= _SIMPLE_UPLOAD_MAX_BYTES:
+            with open(local_path, "rb") as f:
+                put = self._request(
+                    "PUT",
+                    f"/drives/{drive_id}/root:/{normalized_path}:/content",
+                    data=f.read(),
+                )
+        else:
+            session = self._request(
+                "POST",
+                f"/drives/{drive_id}/root:/{normalized_path}:/createUploadSession",
+                payload={
+                    "item": {
+                        "@microsoft.graph.conflictBehavior": "rename",
+                        "name": filename,
+                    }
+                },
+            )
+            upload_url = str(session.get("uploadUrl", "")).strip()
+            if not upload_url:
+                raise RuntimeError("Graph upload session missing uploadUrl")
+            put = self._upload_with_session(upload_url=upload_url, local_path=local_path)
+
         return UploadedFileRef(
             drive_id=drive_id,
             item_id=str(put.get("id", "")),

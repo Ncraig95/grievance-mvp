@@ -5,6 +5,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 
 from ..db.db import Db, utcnow
+from ..services.audit_backups import fanout_audit_backups, merge_backup_locations_json
+from ..services.case_folder_naming import build_case_folder_member_name, resolve_contract_label
 from ..services.notification_service import NotificationService
 from ..services.signature_workflow import send_document_for_signature, signer_order_from_json
 from .models import (
@@ -161,6 +163,7 @@ async def assign_grievance_number(case_id: str, body: AssignGrievanceNumberReque
             doc_type=doc_type,
             template_key=template_key,
             pdf_bytes=Path(pdf_path).read_bytes(),
+            alignment_pdf_bytes=None,
             signer_order=signer_order,
             correlation_id=case_id,
             idempotency_prefix=f"grievance_number:{case_id}:{document_id}",
@@ -205,13 +208,17 @@ async def decide_approval(case_id: str, body: ApprovalDecisionRequest, request: 
     notifications: NotificationService = request.app.state.notifications
 
     case_row = await db.fetchone(
-        "SELECT grievance_id, status, approval_status, member_name, member_email FROM cases WHERE id=?",
+        "SELECT grievance_id, status, approval_status, member_name, member_email, intake_payload_json FROM cases WHERE id=?",
         (case_id,),
     )
     if not case_row:
         raise HTTPException(status_code=404, detail="case_id not found")
 
-    grievance_id, current_status, _approval_status, member_name, member_email = case_row
+    grievance_id, current_status, _approval_status, member_name, member_email, intake_payload_json = case_row
+    folder_member_name = build_case_folder_member_name(
+        member_name,
+        resolve_contract_label(intake_payload_json),
+    )
 
     if cfg.email.derek_email and body.approver_email.strip().lower() != cfg.email.derek_email.lower():
         raise HTTPException(status_code=403, detail="Only configured approver may approve this case")
@@ -258,16 +265,28 @@ async def decide_approval(case_id: str, body: ApprovalDecisionRequest, request: 
                     library=cfg.graph.document_library,
                     case_parent_folder=cfg.graph.case_parent_folder,
                     grievance_id=grievance_id,
-                    member_name=member_name,
+                    member_name=folder_member_name,
                 )
                 await db.exec(
                     "UPDATE cases SET sharepoint_case_folder=?, sharepoint_case_web_url=? WHERE id=?",
                     (case_folder.folder_name, case_folder.web_url, case_id),
                 )
+                await db.add_event(
+                    case_id,
+                    None,
+                    "sharepoint_upload_target_resolved",
+                    {
+                        "folder_id": case_folder.folder_id,
+                        "folder_name": case_folder.folder_name,
+                        "folder_web_url": case_folder.web_url,
+                        "case_parent_folder": cfg.graph.case_parent_folder,
+                    },
+                )
 
                 docs = await db.fetchall(
                     """SELECT id, doc_type, pdf_path, signed_pdf_path, audit_zip_path,
-                              sharepoint_generated_url, sharepoint_signed_url, sharepoint_audit_url
+                              sharepoint_generated_url, sharepoint_signed_url, sharepoint_audit_url,
+                              audit_backup_locations_json
                        FROM documents
                        WHERE case_id=?""",
                     (case_id,),
@@ -284,10 +303,14 @@ async def decide_approval(case_id: str, body: ApprovalDecisionRequest, request: 
                         sp_generated,
                         sp_signed,
                         sp_audit,
+                        sp_audit_backups,
                     ) = row
                     new_generated = sp_generated
                     new_signed = sp_signed
                     new_audit = sp_audit
+                    new_audit_backups = sp_audit_backups
+                    generated_upload_name = f"{doc_type}_{document_id}.pdf"
+                    signed_upload_name = f"{doc_type}_{document_id}_signed.pdf"
 
                     if pdf_path and Path(pdf_path).exists() and not sp_generated:
                         uploaded_generated = graph.upload_to_case_subfolder(
@@ -297,10 +320,21 @@ async def decide_approval(case_id: str, body: ApprovalDecisionRequest, request: 
                             case_folder_name=case_folder.folder_name,
                             case_parent_folder=cfg.graph.case_parent_folder,
                             subfolder=cfg.graph.generated_subfolder,
-                            filename=f"{doc_type}.pdf",
+                            filename=generated_upload_name,
                             file_bytes=Path(pdf_path).read_bytes(),
                         )
                         new_generated = uploaded_generated.web_url
+                        await db.add_event(
+                            case_id,
+                            document_id,
+                            "sharepoint_generated_uploaded",
+                            {
+                                "filename": generated_upload_name,
+                                "subfolder": cfg.graph.generated_subfolder,
+                                "path": uploaded_generated.path,
+                                "web_url": uploaded_generated.web_url,
+                            },
+                        )
 
                     if signed_pdf_path and Path(signed_pdf_path).exists() and not sp_signed:
                         uploaded_signed = graph.upload_to_case_subfolder(
@@ -310,32 +344,78 @@ async def decide_approval(case_id: str, body: ApprovalDecisionRequest, request: 
                             case_folder_name=case_folder.folder_name,
                             case_parent_folder=cfg.graph.case_parent_folder,
                             subfolder=cfg.graph.signed_subfolder,
-                            filename=f"{doc_type}_signed.pdf",
+                            filename=signed_upload_name,
                             file_bytes=Path(signed_pdf_path).read_bytes(),
                         )
                         new_signed = uploaded_signed.web_url
+                        await db.add_event(
+                            case_id,
+                            document_id,
+                            "sharepoint_signed_uploaded",
+                            {
+                                "filename": signed_upload_name,
+                                "subfolder": cfg.graph.signed_subfolder,
+                                "path": uploaded_signed.path,
+                                "web_url": uploaded_signed.web_url,
+                            },
+                        )
 
-                    if audit_zip_path and Path(audit_zip_path).exists() and not sp_audit:
-                        uploaded_audit = graph.upload_to_case_subfolder(
+                    if audit_zip_path and Path(audit_zip_path).exists():
+                        audit_ext = Path(audit_zip_path).suffix or ".zip"
+                        audit_upload_name = f"{doc_type}_{document_id}_audit{audit_ext}"
+                        backup_outcome = fanout_audit_backups(
+                            graph=graph,
                             site_hostname=cfg.graph.site_hostname,
                             site_path=cfg.graph.site_path,
                             library=cfg.graph.document_library,
-                            case_folder_name=case_folder.folder_name,
                             case_parent_folder=cfg.graph.case_parent_folder,
-                            subfolder=cfg.graph.audit_subfolder,
-                            filename=f"{doc_type}_audit.zip",
+                            case_folder_name=case_folder.folder_name,
+                            primary_subfolder=cfg.graph.audit_subfolder,
+                            extra_subfolders=cfg.graph.audit_backup_subfolders,
+                            local_backup_roots=cfg.graph.audit_local_backup_roots,
+                            filename=audit_upload_name,
                             file_bytes=Path(audit_zip_path).read_bytes(),
                         )
-                        new_audit = uploaded_audit.web_url
+                        if backup_outcome.primary_web_url:
+                            new_audit = backup_outcome.primary_web_url
+                        new_audit_backups = merge_backup_locations_json(sp_audit_backups, backup_outcome)
+                        await db.add_event(
+                            case_id,
+                            document_id,
+                            "sharepoint_audit_uploaded",
+                            {
+                                "filename": audit_upload_name,
+                                "subfolder": cfg.graph.audit_subfolder,
+                                "primary_web_url": backup_outcome.primary_web_url,
+                                "sharepoint_copy_count": len(backup_outcome.sharepoint_copies),
+                                "local_copy_count": len(backup_outcome.local_paths),
+                            },
+                        )
+                        if backup_outcome.failures:
+                            await db.add_event(
+                                case_id,
+                                document_id,
+                                "audit_backup_partial_failure",
+                                {
+                                    "failure_count": len(backup_outcome.failures),
+                                    "destinations": [failure.destination for failure in backup_outcome.failures],
+                                },
+                            )
 
                     status_value = "uploaded" if new_generated else "approved"
-                    if (new_generated != sp_generated) or (new_signed != sp_signed) or (new_audit != sp_audit):
+                    if (
+                        (new_generated != sp_generated)
+                        or (new_signed != sp_signed)
+                        or (new_audit != sp_audit)
+                        or (new_audit_backups != sp_audit_backups)
+                    ):
                         uploaded_docs += 1
                         await db.exec(
                             """UPDATE documents
-                               SET sharepoint_generated_url=?, sharepoint_signed_url=?, sharepoint_audit_url=?, status=?
+                               SET sharepoint_generated_url=?, sharepoint_signed_url=?, sharepoint_audit_url=?,
+                                   audit_backup_locations_json=?, status=?
                                WHERE id=?""",
-                            (new_generated, new_signed, new_audit, status_value, document_id),
+                            (new_generated, new_signed, new_audit, new_audit_backups, status_value, document_id),
                         )
 
                 await db.add_event(

@@ -48,6 +48,54 @@ def migrate(db_path: str) -> None:
             """
         )
 
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS document_stages (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              case_id TEXT NOT NULL,
+              document_id TEXT NOT NULL,
+              stage_no INTEGER NOT NULL,
+              stage_key TEXT NOT NULL,
+              status TEXT NOT NULL,
+              signer_email TEXT NOT NULL,
+              docuseal_submission_id TEXT,
+              docuseal_signing_link TEXT,
+              source_payload_json TEXT NOT NULL DEFAULT '{}',
+              started_at_utc TEXT NOT NULL,
+              completed_at_utc TEXT,
+              failed_at_utc TEXT,
+              UNIQUE(document_id, stage_no)
+            )
+            """
+        )
+
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS document_stage_artifacts (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              document_stage_id INTEGER NOT NULL,
+              artifact_type TEXT NOT NULL,
+              storage_backend TEXT NOT NULL,
+              storage_path TEXT NOT NULL,
+              sha256 TEXT NOT NULL,
+              size_bytes INTEGER NOT NULL DEFAULT 0,
+              created_at_utc TEXT NOT NULL
+            )
+            """
+        )
+
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS document_stage_field_values (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              document_stage_id INTEGER NOT NULL,
+              field_key TEXT NOT NULL,
+              field_value TEXT NOT NULL,
+              created_at_utc TEXT NOT NULL
+            )
+            """
+        )
+
         # Backwards-compatible column evolution
         _ensure_column(con, "cases", "grievance_id", "TEXT")
         _ensure_column(con, "cases", "approval_status", "TEXT NOT NULL DEFAULT 'pending'")
@@ -65,6 +113,7 @@ def migrate(db_path: str) -> None:
         _ensure_column(con, "documents", "sharepoint_generated_url", "TEXT")
         _ensure_column(con, "documents", "sharepoint_signed_url", "TEXT")
         _ensure_column(con, "documents", "sharepoint_audit_url", "TEXT")
+        _ensure_column(con, "documents", "audit_backup_locations_json", "TEXT")
 
         doc_cols = _table_columns(con, "documents")
         if "pdf_sha256" not in doc_cols and "pdf_sa256" in doc_cols:
@@ -107,6 +156,11 @@ def migrate(db_path: str) -> None:
                 "ON outbound_emails(case_id, document_scope_id, template_key, recipient_email, idempotency_key)"
             ),
             "CREATE INDEX IF NOT EXISTS idx_outbound_emails_case ON outbound_emails(case_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_document_stages_doc_stage ON document_stages(document_id, stage_no)",
+            "CREATE INDEX IF NOT EXISTS idx_document_stages_submission_id ON document_stages(docuseal_submission_id)",
+            "CREATE INDEX IF NOT EXISTS idx_document_stages_document_id ON document_stages(document_id)",
+            "CREATE INDEX IF NOT EXISTS idx_document_stage_artifacts_stage_type ON document_stage_artifacts(document_stage_id, artifact_type)",
+            "CREATE INDEX IF NOT EXISTS idx_document_stage_field_values_stage ON document_stage_field_values(document_stage_id)",
         ]
         for stmt in index_sql:
             try:

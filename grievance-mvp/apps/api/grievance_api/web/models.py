@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class DocumentRequest(BaseModel):
@@ -8,6 +8,23 @@ class DocumentRequest(BaseModel):
     template_key: str | None = None
     requires_signature: bool = False
     signers: list[str] | None = None
+
+
+class ClientSuppliedFile(BaseModel):
+    file_name: str = Field(
+        validation_alias=AliasChoices("file_name", "filename", "name"),
+        description="Original filename supplied by client/forms",
+    )
+    download_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("download_url", "downloadUrl", "url"),
+        description="Temporary HTTPS download URL for file transfer",
+    )
+    content_base64: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("content_base64", "contentBase64", "contentBytes"),
+        description="Optional base64-encoded content for small files",
+    )
 
 
 class IntakeRequest(BaseModel):
@@ -19,14 +36,19 @@ class IntakeRequest(BaseModel):
     contract: str = Field(..., description="AT&T or COJ (or other)")
     grievant_firstname: str
     grievant_lastname: str
-    grievant_email: str
+    grievant_email: str | None = None
     grievant_phone: str | None = None
     work_location: str | None = None
     supervisor: str | None = None
     incident_date: str | None = None
     narrative: str
+    document_command: str | None = Field(
+        default=None,
+        description="Optional single-doc command for workflow routing (e.g. statement_of_occurrence)",
+    )
     template_data: dict[str, object] = Field(default_factory=dict, description="Optional template merge fields")
     documents: list[DocumentRequest] = Field(default_factory=list)
+    client_supplied_files: list[ClientSuppliedFile] = Field(default_factory=list)
 
 
 class DocumentStatus(BaseModel):

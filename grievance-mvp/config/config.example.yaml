@@ -1,16 +1,73 @@
 hmac_shared_secret: REPLACE_WITH_LONG_RANDOM_SECRET
+log_level: INFO
+wait_for_grievance_number_before_signature: true
+require_approver_decision: true
+intake_auth:
+  # Optional additional gate for /intake when HMAC is disabled.
+  # Keep blank to disable this check.
+  shared_header_name: X-Intake-Key
+  shared_header_value: ""
+  # Optional Cloudflare Access service-token verification.
+  # If one value is set, both must be set.
+  cloudflare_access_client_id: ""
+  cloudflare_access_client_secret: ""
 db_path: /data/grievances.sqlite3
 data_root: /data/grievances
-docx_template_path: /app/templates/grievance_template.docx
+docx_template_path: /app/templates/docx/statement_of_occurrence fixed.docx
 doc_templates:
   grievance_form: /app/templates/docx/statement_of_occurrence fixed.docx
   mobility_formal_grievance_meeting_request: /app/templates/docx/mobility-formal-grievance-meeting-request.docx
+  bellsouth_meeting_request: /app/templates/docx/Bellsouth-Telecommunications-formal-grievance-meeting-request.docx
   bellsouth_formal_grievance_meeting_request: /app/templates/docx/Bellsouth-Telecommunications-formal-grievance-meeting-request.docx
   grievance_data_request_form: /app/templates/docx/grievance_data_request_form.docx
   statement_of_occurrence: /app/templates/docx/statement_of_occurrence fixed.docx
   true_intent_grievance_brief: /app/templates/docx/form_true_intent_grievance_brief_revised_05.20.21.docx
   disciplinary_grievance_brief: /app/templates/docx/form_disciplinary_grievance_brief_revised_05.19.21.docx
   bst_grievance_form_3g3a: /app/templates/docx/bst_grievance_form_3g3a.docx
+document_policies:
+  bellsouth_meeting_request:
+    folder_resolution: existing_exact_grievance_id
+    default_signer_field: union_rep_email
+    default_requires_signature: true
+  bellsouth_formal_grievance_meeting_request:
+    folder_resolution: existing_exact_grievance_id
+    default_signer_field: union_rep_email
+    default_requires_signature: true
+  bst_grievance_form_3g3a:
+    staged_flow_enabled: true
+    auto_advance: true
+    store_all_stage_artifacts: true
+    input_source: docuseal_fill_fields
+    default_requires_signature: true
+rendering:
+  normalize_split_placeholders: true
+  layout_policies:
+    statement_of_occurrence:
+      enabled: true
+      grievance_number_fallback: grievance_id
+      single_line_ellipsis: true
+      max_chars:
+        grievant_name: 32
+        work_address: 44
+        home_address: 44
+        personal_cell: 16
+        personal_email: 36
+        department: 20
+        title: 24
+        supervisor_name: 28
+        supervisor_phone: 18
+        supervisor_email: 36
+        grievants_uid: 18
+        article: 22
+        witness_1_name: 24
+        witness_1_title: 20
+        witness_1_phone: 18
+        witness_2_name: 24
+        witness_2_title: 20
+        witness_2_phone: 18
+        witness_3_name: 24
+        witness_3_title: 20
+        witness_3_phone: 18
 libreoffice_timeout_seconds: 45
 grievance_id:
   mode: auto
@@ -22,7 +79,10 @@ docuseal:
   api_token: REPLACE
   webhook_secret: REPLACE
   public_base_url: https://docuseal.REPLACE.org
-  default_template_id: null  # null uploads each generated PDF to DocuSeal as a template per document
+  web_base_url: https://docuseal.REPLACE.org
+  web_email: ""     # optional; fallback uses DOCUSEAL_WEB_EMAIL or DOCUSEAL_ADMIN_EMAIL
+  web_password: ""  # optional; fallback uses DOCUSEAL_WEB_PASSWORD or DOCUSEAL_ADMIN_PASSWORD
+  default_template_id: 1  # base template id with signature fields; app clones+replaces with generated PDF
   template_ids: {}
 graph:
   tenant_id: REPLACE
@@ -36,8 +96,18 @@ graph:
   generated_subfolder: Generated
   signed_subfolder: Signed
   audit_subfolder: Audit
+  # Optional extra SharePoint subfolders for additional audit copies.
+  # The app writes the same <doc_type>_audit.zip into each listed folder.
+  audit_backup_subfolders: []
+  # Optional local/NAS mirror roots. Example:
+  # - /mnt/triad-nas/grievance-backups
+  audit_local_backup_roots: []
+  client_supplied_subfolder: Client supplied data
+  # Global SharePoint folder path (under library root) for failed-process review copies.
+  failed_processes_folder: config files/failed
 email:
   enabled: true
+  test_mode: false
   sender_user_id: grievance-mailbox@REPLACE.onmicrosoft.com
   templates_dir: /app/templates/email
   internal_recipients:

@@ -1,1 +1,1 @@
-Approval requested: grievance $grievance_id ($document_type)
+Approval requested: grievance $grievance_id ($document_type, $contract_name)

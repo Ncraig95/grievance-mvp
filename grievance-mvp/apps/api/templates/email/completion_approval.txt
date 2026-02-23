@@ -3,6 +3,10 @@ A document is ready for approval.
 Case ID: $case_id
 Document ID: $document_id
 Document Type: $document_type
+Contract: $contract_name
+Incident Date: $incident_date
+Deadline ($deadline_days days from incident): $deadline_date
+If approved, grievance number will be: $projected_grievance_number
 
 Approval link:
 $approval_url
