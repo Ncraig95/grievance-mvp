@@ -23,6 +23,7 @@ class GraphConfig:
     audit_backup_subfolders: tuple[str, ...]
     audit_local_backup_roots: tuple[str, ...]
     client_supplied_subfolder: str
+    failed_processes_folder: str
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,17 @@ class RenderingConfig:
 
 
 @dataclass(frozen=True)
+class DocumentPolicyConfig:
+    folder_resolution: str
+    default_signer_field: str
+    default_requires_signature: bool
+    staged_flow_enabled: bool = False
+    auto_advance: bool = False
+    store_all_stage_artifacts: bool = False
+    input_source: str = ""
+
+
+@dataclass(frozen=True)
 class IntakeAuthConfig:
     shared_header_name: str
     shared_header_value: str
@@ -114,6 +126,7 @@ class AppConfig:
     grievance_id: GrievanceIdConfig
     intake_auth: IntakeAuthConfig = field(default_factory=_default_intake_auth)
     rendering: RenderingConfig = field(default_factory=_default_rendering)
+    document_policies: dict[str, DocumentPolicyConfig] = field(default_factory=dict)
     wait_for_grievance_number_before_signature: bool = True
     require_approver_decision: bool = True
     log_level: str = "INFO"
@@ -218,6 +231,20 @@ def _normalize_grievance_fallback(value: object) -> str | None:
     return None
 
 
+def _normalize_folder_resolution(value: object) -> str:
+    mode = str(value or "default").strip().lower()
+    if mode not in {"default", "existing_exact_grievance_id"}:
+        return "default"
+    return mode
+
+
+def _normalize_input_source(value: object) -> str:
+    mode = str(value or "").strip().lower()
+    if mode not in {"", "docuseal_fill_fields"}:
+        return ""
+    return mode
+
+
 def load_config(path: str) -> AppConfig:
     p = Path(path)
     raw = yaml.safe_load(p.read_text(encoding="utf-8"))
@@ -227,6 +254,7 @@ def load_config(path: str) -> AppConfig:
     grievance_raw = raw.get("grievance_id", {}) or {}
     intake_auth_raw = raw.get("intake_auth", {}) or {}
     rendering_raw = raw.get("rendering", {}) or {}
+    document_policies_raw = raw.get("document_policies", {}) or {}
 
     sender_user_id = str(email_raw.get("sender_user_id", "")).strip()
     raw_layout_policies = rendering_raw.get("layout_policies", {})
@@ -243,6 +271,21 @@ def load_config(path: str) -> AppConfig:
                 ),
                 single_line_ellipsis=bool(raw_policy.get("single_line_ellipsis", False)),
                 max_chars=_as_int_value_mapping(raw_policy.get("max_chars")),
+            )
+    parsed_document_policies: dict[str, DocumentPolicyConfig] = {}
+    if isinstance(document_policies_raw, dict):
+        for raw_key, raw_policy in document_policies_raw.items():
+            key = str(raw_key).strip()
+            if not key or not isinstance(raw_policy, dict):
+                continue
+            parsed_document_policies[key] = DocumentPolicyConfig(
+                folder_resolution=_normalize_folder_resolution(raw_policy.get("folder_resolution")),
+                default_signer_field=str(raw_policy.get("default_signer_field", "")).strip(),
+                default_requires_signature=bool(raw_policy.get("default_requires_signature", True)),
+                staged_flow_enabled=bool(raw_policy.get("staged_flow_enabled", False)),
+                auto_advance=bool(raw_policy.get("auto_advance", False)),
+                store_all_stage_artifacts=bool(raw_policy.get("store_all_stage_artifacts", False)),
+                input_source=_normalize_input_source(raw_policy.get("input_source")),
             )
 
     return AppConfig(
@@ -269,6 +312,10 @@ def load_config(path: str) -> AppConfig:
             client_supplied_subfolder=(
                 str(graph_raw.get("client_supplied_subfolder", "Client supplied data")).strip()
                 or "Client supplied data"
+            ),
+            failed_processes_folder=(
+                str(graph_raw.get("failed_processes_folder", "config files/failed")).strip()
+                or "config files/failed"
             ),
         ),
         docuseal=DocuSealConfig(
@@ -342,6 +389,7 @@ def load_config(path: str) -> AppConfig:
             normalize_split_placeholders=bool(rendering_raw.get("normalize_split_placeholders", True)),
             layout_policies=parsed_layout_policies,
         ),
+        document_policies=parsed_document_policies,
         wait_for_grievance_number_before_signature=bool(
             raw.get("wait_for_grievance_number_before_signature", True)
         ),

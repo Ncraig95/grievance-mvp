@@ -4,15 +4,18 @@ import base64
 import hashlib
 import json
 import re
+import shutil
 import tempfile
 import textwrap
 from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlparse
+from zipfile import ZipFile
 
 import requests
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import ValidationError
 
 from ..core.hmac_auth import verify_hmac
 from ..core.ids import new_case_id, new_document_id, normalize_grievance_id
@@ -24,7 +27,13 @@ from ..services.doc_render import render_docx
 from ..services.grievance_id_allocator import GrievanceIdAllocationError, GrievanceIdAllocator
 from ..services.notification_service import NotificationService
 from ..services.pdf_convert import docx_to_pdf
+from ..services.sharepoint_graph import CaseFolderAmbiguousError, CaseFolderNotFoundError
 from ..services.signature_workflow import normalize_signers, send_document_for_signature
+from ..services.staged_signature_workflow import (
+    create_or_send_stage,
+    is_3g3a_staged,
+    normalize_3g3a_signers,
+)
 from .models import (
     CaseStatusResponse,
     ClientSuppliedFile,
@@ -38,6 +47,7 @@ router = APIRouter()
 
 
 _FILENAME_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
+_DISPLAY_FILENAME_SAFE = re.compile(r"[^A-Za-z0-9 _.-]+")
 _FIELD_KEY_SAFE = re.compile(r"[^A-Za-z0-9]+")
 _CLIENT_SUPPLIED_TOTAL_MAX_BYTES = 1_073_741_824
 _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
@@ -53,12 +63,185 @@ _DATE_FIELD_KEYS = {
     "requestdate",
     "today_date",
     "todaydate",
+    "date_grievance_occurred",
+    "informal_meeting_date",
+}
+
+_BELL_SOUTH_TBD_KEYS = (
+    "meeting_requested_date",
+    "meeting_requested_time",
+    "meeting_requested_place",
+)
+_CHECKED_MARK = "☒"
+_UNCHECKED_MARK = "☐"
+_3G3A_WRAP_POLICIES: dict[str, dict[str, int]] = {
+    # Render-time safety rails for long free-text blocks in fixed form sections.
+    "q3_union_statement": {"max_chars": 1800, "wrap_width": 88},
+    "q4_contract_basis": {"max_chars": 700, "wrap_width": 88},
+    # Legacy/pre-fill compatibility if these are ever provided in payload.
+    "q6_company_statement": {"max_chars": 1800, "wrap_width": 88},
+    "q7_proposed_disposition_second_level": {"max_chars": 1200, "wrap_width": 88},
+    "q8_union_disposition": {"max_chars": 1200, "wrap_width": 88},
+}
+_3G3A_CHOICE_GROUPS: tuple[dict[str, object], ...] = (
+    {
+        "source_keys": ("q1_choice", "q1_grievance_type"),
+        "markers": {
+            "bst": "q1_is_bst_mark",
+            "billing": "q1_is_billing_mark",
+            "utility operations": "q1_is_utility_operations_mark",
+            "utility_ops": "q1_is_utility_operations_mark",
+            "uo": "q1_is_utility_operations_mark",
+            "other": "q1_is_other_mark",
+        },
+    },
+    {
+        "source_keys": ("q8_union_disposition_choice", "q8_union_disposition"),
+        "markers": {
+            "accepted": "q8_is_accepted_mark",
+            "rejected": "q8_is_rejected_mark",
+            "appealed": "q8_is_appealed_mark",
+            "requested mediation": "q8_is_requested_mediation_mark",
+            "requested_mediation": "q8_is_requested_mediation_mark",
+        },
+    },
+    {
+        "source_keys": (
+            "q10_company_true_intent_choice",
+            "q10_company_true_intent_exists",
+            "q10_true_intent_choice",
+            "q10_true_intent_exists",
+        ),
+        "markers": {
+            "yes": "q10_company_is_yes_mark",
+            "no": "q10_company_is_no_mark",
+        },
+    },
+    {
+        "source_keys": (
+            "q10_union_true_intent_choice",
+            "q10_union_true_intent_exists",
+            "q10_true_intent_choice",
+            "q10_true_intent_exists",
+        ),
+        "markers": {
+            "yes": "q10_union_is_yes_mark",
+            "no": "q10_union_is_no_mark",
+        },
+    },
+)
+_STAGE_SIGNATURE_PLACEHOLDER_RE = re.compile(
+    r"{{\s*(?P<tag>(?P<prefix>Sig|Dte|Eml|Txt)_es_:signer(?P<signer>\d+):(?P<field>[A-Za-z0-9_]+))\s*}}",
+    flags=re.IGNORECASE,
+)
+
+_DOC_COMMAND_ALIASES: dict[str, str] = {
+    "bellsouth_formal_grievance_meeting_request": "bellsouth_meeting_request",
+    "mobility_meeting_request": "mobility_formal_grievance_meeting_request",
+    "grievance_data_request": "grievance_data_request_form",
+    "true_intent_brief": "true_intent_grievance_brief",
+    "disciplinary_brief": "disciplinary_grievance_brief",
+}
+_DOC_TEMPLATE_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "bellsouth_meeting_request": (
+        "bellsouth_meeting_request",
+        "bellsouth_formal_grievance_meeting_request",
+    ),
+    "mobility_formal_grievance_meeting_request": (
+        "mobility_formal_grievance_meeting_request",
+    ),
+    "grievance_data_request_form": (
+        "grievance_data_request_form",
+    ),
+    "true_intent_grievance_brief": (
+        "true_intent_grievance_brief",
+    ),
+    "disciplinary_grievance_brief": (
+        "disciplinary_grievance_brief",
+    ),
 }
 
 
 def _safe_name(value: str) -> str:
     safe = _FILENAME_SAFE.sub("_", value.strip())
     return safe.strip("_") or "document"
+
+
+def _safe_display_name(value: str) -> str:
+    cleaned = _DISPLAY_FILENAME_SAFE.sub("", (value or "").strip())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or "unknown"
+
+
+def _stage_alignment_path(*, doc_dir: Path, stage_no: int) -> Path:
+    return doc_dir / "stage_alignments" / f"stage{int(stage_no)}_alignment.pdf"
+
+
+def _rewrite_signature_placeholders_for_stage(xml_text: str, *, stage_no: int) -> str:
+    source_signer = int(stage_no)
+
+    def _replace(match: re.Match[str]) -> str:
+        signer_no = int(match.group("signer"))
+        if signer_no != source_signer:
+            return ""
+        remapped = re.sub(r"signer\d+", "signer1", match.group("tag"), count=1, flags=re.IGNORECASE)
+        return "{{" + remapped + "}}"
+
+    return _STAGE_SIGNATURE_PLACEHOLDER_RE.sub(_replace, xml_text)
+
+
+def _create_stage_alignment_pdf_from_anchor_docx(
+    *,
+    anchor_docx_path: str,
+    doc_dir: Path,
+    stage_no: int,
+    libreoffice_timeout_seconds: int,
+) -> bytes:
+    stage_anchor_docx_path = doc_dir / "stage_alignments" / f"stage{int(stage_no)}_anchor.docx"
+    stage_anchor_docx_path.parent.mkdir(parents=True, exist_ok=True)
+    stage_anchor_pdf_path: str | None = None
+    try:
+        with ZipFile(anchor_docx_path, "r") as zin, ZipFile(stage_anchor_docx_path, "w") as zout:
+            for info in zin.infolist():
+                data = zin.read(info.filename)
+                if info.filename.startswith("word/") and info.filename.endswith(".xml"):
+                    patched = data.decode("utf-8", errors="ignore")
+                    patched = _rewrite_signature_placeholders_for_stage(
+                        patched,
+                        stage_no=stage_no,
+                    )
+                    data = patched.encode("utf-8")
+                zout.writestr(info, data)
+        stage_anchor_pdf_path = docx_to_pdf(
+            str(stage_anchor_docx_path),
+            str(stage_anchor_docx_path.parent),
+            libreoffice_timeout_seconds,
+        )
+        stage_bytes = Path(stage_anchor_pdf_path).read_bytes()
+        _stage_alignment_path(doc_dir=doc_dir, stage_no=stage_no).write_bytes(stage_bytes)
+        return stage_bytes
+    finally:
+        stage_anchor_docx_path.unlink(missing_ok=True)
+        if stage_anchor_pdf_path:
+            Path(stage_anchor_pdf_path).unlink(missing_ok=True)
+
+
+def _build_document_basename(*, doc_type: str, grievance_id: str, member_name: str) -> str:
+    normalized_type = doc_type.strip().lower()
+    member = _safe_display_name(member_name).lower()
+    if normalized_type == "statement_of_occurrence":
+        return f"{grievance_id} - {member} - statement"
+    if normalized_type == "bellsouth_meeting_request":
+        return f"{grievance_id} - {member} - bellsouth meeting request"
+    if normalized_type == "mobility_formal_grievance_meeting_request":
+        return f"{grievance_id} - {member} - mobility meeting request"
+    if normalized_type == "grievance_data_request_form":
+        return f"{grievance_id} - {member} - grievance data request"
+    if normalized_type == "true_intent_grievance_brief":
+        return f"{grievance_id} - {member} - true intent grievance brief"
+    if normalized_type == "disciplinary_grievance_brief":
+        return f"{grievance_id} - {member} - disciplinary grievance brief"
+    return _safe_name(doc_type)
 
 
 def _resolve_template_path(cfg, doc_req: DocumentRequest) -> str:  # noqa: ANN001
@@ -203,6 +386,24 @@ def _preferred_signer_email(payload: IntakeRequest) -> str | None:
     return None
 
 
+def _preferred_signer_email_for_doc(
+    *,
+    payload: IntakeRequest,
+    doc_type: str,
+    template_key: str | None,
+    cfg,  # noqa: ANN001
+) -> tuple[str | None, str]:
+    policy = _get_document_policy(cfg=cfg, doc_type=doc_type, template_key=template_key)
+    if policy and policy.default_signer_field and isinstance(payload.template_data, dict):
+        raw = payload.template_data.get(policy.default_signer_field)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip(), f"template_data.{policy.default_signer_field}"
+    default_signer = _preferred_signer_email(payload)
+    if default_signer:
+        return default_signer, "default.grievant_email"
+    return None, "missing"
+
+
 def _apply_statement_defaults(
     *,
     context: dict[str, object],
@@ -249,6 +450,122 @@ def _apply_statement_defaults(
     }
     for key, value in defaults.items():
         context.setdefault(key, value)
+
+
+def _apply_bellsouth_defaults(*, context: dict[str, object], payload: IntakeRequest) -> None:
+    td = payload.template_data if isinstance(payload.template_data, dict) else {}
+    member_name = f"{payload.grievant_firstname} {payload.grievant_lastname}".strip()
+    today = date.today().isoformat()
+
+    def _pick(*keys: str, fallback: str = "") -> str:
+        for key in keys:
+            val = td.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return fallback
+
+    defaults = {
+        "to": _pick("to", fallback=member_name),
+        "request_date": _pick("request_date", fallback=today),
+        "grievant_names": _pick("grievant_names", "grievant_name", fallback=member_name),
+        "grievants_attending": _pick("grievants_attending", fallback=member_name),
+        "grievants_in_attendance": _pick("grievants_in_attendance", fallback=member_name),
+        "date_grievance_occurred": _pick("date_grievance_occurred", "incident_date", fallback=str(payload.incident_date or "")),
+        "issue_contract_section": _pick("issue_contract_section", "article", fallback=""),
+        "informal_meeting_date": _pick("informal_meeting_date", fallback=""),
+        "meeting_requested_date": _pick("meeting_requested_date", fallback=""),
+        "meeting_requested_time": _pick("meeting_requested_time", fallback=""),
+        "meeting_requested_place": _pick("meeting_requested_place", fallback=""),
+        "union_rep_attending": _pick("union_rep_attending", fallback=""),
+        "union_reps_in_attendance": _pick("union_reps_in_attendance", fallback=""),
+        "company_reps_in_attendance": _pick("company_reps_in_attendance", fallback=""),
+        "additional_info": _pick("additional_info", fallback=str(payload.narrative or "")),
+        "reply_to_name_1": _pick("reply_to_name_1", fallback=""),
+        "reply_to_name_2": _pick("reply_to_name_2", fallback=""),
+        "reply_to_address_1": _pick("reply_to_address_1", fallback=""),
+        "reply_to_address_2": _pick("reply_to_address_2", fallback=""),
+    }
+    for key, value in defaults.items():
+        context.setdefault(key, value)
+
+    # Safety-net for Power Automate autofill: allow missing/empty/null and normalize to plain-text TBD.
+    for key in _BELL_SOUTH_TBD_KEYS:
+        raw = context.get(key)
+        text = "" if raw is None else str(raw).strip()
+        if not text or text.lower() == "null":
+            context[key] = "TBD"
+
+
+def _apply_3g3a_defaults(*, context: dict[str, object], grievance_id: str) -> None:
+    def _pick(*keys: str, fallback: str = "") -> str:
+        for key in keys:
+            raw = context.get(key)
+            if raw is None:
+                continue
+            text = str(raw).strip()
+            if text:
+                return text
+        return fallback
+
+    # Explicit local grievance number on form; fallback to grievance_id.
+    context.setdefault(
+        "local_grievance_number",
+        _pick("local_grievance_number", "local_grievance_id", fallback=grievance_id),
+    )
+
+    # Single-choice checkbox groups rendered as text marks.
+    for group in _3G3A_CHOICE_GROUPS:
+        markers = group.get("markers")
+        if not isinstance(markers, dict) or not markers:
+            continue
+        for marker_field in markers.values():
+            context.setdefault(str(marker_field), _UNCHECKED_MARK)
+
+        selected = _pick(*[str(k) for k in group.get("source_keys", ())], fallback="")
+        if not selected:
+            continue
+        selected_normalized = _normalize_field_key(selected).replace("_", " ")
+        chosen_marker = None
+        for candidate, marker_field in markers.items():
+            candidate_normalized = _normalize_field_key(str(candidate)).replace("_", " ")
+            if selected_normalized == candidate_normalized:
+                chosen_marker = str(marker_field)
+                break
+        if not chosen_marker:
+            continue
+        for marker_field in markers.values():
+            marker_key = str(marker_field)
+            context[marker_key] = _CHECKED_MARK if marker_key == chosen_marker else _UNCHECKED_MARK
+
+    # Q1 "Other" free-text should only print when Other is selected.
+    q1_selected = _pick("q1_choice", "q1_grievance_type", fallback="")
+    q1_selected_normalized = _normalize_field_key(q1_selected).replace("_", " ")
+    q1_is_other = q1_selected_normalized == "other"
+    if q1_is_other:
+        q1_other_text = _pick("q1_other_text", "q1_other", "q1_grievance_type", fallback="")
+        context["q1_grievance_type"] = q1_other_text if q1_other_text else ""
+    else:
+        context["q1_grievance_type"] = ""
+
+    # Stable wrapping/clamping for fixed-layout narrative sections.
+    for field_key, policy in _3G3A_WRAP_POLICIES.items():
+        raw = context.get(field_key)
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if not text:
+            continue
+        max_chars = int(policy.get("max_chars", 0))
+        wrap_width = max(1, int(policy.get("wrap_width", 88)))
+        if max_chars > 0 and len(text) > max_chars:
+            text = text[: max_chars - 1].rstrip() + "…"
+        wrapped = textwrap.fill(
+            text,
+            width=wrap_width,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        context[field_key] = wrapped
 
 
 def _clamp_with_ellipsis(value: str, max_chars: int) -> str:
@@ -332,6 +649,14 @@ def _validate_grievance_input_mode(grievance_mode: str, incoming_grievance_id: s
         )
 
 
+def _validate_existing_folder_mode(incoming_grievance_id: str) -> None:
+    if not incoming_grievance_id:
+        raise HTTPException(
+            status_code=400,
+            detail="grievance_id is required for existing-folder document flows",
+        )
+
+
 def _sanitize_intake_payload_for_storage(payload: IntakeRequest) -> str:
     body = payload.model_dump(exclude_none=True)
     sanitized_client_files: list[dict[str, object]] = []
@@ -345,6 +670,132 @@ def _sanitize_intake_payload_for_storage(payload: IntakeRequest) -> str:
         )
     body["client_supplied_files"] = sanitized_client_files
     return json.dumps(body, ensure_ascii=False)
+
+
+def _archive_failed_document_for_review(
+    *,
+    cfg,  # noqa: ANN001
+    case_id: str,
+    document_id: str,
+    doc_type: str,
+    grievance_id: str,
+    reason: str,
+    details: dict[str, object],
+    working_dir: Path,
+) -> Path:
+    failed_root = Path(cfg.data_root) / "failed_processes" / case_id / document_id
+    failed_root.mkdir(parents=True, exist_ok=True)
+
+    for candidate in working_dir.glob("*"):
+        if not candidate.is_file():
+            continue
+        target = failed_root / candidate.name
+        try:
+            shutil.copy2(candidate, target)
+        except Exception:
+            continue
+
+    summary = {
+        "case_id": case_id,
+        "document_id": document_id,
+        "doc_type": doc_type,
+        "grievance_id": grievance_id,
+        "reason": reason,
+        "details": details,
+        "source_working_dir": str(working_dir),
+    }
+    (failed_root / "failure_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return failed_root
+
+
+async def _mirror_failed_archive_to_sharepoint(
+    *,
+    cfg,  # noqa: ANN001
+    db: Db,
+    graph,  # noqa: ANN001
+    case_id: str,
+    document_id: str,
+    archive_dir: Path,
+) -> None:
+    if not (cfg.graph.site_hostname and cfg.graph.site_path and cfg.graph.document_library):
+        return
+    base_folder = (cfg.graph.failed_processes_folder or "").strip().strip("/")
+    if not base_folder:
+        return
+
+    target_folder = f"{base_folder}/{case_id}/{document_id}"
+    uploaded = 0
+    for item in sorted(archive_dir.glob("*")):
+        if not item.is_file():
+            continue
+        uploaded_ref = graph.upload_local_file_to_folder_path(
+            site_hostname=cfg.graph.site_hostname,
+            site_path=cfg.graph.site_path,
+            library=cfg.graph.document_library,
+            folder_path=target_folder,
+            filename=item.name,
+            local_path=str(item),
+        )
+        uploaded += 1
+        await db.add_event(
+            case_id,
+            document_id,
+            "failed_archive_sharepoint_file_uploaded",
+            {
+                "filename": item.name,
+                "path": uploaded_ref.path,
+                "web_url": uploaded_ref.web_url,
+            },
+        )
+    await db.add_event(
+        case_id,
+        document_id,
+        "failed_archive_sharepoint_uploaded",
+        {"target_folder": target_folder, "file_count": uploaded},
+    )
+
+
+def _normalize_name_fields(raw_payload: dict[str, object]) -> dict[str, object]:
+    out = dict(raw_payload)
+    first = str(out.get("grievant_firstname", "") or "").strip()
+    last = str(out.get("grievant_lastname", "") or "").strip()
+    if first and last:
+        return out
+
+    full_name_candidates = [
+        out.get("grievant_name"),
+        out.get("grievant_full_name"),
+        out.get("member_name"),
+    ]
+    template_data = out.get("template_data")
+    if isinstance(template_data, dict):
+        full_name_candidates.extend(
+            [
+                template_data.get("grievant_name"),
+                template_data.get("grievant_full_name"),
+                template_data.get("member_name"),
+            ]
+        )
+
+    full_name = ""
+    for candidate in full_name_candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            full_name = candidate.strip()
+            break
+    if not full_name:
+        return out
+
+    parts = full_name.split()
+    if not first and parts:
+        out["grievant_firstname"] = parts[0]
+    if not last and len(parts) >= 2:
+        out["grievant_lastname"] = " ".join(parts[1:])
+    if not last and len(parts) == 1:
+        out["grievant_lastname"] = "Unknown"
+    return out
 
 
 def _decode_base64_payload(value: str) -> bytes:
@@ -501,11 +952,63 @@ def _resolve_document_command(cfg, document_command: str) -> DocumentRequest:  #
             candidates.append(normalized)
 
     for key in candidates:
-        if key in cfg.doc_templates:
+        normalized_key = _DOC_COMMAND_ALIASES.get(key, key)
+        template_candidates: list[str] = []
+        for candidate in (normalized_key, key, *_DOC_TEMPLATE_FALLBACKS.get(normalized_key, ())):
+            text = str(candidate).strip()
+            if text and text not in template_candidates:
+                template_candidates.append(text)
+
+        template_lookup = next((candidate for candidate in template_candidates if candidate in cfg.doc_templates), None)
+        if template_lookup:
             # Command mode is a convenience for single-doc workflows (Power Automate).
-            return DocumentRequest(doc_type=key, template_key=key, requires_signature=True)
+            policy = _get_document_policy(cfg=cfg, doc_type=normalized_key, template_key=template_lookup)
+            requires_signature = bool(policy.default_requires_signature) if policy else True
+            return DocumentRequest(
+                doc_type=normalized_key,
+                template_key=template_lookup,
+                requires_signature=requires_signature,
+            )
 
     raise HTTPException(status_code=400, detail=f"Unknown document_command '{raw}'")
+
+
+def _get_document_policy(
+    *,
+    cfg,  # noqa: ANN001
+    doc_type: str,
+    template_key: str | None,
+):
+    if not hasattr(cfg, "document_policies"):
+        return None
+    candidates: list[str] = []
+    for key in (doc_type, template_key):
+        text = str(key or "").strip()
+        if text and text not in candidates:
+            candidates.append(text)
+    for candidate in candidates:
+        policy = cfg.document_policies.get(candidate)
+        if policy:
+            return policy
+    return None
+
+
+def _doc_requires_existing_exact_folder(*, cfg, doc_req: DocumentRequest) -> bool:  # noqa: ANN001
+    policy = _get_document_policy(
+        cfg=cfg,
+        doc_type=doc_req.doc_type,
+        template_key=doc_req.template_key,
+    )
+    if not policy:
+        return False
+    return policy.folder_resolution == "existing_exact_grievance_id"
+
+
+def _doc_uses_auto_grievance_id(doc_req: DocumentRequest) -> bool:
+    doc_type = (doc_req.doc_type or "").strip().lower()
+    template_key = (doc_req.template_key or "").strip().lower()
+    statement_keys = {"statement_of_occurrence", "grievance_form"}
+    return doc_type in statement_keys or template_key in statement_keys
 
 
 def _build_template_context(
@@ -551,6 +1054,10 @@ def _build_template_context(
         grievance_id=grievance_id,
         grievance_number=grievance_number,
     )
+    if doc_type == "bellsouth_meeting_request":
+        _apply_bellsouth_defaults(context=context, payload=payload)
+    if doc_type == "bst_grievance_form_3g3a":
+        _apply_3g3a_defaults(context=context, grievance_id=grievance_id)
     for ctx_key in tuple(context.keys()):
         if _is_date_field_key(str(ctx_key)):
             context[ctx_key] = _format_context_date_value(context.get(ctx_key))
@@ -641,7 +1148,30 @@ async def intake(request: Request):
             },
         )
         raise
-    payload = IntakeRequest.model_validate_json(body)
+    try:
+        raw_payload = json.loads(body.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+
+    if not isinstance(raw_payload, dict):
+        raise HTTPException(status_code=400, detail="intake payload must be a JSON object")
+
+    normalized_payload = _normalize_name_fields(raw_payload)
+    try:
+        payload = IntakeRequest.model_validate(normalized_payload)
+    except ValidationError as exc:
+        details = []
+        for err in exc.errors():
+            loc = ".".join(str(part) for part in err.get("loc", []))
+            msg = str(err.get("msg", "invalid field"))
+            details.append({"field": loc, "message": msg})
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "intake validation failed",
+                "errors": details,
+            },
+        ) from exc
 
     correlation_id = payload.request_id
     logger.info(
@@ -686,11 +1216,35 @@ async def intake(request: Request):
     incoming_grievance_id = (payload.grievance_id or "").strip()
     grievance_mode = cfg.grievance_id.mode
 
-    _validate_grievance_input_mode(grievance_mode, incoming_grievance_id)
+    if payload.documents:
+        doc_requests = payload.documents
+    elif (payload.document_command or "").strip():
+        doc_requests = [_resolve_document_command(cfg, payload.document_command or "")]
+    else:
+        doc_requests = [DocumentRequest(doc_type="grievance_form", requires_signature=True)]
+
+    requires_existing_folder = any(
+        _doc_requires_existing_exact_folder(cfg=cfg, doc_req=req) for req in doc_requests
+    )
+    uses_auto_id_flow = all(_doc_uses_auto_grievance_id(req) for req in doc_requests)
+
+    if requires_existing_folder:
+        _validate_existing_folder_mode(incoming_grievance_id)
+    elif uses_auto_id_flow:
+        _validate_grievance_input_mode(grievance_mode, incoming_grievance_id)
+    elif not incoming_grievance_id:
+        raise HTTPException(
+            status_code=400,
+            detail="grievance_id is required for non-statement document flows",
+        )
 
     sharepoint_case_folder: str | None = None
     sharepoint_case_web_url: str | None = None
-    if grievance_mode == "manual":
+    if requires_existing_folder:
+        grievance_id = normalize_grievance_id(incoming_grievance_id) or incoming_grievance_id
+    elif not uses_auto_id_flow:
+        grievance_id = normalize_grievance_id(incoming_grievance_id) or incoming_grievance_id
+    elif grievance_mode == "manual":
         grievance_id = normalize_grievance_id(incoming_grievance_id) or incoming_grievance_id
     else:
         allocator = GrievanceIdAllocator(
@@ -710,6 +1264,60 @@ async def intake(request: Request):
         grievance_id = allocation.grievance_id
         sharepoint_case_folder = allocation.case_folder_name
         sharepoint_case_web_url = allocation.case_folder_web_url
+
+    if requires_existing_folder:
+        try:
+            folder_ref = graph.find_case_folder_by_grievance_id_exact(
+                site_hostname=cfg.graph.site_hostname,
+                site_path=cfg.graph.site_path,
+                library=cfg.graph.document_library,
+                case_parent_folder=cfg.graph.case_parent_folder,
+                grievance_id=grievance_id,
+            )
+            sharepoint_case_folder = folder_ref.folder_name
+            sharepoint_case_web_url = folder_ref.web_url
+            logger.info(
+                "existing_case_folder_resolved",
+                extra={
+                    "correlation_id": correlation_id,
+                    "grievance_id": grievance_id,
+                    "folder_name": folder_ref.folder_name,
+                },
+            )
+        except CaseFolderNotFoundError as exc:
+            logger.warning(
+                "existing_case_folder_not_found",
+                extra={"correlation_id": correlation_id, "grievance_id": grievance_id},
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=f"No existing SharePoint case folder matches grievance_id '{grievance_id}'",
+            ) from exc
+        except CaseFolderAmbiguousError as exc:
+            logger.warning(
+                "existing_case_folder_ambiguous",
+                extra={
+                    "correlation_id": correlation_id,
+                    "grievance_id": grievance_id,
+                    "match_count": len(exc.candidates),
+                },
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": f"Multiple SharePoint folders match grievance_id '{grievance_id}'",
+                    "candidates": exc.candidates,
+                },
+            ) from exc
+        except Exception as exc:
+            logger.exception(
+                "existing_case_folder_lookup_failed",
+                extra={"correlation_id": correlation_id, "grievance_id": grievance_id},
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="unable to resolve existing SharePoint case folder",
+            ) from exc
 
     try:
         await db.exec(
@@ -795,12 +1403,6 @@ async def intake(request: Request):
         await db.exec("UPDATE cases SET status=? WHERE id=?", ("failed", case_id))
         raise
 
-    if payload.documents:
-        doc_requests = payload.documents
-    elif (payload.document_command or "").strip():
-        doc_requests = [_resolve_document_command(cfg, payload.document_command or "")]
-    else:
-        doc_requests = [DocumentRequest(doc_type="grievance_form", requires_signature=True)]
     doc_statuses: list[DocumentStatus] = []
     any_signature_requested = False
     any_signature_queued = False
@@ -810,7 +1412,11 @@ async def intake(request: Request):
         document_id = new_document_id()
         doc_type = doc_req.doc_type.strip() or "document"
         template_path = _resolve_template_path(cfg, doc_req)
-        doc_name = _safe_name(doc_type)
+        doc_name = _build_document_basename(
+            doc_type=doc_type,
+            grievance_id=grievance_id,
+            member_name=member_name,
+        )
         ddir = cdir / document_id
         ddir.mkdir(parents=True, exist_ok=True)
 
@@ -859,6 +1465,27 @@ async def intake(request: Request):
                         cfg.libreoffice_timeout_seconds,
                     )
                     alignment_pdf_bytes = Path(anchor_pdf_path).read_bytes()
+                    if is_3g3a_staged(cfg=cfg, doc_type=doc_type, template_key=doc_req.template_key):
+                        # Build stage-specific alignment PDFs so each stage can activate only its own fields.
+                        stage1_bytes = _create_stage_alignment_pdf_from_anchor_docx(
+                            anchor_docx_path=anchor_docx_path,
+                            doc_dir=ddir,
+                            stage_no=1,
+                            libreoffice_timeout_seconds=cfg.libreoffice_timeout_seconds,
+                        )
+                        _create_stage_alignment_pdf_from_anchor_docx(
+                            anchor_docx_path=anchor_docx_path,
+                            doc_dir=ddir,
+                            stage_no=2,
+                            libreoffice_timeout_seconds=cfg.libreoffice_timeout_seconds,
+                        )
+                        _create_stage_alignment_pdf_from_anchor_docx(
+                            anchor_docx_path=anchor_docx_path,
+                            doc_dir=ddir,
+                            stage_no=3,
+                            libreoffice_timeout_seconds=cfg.libreoffice_timeout_seconds,
+                        )
+                        alignment_pdf_bytes = stage1_bytes
                 finally:
                     Path(anchor_docx_path).unlink(missing_ok=True)
                     if anchor_pdf_path:
@@ -883,6 +1510,16 @@ async def intake(request: Request):
             pdf_sha = hashlib.sha256(pdf_bytes).hexdigest()
         except Exception as exc:
             any_failed = True
+            failed_archive_path = _archive_failed_document_for_review(
+                cfg=cfg,
+                case_id=case_id,
+                document_id=document_id,
+                doc_type=doc_type,
+                grievance_id=grievance_id,
+                reason="render_failed",
+                details={"error": str(exc), "template_path": template_path},
+                working_dir=ddir,
+            )
             await db.exec(
                 """INSERT INTO documents(
                      id, case_id, created_at_utc, doc_type, template_key, status,
@@ -905,8 +1542,29 @@ async def intake(request: Request):
                 case_id,
                 document_id,
                 "render_failed",
-                {"error": str(exc), "doc_type": doc_type, "template_path": template_path},
+                {
+                    "error": str(exc),
+                    "doc_type": doc_type,
+                    "template_path": template_path,
+                    "failed_archive_path": str(failed_archive_path),
+                },
             )
+            try:
+                await _mirror_failed_archive_to_sharepoint(
+                    cfg=cfg,
+                    db=db,
+                    graph=graph,
+                    case_id=case_id,
+                    document_id=document_id,
+                    archive_dir=failed_archive_path,
+                )
+            except Exception as mirror_exc:
+                await db.add_event(
+                    case_id,
+                    document_id,
+                    "failed_archive_sharepoint_upload_failed",
+                    {"error": str(mirror_exc)},
+                )
             logger.exception("render_failed", extra={"correlation_id": correlation_id, "doc_type": doc_type})
             doc_statuses.append(DocumentStatus(document_id=document_id, doc_type=doc_type, status="failed"))
             continue
@@ -941,7 +1599,113 @@ async def intake(request: Request):
         signing_link: str | None = None
 
         if doc_req.requires_signature:
-            signer_order = normalize_signers(doc_req.signers, _preferred_signer_email(payload))
+            if is_3g3a_staged(cfg=cfg, doc_type=doc_type, template_key=doc_req.template_key):
+                staged_signers = normalize_3g3a_signers(doc_req.signers)
+                if not staged_signers:
+                    any_failed = True
+                    await db.exec("UPDATE documents SET status=?, signer_order_json=? WHERE id=?", ("failed", "[]", document_id))
+                    await db.add_event(
+                        case_id,
+                        document_id,
+                        "staged_signature_signers_required",
+                        {
+                            "doc_type": doc_type,
+                            "required_count": 3,
+                            "provided_count": len(doc_req.signers or []),
+                        },
+                    )
+                    doc_statuses.append(
+                        DocumentStatus(document_id=document_id, doc_type=doc_type, status="failed", signing_link=None)
+                    )
+                    continue
+                await db.exec(
+                    "UPDATE documents SET signer_order_json=? WHERE id=?",
+                    (json.dumps(staged_signers, ensure_ascii=False), document_id),
+                )
+                stage_outcome = await create_or_send_stage(
+                    cfg=cfg,
+                    db=db,
+                    logger=logger,
+                    docuseal=docuseal,
+                    notifications=notifications,
+                    case_id=case_id,
+                    grievance_id=grievance_id,
+                    document_id=document_id,
+                    doc_type=doc_type,
+                    template_key=doc_req.template_key,
+                    pdf_bytes=pdf_bytes,
+                    alignment_pdf_bytes=alignment_pdf_bytes,
+                    signer_email=staged_signers[0],
+                    full_signer_chain=staged_signers,
+                    stage_no=1,
+                    correlation_id=correlation_id,
+                    idempotency_prefix=f"intake-stage:{case_id}:{document_id}:1",
+                )
+                status = stage_outcome.status
+                signing_link = stage_outcome.signing_link
+                any_signature_requested = any_signature_requested or status.startswith("sent_for_signature")
+                any_failed = any_failed or status == "failed"
+                doc_statuses.append(
+                    DocumentStatus(document_id=document_id, doc_type=doc_type, status=status, signing_link=signing_link)
+                )
+                continue
+
+            preferred_signer, signer_source = _preferred_signer_email_for_doc(
+                payload=payload,
+                doc_type=doc_type,
+                template_key=doc_req.template_key,
+                cfg=cfg,
+            )
+            signer_order = normalize_signers(doc_req.signers, preferred_signer)
+            if not signer_order:
+                any_failed = True
+                failed_archive_path = _archive_failed_document_for_review(
+                    cfg=cfg,
+                    case_id=case_id,
+                    document_id=document_id,
+                    doc_type=doc_type,
+                    grievance_id=grievance_id,
+                    reason="signature_signer_resolution_failed",
+                    details={"signer_source": signer_source},
+                    working_dir=ddir,
+                )
+                await db.exec("UPDATE documents SET status=? WHERE id=?", ("failed", document_id))
+                await db.add_event(
+                    case_id,
+                    document_id,
+                    "signature_signer_resolution_failed",
+                    {
+                        "doc_type": doc_type,
+                        "signer_source": signer_source,
+                        "failed_archive_path": str(failed_archive_path),
+                    },
+                )
+                try:
+                    await _mirror_failed_archive_to_sharepoint(
+                        cfg=cfg,
+                        db=db,
+                        graph=graph,
+                        case_id=case_id,
+                        document_id=document_id,
+                        archive_dir=failed_archive_path,
+                    )
+                except Exception as mirror_exc:
+                    await db.add_event(
+                        case_id,
+                        document_id,
+                        "failed_archive_sharepoint_upload_failed",
+                        {"error": str(mirror_exc)},
+                    )
+                doc_statuses.append(
+                    DocumentStatus(document_id=document_id, doc_type=doc_type, status="failed", signing_link=None)
+                )
+                continue
+            await db.add_event(
+                case_id,
+                document_id,
+                "signature_signer_resolved",
+                {"doc_type": doc_type, "signer_source": signer_source},
+            )
             requires_grievance_number_gate = (
                 cfg.wait_for_grievance_number_before_signature and not grievance_number
             )
@@ -980,6 +1744,39 @@ async def intake(request: Request):
                 signing_link = outcome.signing_link
                 any_signature_requested = any_signature_requested or status == "sent_for_signature"
                 any_failed = any_failed or status == "failed"
+                if status == "failed":
+                    failed_archive_path = _archive_failed_document_for_review(
+                        cfg=cfg,
+                        case_id=case_id,
+                        document_id=document_id,
+                        doc_type=doc_type,
+                        grievance_id=grievance_id,
+                        reason="signature_submission_failed",
+                        details={"template_key": doc_req.template_key or "", "signer_count": len(signer_order)},
+                        working_dir=ddir,
+                    )
+                    await db.add_event(
+                        case_id,
+                        document_id,
+                        "failed_document_archived",
+                        {"failed_archive_path": str(failed_archive_path), "reason": "signature_submission_failed"},
+                    )
+                    try:
+                        await _mirror_failed_archive_to_sharepoint(
+                            cfg=cfg,
+                            db=db,
+                            graph=graph,
+                            case_id=case_id,
+                            document_id=document_id,
+                            archive_dir=failed_archive_path,
+                        )
+                    except Exception as mirror_exc:
+                        await db.add_event(
+                            case_id,
+                            document_id,
+                            "failed_archive_sharepoint_upload_failed",
+                            {"error": str(mirror_exc)},
+                        )
         else:
             if cfg.require_approver_decision:
                 status = "pending_approval"

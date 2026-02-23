@@ -134,6 +134,7 @@ class AllocatorIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 audit_backup_subfolders=(),
                 audit_local_backup_roots=(),
                 client_supplied_subfolder="Client supplied data",
+                failed_processes_folder="config files/failed",
             ),
             docuseal=DocuSealConfig(
                 base_url="http://docuseal",

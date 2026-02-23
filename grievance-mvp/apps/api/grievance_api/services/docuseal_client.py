@@ -19,6 +19,14 @@ class DocuSealSubmission:
     raw: dict
 
 
+_TEXT_FIELD_DIMENSION_HINTS: dict[str, dict[str, float]] = {
+    # 3G3A stage-owned multiline blocks.
+    "q6_company_statement": {"min_w": 430.0, "min_h": 132.0},
+    "q7_proposed_disposition_second_level": {"min_w": 430.0, "min_h": 108.0},
+    "q8_union_disposition": {"min_w": 430.0, "min_h": 108.0},
+}
+
+
 class DocuSealClient:
     def __init__(
         self,
@@ -46,10 +54,20 @@ class DocuSealClient:
     @staticmethod
     def _placeholder_patterns() -> dict[str, re.Pattern[str]]:
         return {
-            "signature": re.compile(r"^\{\{Sig_es_:signer(\d+):signature\}\}$", re.IGNORECASE),
-            "date": re.compile(r"^\{\{Dte_es_:signer(\d+):date\}\}$", re.IGNORECASE),
-            "email": re.compile(r"^\{\{Eml_es_:signer(\d+):email\}\}$", re.IGNORECASE),
+            # pdftotext -bbox often strips surrounding braces from placeholders, so
+            # we match the inner marker token and normalize optional braces separately.
+            "signature": re.compile(r"^Sig_es_:signer(\d+):signature$", re.IGNORECASE),
+            "date": re.compile(r"^Dte_es_:signer(\d+):date$", re.IGNORECASE),
+            "email": re.compile(r"^Eml_es_:signer(\d+):email$", re.IGNORECASE),
+            "text": re.compile(r"^Txt_es_:signer(\d+):([A-Za-z0-9_]+)$", re.IGNORECASE),
         }
+
+    @staticmethod
+    def _normalize_placeholder_token(token: str) -> str:
+        cleaned = (token or "").strip()
+        if cleaned.startswith("{{") and cleaned.endswith("}}"):
+            cleaned = cleaned[2:-2]
+        return cleaned.strip()
 
     def _headers(self, *, is_json: bool = True) -> dict:
         headers = {"X-Auth-Token": self.api_token}
@@ -191,19 +209,27 @@ class DocuSealClient:
             if not word_match or page_index < 0:
                 continue
 
-            token = unescape(word_match.group(5)).strip()
+            token = self._normalize_placeholder_token(unescape(word_match.group(5)))
+            if not token:
+                continue
             signer_index: int | None = None
-            field_type: str | None = None
+            field_key: str | None = None
             for candidate_type, pattern in patterns.items():
                 match = pattern.match(token)
                 if match:
                     signer_index = int(match.group(1))
-                    field_type = candidate_type
+                    if candidate_type == "text":
+                        field_name = str(match.group(2) or "").strip()
+                        if not field_name:
+                            break
+                        field_key = f"text:{field_name}"
+                    else:
+                        field_key = candidate_type
                     break
-            if signer_index is None or field_type is None:
+            if signer_index is None or field_key is None:
                 continue
 
-            areas.setdefault((signer_index, field_type), []).append(
+            areas.setdefault((signer_index, field_key), []).append(
                 {
                     "x_min": float(word_match.group(1)),
                     "y_min": float(word_match.group(2)),
@@ -218,13 +244,26 @@ class DocuSealClient:
         return areas
 
     @staticmethod
-    def _normalize_area(*, raw: dict, field_type: str, attachment_uuid: str) -> dict:
+    def _normalize_area(
+        *,
+        raw: dict,
+        field_type: str,
+        attachment_uuid: str,
+        field_name: str = "",
+    ) -> dict:
         word_w = max(1.0, raw["x_max"] - raw["x_min"])
         word_h = max(1.0, raw["y_max"] - raw["y_min"])
 
         if field_type == "signature":
             min_w, min_h, pad_w, pad_h = 140.0, 28.0, 8.0, 4.0
             y_lift = 14.0
+        elif field_type == "text":
+            min_w, min_h, pad_w, pad_h = 220.0, 24.0, 4.0, 2.0
+            y_lift = 2.0
+            hint = _TEXT_FIELD_DIMENSION_HINTS.get(field_name.lower())
+            if hint:
+                min_w = float(hint.get("min_w", min_w))
+                min_h = float(hint.get("min_h", min_h))
         elif field_type == "email":
             min_w, min_h, pad_w, pad_h = 180.0, 18.0, 6.0, 2.0
             y_lift = 5.0
@@ -288,28 +327,49 @@ class DocuSealClient:
             if not submitter_uuid:
                 continue
 
-            for field_type in ("signature", "date", "email"):
-                anchors = placeholder_areas.get((signer_idx, field_type), [])
+            signer_fields = [
+                (field_key, anchors)
+                for (cur_signer, field_key), anchors in placeholder_areas.items()
+                if cur_signer == signer_idx
+            ]
+            signer_fields.sort(key=lambda item: item[0])
+            for field_key, anchors in signer_fields:
                 if not anchors:
                     continue
-                field_name = f"signer{signer_idx}_email" if field_type == "email" else ""
+                field_type = field_key
+                field_name = ""
+                required = True
+                readonly = False
+                preferences: dict[str, object] = {}
+                if field_key.startswith("text:"):
+                    field_type = "text"
+                    field_name = field_key.split(":", 1)[1]
+                    required = False
+                    preferences = {"multiline": True}
+                elif field_key == "email":
+                    field_type = "text"
+                    field_name = f"signer{signer_idx}_email"
+                    required = False
+                    readonly = True
+
                 field_payload = {
                     "uuid": str(uuid4()),
                     "submitter_uuid": submitter_uuid,
                     "name": field_name,
-                    "type": "text" if field_type == "email" else field_type,
-                    "required": field_type != "email",
-                    "preferences": {},
+                    "type": field_type,
+                    "required": required,
+                    "preferences": preferences,
                     "areas": [
                         self._normalize_area(
                             raw=anchor,
                             field_type=field_type,
                             attachment_uuid=attachment_uuid,
+                            field_name=field_name,
                         )
                         for anchor in anchors
                     ],
                 }
-                if field_type == "email":
+                if readonly:
                     field_payload["readonly"] = True
                 rebuilt_fields.append(field_payload)
 

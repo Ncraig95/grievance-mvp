@@ -17,12 +17,28 @@ docx_template_path: /app/templates/docx/statement_of_occurrence fixed.docx
 doc_templates:
   grievance_form: /app/templates/docx/statement_of_occurrence fixed.docx
   mobility_formal_grievance_meeting_request: /app/templates/docx/mobility-formal-grievance-meeting-request.docx
+  bellsouth_meeting_request: /app/templates/docx/Bellsouth-Telecommunications-formal-grievance-meeting-request.docx
   bellsouth_formal_grievance_meeting_request: /app/templates/docx/Bellsouth-Telecommunications-formal-grievance-meeting-request.docx
   grievance_data_request_form: /app/templates/docx/grievance_data_request_form.docx
   statement_of_occurrence: /app/templates/docx/statement_of_occurrence fixed.docx
   true_intent_grievance_brief: /app/templates/docx/form_true_intent_grievance_brief_revised_05.20.21.docx
   disciplinary_grievance_brief: /app/templates/docx/form_disciplinary_grievance_brief_revised_05.19.21.docx
   bst_grievance_form_3g3a: /app/templates/docx/bst_grievance_form_3g3a.docx
+document_policies:
+  bellsouth_meeting_request:
+    folder_resolution: existing_exact_grievance_id
+    default_signer_field: union_rep_email
+    default_requires_signature: true
+  bellsouth_formal_grievance_meeting_request:
+    folder_resolution: existing_exact_grievance_id
+    default_signer_field: union_rep_email
+    default_requires_signature: true
+  bst_grievance_form_3g3a:
+    staged_flow_enabled: true
+    auto_advance: true
+    store_all_stage_artifacts: true
+    input_source: docuseal_fill_fields
+    default_requires_signature: true
 rendering:
   normalize_split_placeholders: true
   layout_policies:
@@ -87,6 +103,8 @@ graph:
   # - /mnt/triad-nas/grievance-backups
   audit_local_backup_roots: []
   client_supplied_subfolder: Client supplied data
+  # Global SharePoint folder path (under library root) for failed-process review copies.
+  failed_processes_folder: config files/failed
 email:
   enabled: true
   test_mode: false

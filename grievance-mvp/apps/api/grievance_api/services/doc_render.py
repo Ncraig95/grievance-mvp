@@ -17,9 +17,7 @@ _XML_TOKEN_RE = re.compile(r"(<[^>]+>)")
 _SAFE_JINJA_EXPR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 _NORMALIZE_KEY_RE = re.compile(r"[^A-Za-z0-9]+")
 _LOG = logging.getLogger("grievance_api")
-_SIGNATURE_TAG_RE = re.compile(r"^Sig_es_:signer\d+:signature$", re.IGNORECASE)
-_DATE_TAG_RE = re.compile(r"^Dte_es_:signer\d+:date$", re.IGNORECASE)
-_EMAIL_TAG_RE = re.compile(r"^Eml_es_:signer\d+:email$", re.IGNORECASE)
+_DOCUSEAL_TAG_RE = re.compile(r"^(Sig|Dte|Eml|Txt)_es_:signer\d+:[A-Za-z0-9_]+$", re.IGNORECASE)
 
 
 def _is_xml_tag_token(token: str) -> bool:
@@ -174,11 +172,7 @@ def _replace_leftover_placeholders(
         if not inner:
             return raw
         if ":" in inner:
-            if strip_signature_placeholders and (
-                _SIGNATURE_TAG_RE.fullmatch(inner)
-                or _DATE_TAG_RE.fullmatch(inner)
-                or _EMAIL_TAG_RE.fullmatch(inner)
-            ):
+            if strip_signature_placeholders and _DOCUSEAL_TAG_RE.fullmatch(inner):
                 return ""
             return raw
         value = _lookup_value(inner)
