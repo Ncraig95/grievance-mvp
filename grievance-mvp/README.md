@@ -52,12 +52,15 @@ Approval flow:
 - `rendering` config controls template normalization and per-document layout policies:
   - `normalize_split_placeholders`: rewrites split `{{ ... }}` fields before render.
   - `layout_policies.<doc_type>`: optional clamp/fallback rules for fixed-width lines.
+- `docx_pdf_engine` selects DOCX -> PDF backend:
+  - `libreoffice` (default): local `soffice --headless`
+  - `graph_word_online`: Microsoft Graph Word Online conversion
 
 ### Document creation
 - Per document:
   - choose template by `doc_templates[template_key/doc_type]`, fallback to `docx_template_path`
   - render DOCX
-  - convert DOCX -> PDF using headless LibreOffice
+  - convert DOCX -> PDF using configured backend (`docx_pdf_engine`)
   - persist paths + SHA256 in `documents`
 
 ### E-signature

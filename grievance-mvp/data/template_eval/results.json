@@ -1,0 +1,152 @@
+[
+  {
+    "name": "bst_grievance_form_3g3a.docx",
+    "src": "/app/templates/docx/bst_grievance_form_3g3a.docx",
+    "render_ok": false,
+    "pdf_ok": false,
+    "error": "DOCX render failed for template '/app/templates/docx/bst_grievance_form_3g3a.docx': Opening and ending tag mismatch: sdtPr line 2 and r, line 2, column 38620 (<string>, line 2)"
+  },
+  {
+    "name": "bst_grievance_form_3g3a test run.docx",
+    "src": "/app/templates/docx/bst_grievance_form_3g3a test run.docx",
+    "render_ok": true,
+    "pdf_ok": true,
+    "error": "",
+    "soffice_log": "Warning: failed to launch javaldx - java may not function correctly\nconvert /data/template_eval/bst_grievance_form_3g3a_test_run.docx/rendered.docx as a Writer document -> /data/template_eval/bst_grie"
+  },
+  {
+    "name": "bst_grievance_form_3g3a.before_raw_connector3_patch_2026-02-22_163130.docx",
+    "src": "/app/templates/docx/Backup Docx/bst_grievance_form_3g3a.before_raw_connector3_patch_2026-02-22_163130.docx",
+    "render_ok": false,
+    "pdf_ok": false,
+    "error": "DOCX render failed for template '/app/templates/docx/Backup Docx/bst_grievance_form_3g3a.before_raw_connector3_patch_2026-02-22_163130.docx': 'w'"
+  },
+  {
+    "name": "bst_grievance_form_3g3a.before_stub_fix_2026-02-22.docx",
+    "src": "/app/templates/docx/Backup Docx/bst_grievance_form_3g3a.before_stub_fix_2026-02-22.docx",
+    "render_ok": true,
+    "pdf_ok": true,
+    "error": "",
+    "soffice_log": "Warning: failed to launch javaldx - java may not function correctly\nconvert /data/template_eval/bst_grievance_form_3g3a.before_stub_fix_2026-02-22.docx/rendered.docx as a Writer document -> /data/temp"
+  },
+  {
+    "name": "bst_grievance_form_3g3a.docx",
+    "src": "/app/templates/docx/Backup Docx/bst_grievance_form_3g3a.docx",
+    "render_ok": true,
+    "pdf_ok": true,
+    "error": "",
+    "soffice_log": "Warning: failed to launch javaldx - java may not function correctly\nconvert /data/template_eval/bst_grievance_form_3g3a.docx/rendered.docx as a Writer document -> /data/template_eval/bst_grievance_for"
+  },
+  {
+    "name": "bst_grievance_form_3g3a.pre_dom_connector3_patch_2026-02-22_163736.docx",
+    "src": "/app/templates/docx/Backup Docx/bst_grievance_form_3g3a.pre_dom_connector3_patch_2026-02-22_163736.docx",
+    "render_ok": true,
+    "pdf_ok": true,
+    "error": "",
+    "soffice_log": "Warning: failed to launch javaldx - java may not function correctly\nconvert /data/template_eval/bst_grievance_form_3g3a.pre_dom_connector3_patch_2026-02-22_163736.docx/rendered.docx as a Writer docume"
+  },
+  {
+    "name": "bst_grievance_form_3g3a.pre_final_alignment_fix_2026-02-22.docx",
+    "src": "/app/templates/docx/Backup Docx/bst_grievance_form_3g3a.pre_final_alignment_fix_2026-02-22.docx",
+    "render_ok": true,
+    "pdf_ok": true,
+    "error": "",
+    "soffice_log": "Warning: failed to launch javaldx - java may not function correctly\nconvert /data/template_eval/bst_grievance_form_3g3a.pre_final_alignment_fix_2026-02-22.docx/rendered.docx as a Writer document -> /d"
+  },
+  {
+    "name": "bst_grievance_form_3g3a.pre_overlay_connector3_2026-02-23_134019.docx",
+    "src": "/app/templates/docx/Backup Docx/bst_grievance_form_3g3a.pre_overlay_connector3_2026-02-23_134019.docx",
+    "render_ok": true,
+    "pdf_ok": true,
+    "error": "",
+    "soffice_log": "Warning: failed to launch javaldx - java may not function correctly\nconvert /data/template_eval/bst_grievance_form_3g3a.pre_overlay_connector3_2026-02-23_134019.docx/rendered.docx as a Writer document"
+  },
+  {
+    "name": "bst_grievance_form_3g3a.pre_q1_checkbox_marker_fix_2026-02-22.docx",
+    "src": "/app/templates/docx/Backup Docx/bst_grievance_form_3g3a.pre_q1_checkbox_marker_fix_2026-02-22.docx",
+    "render_ok": true,
+    "pdf_ok": true,
+    "error": "",
+    "soffice_log": "Warning: failed to launch javaldx - java may not function correctly\nconvert /data/template_eval/bst_grievance_form_3g3a.pre_q1_checkbox_marker_fix_2026-02-22.docx/rendered.docx as a Writer document ->"
+  },
+  {
+    "name": "bst_grievance_form_3g3a.pre_ref_top_fix_2026-02-23_133303.docx",
+    "src": "/app/templates/docx/Backup Docx/bst_grievance_form_3g3a.pre_ref_top_fix_2026-02-23_133303.docx",
+    "render_ok": true,
+    "pdf_ok": true,
+    "error": "",
+    "soffice_log": "Warning: failed to launch javaldx - java may not function correctly\nconvert /data/template_eval/bst_grievance_form_3g3a.pre_ref_top_fix_2026-02-23_133303.docx/rendered.docx as a Writer document -> /da"
+  },
+  {
+    "name": "bst_grievance_form_3g3a.pre_remove_connector3_2026-02-22.docx",
+    "src": "/app/templates/docx/Backup Docx/bst_grievance_form_3g3a.pre_remove_connector3_2026-02-22.docx",
+    "render_ok": true,
+    "pdf_ok": true,
+    "error": "",
+    "soffice_log": "Warning: failed to launch javaldx - java may not function correctly\nconvert /data/template_eval/bst_grievance_form_3g3a.pre_remove_connector3_2026-02-22.docx/rendered.docx as a Writer document -> /dat"
+  },
+  {
+    "name": "bst_grievance_form_3g3a.pre_stage2_boxline_fix_2026-02-22.docx",
+    "src": "/app/templates/docx/Backup Docx/bst_grievance_form_3g3a.pre_stage2_boxline_fix_2026-02-22.docx",
+    "render_ok": true,
+    "pdf_ok": true,
+    "error": "",
+    "soffice_log": "Warning: failed to launch javaldx - java may not function correctly\nconvert /data/template_eval/bst_grievance_form_3g3a.pre_stage2_boxline_fix_2026-02-22.docx/rendered.docx as a Writer document -> /da"
+  },
+  {
+    "name": "bst_grievance_form_3g3a.pre_testing_folder_2026-02-23_124902.docx",
+    "src": "/app/templates/docx/Backup Docx/bst_grievance_form_3g3a.pre_testing_folder_2026-02-23_124902.docx",
+    "render_ok": true,
+    "pdf_ok": true,
+    "error": "",
+    "soffice_log": "Warning: failed to launch javaldx - java may not function correctly\nconvert /data/template_eval/bst_grievance_form_3g3a.pre_testing_folder_2026-02-23_124902.docx/rendered.docx as a Writer document -> "
+  },
+  {
+    "name": "bst_grievance_form_3g3a.pre_top_row_spacing_fix_2026-02-22.docx",
+    "src": "/app/templates/docx/Backup Docx/bst_grievance_form_3g3a.pre_top_row_spacing_fix_2026-02-22.docx",
+    "render_ok": true,
+    "pdf_ok": true,
+    "error": "",
+    "soffice_log": "Warning: failed to launch javaldx - java may not function correctly\nconvert /data/template_eval/bst_grievance_form_3g3a.pre_top_row_spacing_fix_2026-02-22.docx/rendered.docx as a Writer document -> /d"
+  },
+  {
+    "name": "bst_grievance_form_3g3a.pre_top_row_table_padding_fix_2026-02-22.docx",
+    "src": "/app/templates/docx/Backup Docx/bst_grievance_form_3g3a.pre_top_row_table_padding_fix_2026-02-22.docx",
+    "render_ok": true,
+    "pdf_ok": true,
+    "error": "",
+    "soffice_log": "Warning: failed to launch javaldx - java may not function correctly\nconvert /data/template_eval/bst_grievance_form_3g3a.pre_top_row_table_padding_fix_2026-02-22.docx/rendered.docx as a Writer document"
+  },
+  {
+    "name": "bst_grievance_form_3g3a.pre_top_stub_coord_tune_2026-02-23_133704.docx",
+    "src": "/app/templates/docx/Backup Docx/bst_grievance_form_3g3a.pre_top_stub_coord_tune_2026-02-23_133704.docx",
+    "render_ok": true,
+    "pdf_ok": true,
+    "error": "",
+    "soffice_log": "Warning: failed to launch javaldx - java may not function correctly\nconvert /data/template_eval/bst_grievance_form_3g3a.pre_top_stub_coord_tune_2026-02-23_133704.docx/rendered.docx as a Writer documen"
+  },
+  {
+    "name": "bst_grievance_form_3g3a.pre_union_originating_cleanup_2026-02-22.docx",
+    "src": "/app/templates/docx/Backup Docx/bst_grievance_form_3g3a.pre_union_originating_cleanup_2026-02-22.docx",
+    "render_ok": true,
+    "pdf_ok": true,
+    "error": "",
+    "soffice_log": "Warning: failed to launch javaldx - java may not function correctly\nconvert /data/template_eval/bst_grievance_form_3g3a.pre_union_originating_cleanup_2026-02-22.docx/rendered.docx as a Writer document"
+  },
+  {
+    "name": "bst_grievance_form_3g3a.pre_user_testrun_apply_2026-02-22_171122.docx",
+    "src": "/app/templates/docx/Backup Docx/bst_grievance_form_3g3a.pre_user_testrun_apply_2026-02-22_171122.docx",
+    "render_ok": true,
+    "pdf_ok": true,
+    "error": "",
+    "soffice_log": "Warning: failed to launch javaldx - java may not function correctly\nconvert /data/template_eval/bst_grievance_form_3g3a.pre_user_testrun_apply_2026-02-22_171122.docx/rendered.docx as a Writer document"
+  },
+  {
+    "name": "bst_grievance_form_3g3a.pre_wrap_fix_backup.docx",
+    "src": "/app/templates/docx/Backup Docx/bst_grievance_form_3g3a.pre_wrap_fix_backup.docx",
+    "render_ok": true,
+    "pdf_ok": true,
+    "error": "",
+    "soffice_log": "Warning: failed to launch javaldx - java may not function correctly\nconvert /data/template_eval/bst_grievance_form_3g3a.pre_wrap_fix_backup.docx/rendered.docx as a Writer document -> /data/template_ev"
+  }
+]

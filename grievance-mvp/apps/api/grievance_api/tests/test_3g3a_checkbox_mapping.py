@@ -6,6 +6,22 @@ from grievance_api.web.routes_intake import _apply_3g3a_defaults
 
 
 class ThreeGThreeACheckboxMappingTests(unittest.TestCase):
+    def test_contract_bst_sets_q1_bst_marker_when_q1_choice_omitted(self) -> None:
+        context: dict[str, object] = {"contract": "BST"}
+        _apply_3g3a_defaults(context=context, grievance_id="2026001")
+        self.assertEqual(context["q1_is_bst_mark"], "☒")
+        self.assertEqual(context["q1_is_billing_mark"], "☐")
+        self.assertEqual(context["q1_is_utility_operations_mark"], "☐")
+        self.assertEqual(context["q1_is_other_mark"], "☐")
+
+    def test_contract_utilities_sets_q1_utility_operations_marker(self) -> None:
+        context: dict[str, object] = {"contract": "Utilities"}
+        _apply_3g3a_defaults(context=context, grievance_id="2026001")
+        self.assertEqual(context["q1_is_bst_mark"], "☐")
+        self.assertEqual(context["q1_is_billing_mark"], "☐")
+        self.assertEqual(context["q1_is_utility_operations_mark"], "☒")
+        self.assertEqual(context["q1_is_other_mark"], "☐")
+
     def test_q1_choice_sets_single_checked_marker(self) -> None:
         context: dict[str, object] = {"q1_choice": "BST"}
         _apply_3g3a_defaults(context=context, grievance_id="2026001")
@@ -57,6 +73,31 @@ class ThreeGThreeACheckboxMappingTests(unittest.TestCase):
         context: dict[str, object] = {"local_grievance_number": "LOC-77"}
         _apply_3g3a_defaults(context=context, grievance_id="2026001")
         self.assertEqual(context["local_grievance_number"], "LOC-77")
+
+    def test_q5_second_level_date_is_docuseal_stage2_marker(self) -> None:
+        context: dict[str, object] = {"q5_second_level_meeting_date": "2026-02-23"}
+        _apply_3g3a_defaults(context=context, grievance_id="2026001")
+        self.assertEqual(
+            context["q5_second_level_meeting_date"],
+            "{{Dte_es_:signer2:q5_l2_date}}",
+        )
+
+    def test_q5_primary_dates_default_to_occurred_date_when_missing(self) -> None:
+        context: dict[str, object] = {"q1_occurred_date": "2026-02-22"}
+        _apply_3g3a_defaults(context=context, grievance_id="2026001")
+        self.assertEqual(context["q5_informal_meeting_date"], "2026-02-22")
+        self.assertEqual(context["q5_3g3r_issued_date"], "2026-02-22")
+
+    def test_q10_bool_alias_values_map_to_checkbox_marks(self) -> None:
+        context: dict[str, object] = {
+            "q10_company_true_intent_choice": "true",
+            "q10_union_true_intent_choice": "0",
+        }
+        _apply_3g3a_defaults(context=context, grievance_id="2026001")
+        self.assertEqual(context["q10_company_is_yes_mark"], "☒")
+        self.assertEqual(context["q10_company_is_no_mark"], "☐")
+        self.assertEqual(context["q10_union_is_yes_mark"], "☐")
+        self.assertEqual(context["q10_union_is_no_mark"], "☒")
 
     def test_long_text_fields_are_wrapped_and_clamped(self) -> None:
         very_long = ("word " * 600).strip()

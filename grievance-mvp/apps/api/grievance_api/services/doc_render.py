@@ -18,6 +18,11 @@ _SAFE_JINJA_EXPR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0
 _NORMALIZE_KEY_RE = re.compile(r"[^A-Za-z0-9]+")
 _LOG = logging.getLogger("grievance_api")
 _DOCUSEAL_TAG_RE = re.compile(r"^(Sig|Dte|Eml|Txt)_es_:signer\d+:[A-Za-z0-9_]+$", re.IGNORECASE)
+_SDT_CHECKBOX_BLOCK_RE = re.compile(r"<w:sdt>.*?<w14:checkbox>.*?</w:sdt>", flags=re.DOTALL)
+_SDT_TAG_VAL_RE = re.compile(r'<w:tag\b[^>]*\bw:val="([^"]*)"', flags=re.IGNORECASE)
+_SDT_CHECKED_RE = re.compile(r"<w14:checked\b[^>]*/>", flags=re.IGNORECASE)
+_SDT_TEXT_RE = re.compile(r"(<w:sdtContent>.*?<w:t(?:\s[^>/]*)?>)(.*?)(</w:t>)", flags=re.DOTALL)
+_SDT_TEXT_SELF_CLOSING_RE = re.compile(r"(<w:sdtContent>.*?<w:t(?:\s[^>]*)?)\s*/>", flags=re.DOTALL)
 
 
 def _is_xml_tag_token(token: str) -> bool:
@@ -184,7 +189,58 @@ def _replace_leftover_placeholders(
     return _LEFTOVER_PLACEHOLDER_RE.sub(_replace, xml_text)
 
 
-def _postprocess_rendered_docx(out_path: str, context: dict, *, strip_signature_placeholders: bool) -> None:
+def _checkbox_value_to_bool(raw_value: str) -> bool | None:
+    text = html.unescape(str(raw_value or "")).strip()
+    if not text:
+        return None
+    if text in {"☒", "☑"}:
+        return True
+    if text in {"☐"}:
+        return False
+
+    lowered = text.lower()
+    if lowered in {"true", "yes", "y", "checked", "x", "1"}:
+        return True
+    if lowered in {"false", "no", "n", "unchecked", "0"}:
+        return False
+    return None
+
+
+def _sync_checkbox_content_controls(xml_text: str) -> str:
+    def _patch_block(match: re.Match[str]) -> str:
+        block = match.group(0)
+        tag_match = _SDT_TAG_VAL_RE.search(block)
+        if not tag_match:
+            return block
+
+        checked = _checkbox_value_to_bool(tag_match.group(1))
+        if checked is None:
+            return block
+
+        checked_val = "1" if checked else "0"
+        checked_mark = "☒" if checked else "☐"
+
+        if _SDT_CHECKED_RE.search(block):
+            block = _SDT_CHECKED_RE.sub(f'<w14:checked w14:val="{checked_val}"/>', block, count=1)
+        else:
+            block = block.replace("<w14:checkbox>", f'<w14:checkbox><w14:checked w14:val="{checked_val}"/>', 1)
+
+        if _SDT_TEXT_RE.search(block):
+            block = _SDT_TEXT_RE.sub(rf"\1{checked_mark}\3", block, count=1)
+        elif _SDT_TEXT_SELF_CLOSING_RE.search(block):
+            block = _SDT_TEXT_SELF_CLOSING_RE.sub(rf"\1>{checked_mark}</w:t>", block, count=1)
+        return block
+
+    return _SDT_CHECKBOX_BLOCK_RE.sub(_patch_block, xml_text)
+
+
+def _postprocess_rendered_docx(
+    out_path: str,
+    context: dict,
+    *,
+    strip_signature_placeholders: bool,
+    sync_checkbox_controls: bool,
+) -> None:
     source = Path(out_path)
     with tempfile.NamedTemporaryFile(
         suffix=".docx",
@@ -203,6 +259,8 @@ def _postprocess_rendered_docx(out_path: str, context: dict, *, strip_signature_
                         context,
                         strip_signature_placeholders=strip_signature_placeholders,
                     )
+                    if sync_checkbox_controls:
+                        patched = _sync_checkbox_content_controls(patched)
                     data = patched.encode("utf-8")
                 zout.writestr(info, data)
         tmp_path.replace(source)
@@ -233,6 +291,7 @@ def render_docx(
             out_path,
             context,
             strip_signature_placeholders=strip_signature_placeholders,
+            sync_checkbox_controls=strip_signature_placeholders,
         )
         return
     except Exception as exc:

@@ -20,10 +20,20 @@ class DocuSealSubmission:
 
 
 _TEXT_FIELD_DIMENSION_HINTS: dict[str, dict[str, float]] = {
-    # 3G3A stage-owned multiline blocks.
-    "q6_company_statement": {"min_w": 430.0, "min_h": 132.0},
-    "q7_proposed_disposition_second_level": {"min_w": 430.0, "min_h": 108.0},
-    "q8_union_disposition": {"min_w": 430.0, "min_h": 108.0},
+    # 3G3A stage-owned fill fields.
+    # Keep multiline blocks constrained to their row bands; avoid oversized overlays.
+    "q6_company_statement": {"min_w": 430.0, "min_h": 46.0, "max_h": 56.0},
+    "q7_proposed_disposition_second_level": {"min_w": 430.0, "min_h": 46.0, "max_h": 56.0},
+    "q7_company_rep_name_attuid": {"min_w": 220.0, "min_h": 20.0, "max_h": 24.0, "y_lift": 6.0},
+    "q8_union_disposition": {"min_w": 240.0, "min_h": 30.0, "max_h": 42.0},
+}
+_DATE_FIELD_DIMENSION_HINTS: dict[str, dict[str, float]] = {
+    "q5_l2_date": {"min_w": 140.0, "min_h": 20.0, "max_h": 28.0, "y_lift": 6.0},
+}
+_MULTILINE_TEXT_FIELDS = {
+    "q6_company_statement",
+    "q7_proposed_disposition_second_level",
+    "q8_union_disposition",
 }
 
 
@@ -56,9 +66,9 @@ class DocuSealClient:
         return {
             # pdftotext -bbox often strips surrounding braces from placeholders, so
             # we match the inner marker token and normalize optional braces separately.
-            "signature": re.compile(r"^Sig_es_:signer(\d+):signature$", re.IGNORECASE),
-            "date": re.compile(r"^Dte_es_:signer(\d+):date$", re.IGNORECASE),
-            "email": re.compile(r"^Eml_es_:signer(\d+):email$", re.IGNORECASE),
+            "signature": re.compile(r"^Sig_es_:signer(\d+):([A-Za-z0-9_]+)$", re.IGNORECASE),
+            "date": re.compile(r"^Dte_es_:signer(\d+):([A-Za-z0-9_]+)$", re.IGNORECASE),
+            "email": re.compile(r"^Eml_es_:signer(\d+):([A-Za-z0-9_]+)$", re.IGNORECASE),
             "text": re.compile(r"^Txt_es_:signer(\d+):([A-Za-z0-9_]+)$", re.IGNORECASE),
         }
 
@@ -218,13 +228,16 @@ class DocuSealClient:
                 match = pattern.match(token)
                 if match:
                     signer_index = int(match.group(1))
+                    field_name = str(match.group(2) or "").strip().lower()
                     if candidate_type == "text":
-                        field_name = str(match.group(2) or "").strip()
                         if not field_name:
                             break
                         field_key = f"text:{field_name}"
                     else:
-                        field_key = candidate_type
+                        if field_name and field_name != candidate_type:
+                            field_key = f"{candidate_type}:{field_name}"
+                        else:
+                            field_key = candidate_type
                     break
             if signer_index is None or field_key is None:
                 continue
@@ -253,6 +266,7 @@ class DocuSealClient:
     ) -> dict:
         word_w = max(1.0, raw["x_max"] - raw["x_min"])
         word_h = max(1.0, raw["y_max"] - raw["y_min"])
+        max_h: float | None = None
 
         if field_type == "signature":
             min_w, min_h, pad_w, pad_h = 140.0, 28.0, 8.0, 4.0
@@ -264,6 +278,19 @@ class DocuSealClient:
             if hint:
                 min_w = float(hint.get("min_w", min_w))
                 min_h = float(hint.get("min_h", min_h))
+                y_lift = float(hint.get("y_lift", y_lift))
+                if "max_h" in hint:
+                    max_h = float(hint.get("max_h", 0.0))
+        elif field_type == "date":
+            min_w, min_h, pad_w, pad_h = 90.0, 18.0, 4.0, 2.0
+            y_lift = 6.0
+            hint = _DATE_FIELD_DIMENSION_HINTS.get(field_name.lower())
+            if hint:
+                min_w = float(hint.get("min_w", min_w))
+                min_h = float(hint.get("min_h", min_h))
+                y_lift = float(hint.get("y_lift", y_lift))
+                if "max_h" in hint:
+                    max_h = float(hint.get("max_h", 0.0))
         elif field_type == "email":
             min_w, min_h, pad_w, pad_h = 180.0, 18.0, 6.0, 2.0
             y_lift = 5.0
@@ -275,6 +302,8 @@ class DocuSealClient:
         y = max(0.0, raw["y_min"] - y_lift)
         w = max(min_w, word_w + 2 * pad_w)
         h = max(min_h, word_h + 2 * pad_h)
+        if max_h is not None and max_h > 0:
+            h = min(h, max_h)
 
         if x + w > raw["page_w"]:
             w = max(1.0, raw["page_w"] - x)
@@ -338,19 +367,25 @@ class DocuSealClient:
                     continue
                 field_type = field_key
                 field_name = ""
+                if ":" in field_key:
+                    field_type, field_name = field_key.split(":", 1)
+                field_name = field_name.strip().lower()
+
                 required = True
                 readonly = False
                 preferences: dict[str, object] = {}
-                if field_key.startswith("text:"):
-                    field_type = "text"
-                    field_name = field_key.split(":", 1)[1]
-                    required = False
-                    preferences = {"multiline": True}
-                elif field_key == "email":
+                if field_type == "text":
+                    required = "true_intent" not in field_name
+                    if field_name in _MULTILINE_TEXT_FIELDS:
+                        preferences = {"multiline": True}
+                elif field_type == "email":
                     field_type = "text"
                     field_name = f"signer{signer_idx}_email"
                     required = False
                     readonly = True
+                elif field_type in {"signature", "date"}:
+                    if "true_intent" in field_name:
+                        required = False
 
                 field_payload = {
                     "uuid": str(uuid4()),

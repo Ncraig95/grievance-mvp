@@ -69,6 +69,12 @@ rendering:
         witness_3_title: 20
         witness_3_phone: 18
 libreoffice_timeout_seconds: 45
+# DOCX -> PDF backend:
+# - libreoffice: local soffice conversion (default)
+# - graph_word_online: Microsoft Graph / Word Online conversion
+docx_pdf_engine: libreoffice
+# SharePoint folder path (under library root) used only for temporary Graph conversion uploads.
+docx_pdf_graph_temp_folder: Grievances/_docx_pdf_convert
 grievance_id:
   mode: auto
   timezone: America/New_York

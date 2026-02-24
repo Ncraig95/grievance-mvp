@@ -127,6 +127,8 @@ class AppConfig:
     intake_auth: IntakeAuthConfig = field(default_factory=_default_intake_auth)
     rendering: RenderingConfig = field(default_factory=_default_rendering)
     document_policies: dict[str, DocumentPolicyConfig] = field(default_factory=dict)
+    docx_pdf_engine: str = "libreoffice"
+    docx_pdf_graph_temp_folder: str = "_docx_pdf_convert"
     wait_for_grievance_number_before_signature: bool = True
     require_approver_decision: bool = True
     log_level: str = "INFO"
@@ -222,6 +224,15 @@ def _normalize_grievance_separator(value: object) -> str:
     # Current policy is no separator in produced IDs (YYYY + sequence).
     _ = value
     return ""
+
+
+def _normalize_docx_pdf_engine(value: object) -> str:
+    engine = str(value or "libreoffice").strip().lower()
+    if engine in {"libreoffice", "soffice"}:
+        return "libreoffice"
+    if engine in {"graph_word_online", "graph", "microsoft_word_online", "word_online"}:
+        return "graph_word_online"
+    return "libreoffice"
 
 
 def _normalize_grievance_fallback(value: object) -> str | None:
@@ -390,6 +401,11 @@ def load_config(path: str) -> AppConfig:
             layout_policies=parsed_layout_policies,
         ),
         document_policies=parsed_document_policies,
+        docx_pdf_engine=_normalize_docx_pdf_engine(raw.get("docx_pdf_engine")),
+        docx_pdf_graph_temp_folder=(
+            str(raw.get("docx_pdf_graph_temp_folder", "_docx_pdf_convert")).strip()
+            or "_docx_pdf_convert"
+        ),
         wait_for_grievance_number_before_signature=bool(
             raw.get("wait_for_grievance_number_before_signature", True)
         ),

@@ -74,6 +74,7 @@ _BELL_SOUTH_TBD_KEYS = (
 )
 _CHECKED_MARK = "☒"
 _UNCHECKED_MARK = "☐"
+_3G3A_STAGE2_DATE_MARKER = "{{Dte_es_:signer2:q5_l2_date}}"
 _3G3A_WRAP_POLICIES: dict[str, dict[str, int]] = {
     # Render-time safety rails for long free-text blocks in fixed form sections.
     "q3_union_statement": {"max_chars": 1800, "wrap_width": 88},
@@ -85,10 +86,19 @@ _3G3A_WRAP_POLICIES: dict[str, dict[str, int]] = {
 }
 _3G3A_CHOICE_GROUPS: tuple[dict[str, object], ...] = (
     {
-        "source_keys": ("q1_choice", "q1_grievance_type"),
+        "source_keys": (
+            "q1_choice",
+            "q1_grievance_type",
+            "contract",
+            "contract_type",
+            "contractType",
+        ),
         "markers": {
             "bst": "q1_is_bst_mark",
+            "bellsouth": "q1_is_bst_mark",
             "billing": "q1_is_billing_mark",
+            "utility": "q1_is_utility_operations_mark",
+            "utilities": "q1_is_utility_operations_mark",
             "utility operations": "q1_is_utility_operations_mark",
             "utility_ops": "q1_is_utility_operations_mark",
             "uo": "q1_is_utility_operations_mark",
@@ -115,6 +125,12 @@ _3G3A_CHOICE_GROUPS: tuple[dict[str, object], ...] = (
         "markers": {
             "yes": "q10_company_is_yes_mark",
             "no": "q10_company_is_no_mark",
+            "true": "q10_company_is_yes_mark",
+            "false": "q10_company_is_no_mark",
+            "1": "q10_company_is_yes_mark",
+            "0": "q10_company_is_no_mark",
+            "checked": "q10_company_is_yes_mark",
+            "unchecked": "q10_company_is_no_mark",
         },
     },
     {
@@ -127,6 +143,12 @@ _3G3A_CHOICE_GROUPS: tuple[dict[str, object], ...] = (
         "markers": {
             "yes": "q10_union_is_yes_mark",
             "no": "q10_union_is_no_mark",
+            "true": "q10_union_is_yes_mark",
+            "false": "q10_union_is_no_mark",
+            "1": "q10_union_is_yes_mark",
+            "0": "q10_union_is_no_mark",
+            "checked": "q10_union_is_yes_mark",
+            "unchecked": "q10_union_is_no_mark",
         },
     },
 )
@@ -196,6 +218,12 @@ def _create_stage_alignment_pdf_from_anchor_docx(
     doc_dir: Path,
     stage_no: int,
     libreoffice_timeout_seconds: int,
+    docx_pdf_engine: str,
+    graph,  # noqa: ANN001
+    graph_site_hostname: str,
+    graph_site_path: str,
+    graph_library: str,
+    graph_temp_folder_path: str,
 ) -> bytes:
     stage_anchor_docx_path = doc_dir / "stage_alignments" / f"stage{int(stage_no)}_anchor.docx"
     stage_anchor_docx_path.parent.mkdir(parents=True, exist_ok=True)
@@ -216,6 +244,12 @@ def _create_stage_alignment_pdf_from_anchor_docx(
             str(stage_anchor_docx_path),
             str(stage_anchor_docx_path.parent),
             libreoffice_timeout_seconds,
+            engine=docx_pdf_engine,
+            graph_uploader=graph,
+            graph_site_hostname=graph_site_hostname,
+            graph_site_path=graph_site_path,
+            graph_library=graph_library,
+            graph_temp_folder_path=graph_temp_folder_path,
         )
         stage_bytes = Path(stage_anchor_pdf_path).read_bytes()
         _stage_alignment_path(doc_dir=doc_dir, stage_no=stage_no).write_bytes(stage_bytes)
@@ -255,6 +289,10 @@ def _resolve_template_path(cfg, doc_req: DocumentRequest) -> str:  # noqa: ANN00
 def _normalize_field_key(key: str) -> str:
     normalized = _FIELD_KEY_SAFE.sub("_", key.strip()).strip("_").lower()
     return normalized
+
+
+def _normalize_choice_value(value: str) -> str:
+    return " ".join(_normalize_field_key(value).replace("_", " ").split())
 
 
 def _flatten_fields(value: object, prefix: str = "") -> dict[str, object]:
@@ -512,6 +550,14 @@ def _apply_3g3a_defaults(*, context: dict[str, object], grievance_id: str) -> No
         "local_grievance_number",
         _pick("local_grievance_number", "local_grievance_id", fallback=grievance_id),
     )
+    # This date must be captured by stage-2 manager in DocuSeal.
+    # Keep the prefill slot as a DocuSeal date marker regardless of intake payload value.
+    context["q5_second_level_meeting_date"] = _3G3A_STAGE2_DATE_MARKER
+    baseline_date = _pick("q1_occurred_date", "incident_date", "date_grievance_occurred", fallback=date.today().isoformat())
+    for key in ("q5_informal_meeting_date", "q5_3g3r_issued_date"):
+        raw = context.get(key)
+        if raw is None or not str(raw).strip():
+            context[key] = baseline_date
 
     # Single-choice checkbox groups rendered as text marks.
     for group in _3G3A_CHOICE_GROUPS:
@@ -524,13 +570,23 @@ def _apply_3g3a_defaults(*, context: dict[str, object], grievance_id: str) -> No
         selected = _pick(*[str(k) for k in group.get("source_keys", ())], fallback="")
         if not selected:
             continue
-        selected_normalized = _normalize_field_key(selected).replace("_", " ")
+        selected_normalized = _normalize_choice_value(selected)
         chosen_marker = None
+        normalized_markers: list[tuple[str, str]] = []
         for candidate, marker_field in markers.items():
-            candidate_normalized = _normalize_field_key(str(candidate)).replace("_", " ")
+            candidate_normalized = _normalize_choice_value(str(candidate))
+            normalized_markers.append((candidate_normalized, str(marker_field)))
             if selected_normalized == candidate_normalized:
                 chosen_marker = str(marker_field)
                 break
+        if not chosen_marker and selected_normalized:
+            tokenized_selected = f" {selected_normalized} "
+            for candidate_normalized, marker_field in normalized_markers:
+                if not candidate_normalized:
+                    continue
+                if f" {candidate_normalized} " in tokenized_selected:
+                    chosen_marker = marker_field
+                    break
         if not chosen_marker:
             continue
         for marker_field in markers.values():
@@ -539,7 +595,7 @@ def _apply_3g3a_defaults(*, context: dict[str, object], grievance_id: str) -> No
 
     # Q1 "Other" free-text should only print when Other is selected.
     q1_selected = _pick("q1_choice", "q1_grievance_type", fallback="")
-    q1_selected_normalized = _normalize_field_key(q1_selected).replace("_", " ")
+    q1_selected_normalized = _normalize_choice_value(q1_selected)
     q1_is_other = q1_selected_normalized == "other"
     if q1_is_other:
         q1_other_text = _pick("q1_other_text", "q1_other", "q1_grievance_type", fallback="")
@@ -1463,6 +1519,12 @@ async def intake(request: Request):
                         anchor_docx_path,
                         str(ddir),
                         cfg.libreoffice_timeout_seconds,
+                        engine=cfg.docx_pdf_engine,
+                        graph_uploader=graph,
+                        graph_site_hostname=cfg.graph.site_hostname,
+                        graph_site_path=cfg.graph.site_path,
+                        graph_library=cfg.graph.document_library,
+                        graph_temp_folder_path=cfg.docx_pdf_graph_temp_folder,
                     )
                     alignment_pdf_bytes = Path(anchor_pdf_path).read_bytes()
                     if is_3g3a_staged(cfg=cfg, doc_type=doc_type, template_key=doc_req.template_key):
@@ -1472,18 +1534,36 @@ async def intake(request: Request):
                             doc_dir=ddir,
                             stage_no=1,
                             libreoffice_timeout_seconds=cfg.libreoffice_timeout_seconds,
+                            docx_pdf_engine=cfg.docx_pdf_engine,
+                            graph=graph,
+                            graph_site_hostname=cfg.graph.site_hostname,
+                            graph_site_path=cfg.graph.site_path,
+                            graph_library=cfg.graph.document_library,
+                            graph_temp_folder_path=cfg.docx_pdf_graph_temp_folder,
                         )
                         _create_stage_alignment_pdf_from_anchor_docx(
                             anchor_docx_path=anchor_docx_path,
                             doc_dir=ddir,
                             stage_no=2,
                             libreoffice_timeout_seconds=cfg.libreoffice_timeout_seconds,
+                            docx_pdf_engine=cfg.docx_pdf_engine,
+                            graph=graph,
+                            graph_site_hostname=cfg.graph.site_hostname,
+                            graph_site_path=cfg.graph.site_path,
+                            graph_library=cfg.graph.document_library,
+                            graph_temp_folder_path=cfg.docx_pdf_graph_temp_folder,
                         )
                         _create_stage_alignment_pdf_from_anchor_docx(
                             anchor_docx_path=anchor_docx_path,
                             doc_dir=ddir,
                             stage_no=3,
                             libreoffice_timeout_seconds=cfg.libreoffice_timeout_seconds,
+                            docx_pdf_engine=cfg.docx_pdf_engine,
+                            graph=graph,
+                            graph_site_hostname=cfg.graph.site_hostname,
+                            graph_site_path=cfg.graph.site_path,
+                            graph_library=cfg.graph.document_library,
+                            graph_temp_folder_path=cfg.docx_pdf_graph_temp_folder,
                         )
                         alignment_pdf_bytes = stage1_bytes
                 finally:
@@ -1505,7 +1585,17 @@ async def intake(request: Request):
                     docx_path,
                     normalize_split_placeholders=cfg.rendering.normalize_split_placeholders,
                 )
-            pdf_path = docx_to_pdf(docx_path, str(ddir), cfg.libreoffice_timeout_seconds)
+            pdf_path = docx_to_pdf(
+                docx_path,
+                str(ddir),
+                cfg.libreoffice_timeout_seconds,
+                engine=cfg.docx_pdf_engine,
+                graph_uploader=graph,
+                graph_site_hostname=cfg.graph.site_hostname,
+                graph_site_path=cfg.graph.site_path,
+                graph_library=cfg.graph.document_library,
+                graph_temp_folder_path=cfg.docx_pdf_graph_temp_folder,
+            )
             pdf_bytes = Path(pdf_path).read_bytes()
             pdf_sha = hashlib.sha256(pdf_bytes).hexdigest()
         except Exception as exc:

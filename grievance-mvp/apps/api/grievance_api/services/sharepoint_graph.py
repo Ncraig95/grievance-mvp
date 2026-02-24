@@ -527,3 +527,58 @@ class GraphUploader:
             web_url=put.get("webUrl"),
             path=normalized_path,
         )
+
+    def delete_item(self, *, drive_id: str, item_id: str) -> None:
+        if self.dry_run:
+            return
+        if not drive_id or not item_id:
+            return
+        self._request("DELETE", f"/drives/{drive_id}/items/{item_id}")
+
+    def convert_local_docx_to_pdf_bytes(
+        self,
+        *,
+        site_hostname: str,
+        site_path: str,
+        library: str,
+        temp_folder_path: str,
+        filename: str,
+        local_path: str,
+    ) -> bytes:
+        if self.dry_run:
+            raise RuntimeError("Graph conversion backend is unavailable when dry_run=true")
+
+        uploaded = self.upload_local_file_to_folder_path(
+            site_hostname=site_hostname,
+            site_path=site_path,
+            library=library,
+            folder_path=temp_folder_path,
+            filename=filename,
+            local_path=local_path,
+        )
+        item_id = uploaded.item_id
+        if not item_id:
+            raise RuntimeError("Graph conversion upload did not return item_id")
+
+        try:
+            url = f"https://graph.microsoft.com/v1.0/drives/{uploaded.drive_id}/items/{item_id}/content?format=pdf"
+            resp = requests.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self.token()}",
+                },
+                timeout=self.timeout_seconds,
+            )
+            if not (200 <= resp.status_code < 300):
+                raise RuntimeError(
+                    f"Graph conversion failed (GET /content?format=pdf): {resp.status_code} {resp.text[:500]}"
+                )
+            if not resp.content:
+                raise RuntimeError("Graph conversion returned empty PDF payload")
+            return resp.content
+        finally:
+            try:
+                self.delete_item(drive_id=uploaded.drive_id, item_id=item_id)
+            except Exception:
+                # Non-fatal cleanup failure; conversion result is already determined.
+                pass
