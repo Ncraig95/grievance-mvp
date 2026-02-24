@@ -10,6 +10,7 @@ Supported guides:
 - `grievance_data_request.md`
 - `true_intent_grievance_brief.md`
 - `disciplinary_grievance_brief.md`
+- `settlement_form_3106.md`
 - `bst_grievance_form_3g3a.md` (Q1-Q10 staging guide)
 
 ## Common flow pattern (all docs)

@@ -420,6 +420,7 @@ These are ready for intake integration now:
 - `grievance_data_request` -> `grievance_data_request_form.docx`
 - `true_intent_brief` -> `form_true_intent_grievance_brief_revised_05.20.21.docx`
 - `disciplinary_brief` -> `form_disciplinary_grievance_brief_revised_05.19.21.docx`
+- `settlement_form` -> `Settlement Form 3106.docx`
 
 Equivalent full command names also work:
 
@@ -427,6 +428,7 @@ Equivalent full command names also work:
 - `grievance_data_request_form`
 - `true_intent_grievance_brief`
 - `disciplinary_grievance_brief`
+- `settlement_form_3106`
 
 `bst_grievance_form_3g3a` now has a staged integration guide for questions 1-10:
 - `docs/power-automate/bst_grievance_form_3g3a.md`
@@ -470,6 +472,7 @@ Detailed per-document setup guides:
 - `docs/power-automate/grievance_data_request.md`
 - `docs/power-automate/true_intent_grievance_brief.md`
 - `docs/power-automate/disciplinary_grievance_brief.md`
+- `docs/power-automate/settlement_form_3106.md`
 
 ## 10b) Power Automate setup (BellSouth Meeting Request)
 

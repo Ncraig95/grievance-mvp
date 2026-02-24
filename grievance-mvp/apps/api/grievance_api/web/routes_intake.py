@@ -163,6 +163,7 @@ _DOC_COMMAND_ALIASES: dict[str, str] = {
     "grievance_data_request": "grievance_data_request_form",
     "true_intent_brief": "true_intent_grievance_brief",
     "disciplinary_brief": "disciplinary_grievance_brief",
+    "settlement_form": "settlement_form_3106",
 }
 _DOC_TEMPLATE_FALLBACKS: dict[str, tuple[str, ...]] = {
     "bellsouth_meeting_request": (
@@ -180,6 +181,10 @@ _DOC_TEMPLATE_FALLBACKS: dict[str, tuple[str, ...]] = {
     ),
     "disciplinary_grievance_brief": (
         "disciplinary_grievance_brief",
+    ),
+    "settlement_form_3106": (
+        "settlement_form_3106",
+        "settlement_form",
     ),
 }
 
@@ -275,6 +280,8 @@ def _build_document_basename(*, doc_type: str, grievance_id: str, member_name: s
         return f"{grievance_id} - {member} - true intent grievance brief"
     if normalized_type == "disciplinary_grievance_brief":
         return f"{grievance_id} - {member} - disciplinary grievance brief"
+    if normalized_type in {"settlement_form", "settlement_form_3106"}:
+        return f"{grievance_id} - {member} - settlement form 3106"
     return _safe_name(doc_type)
 
 
@@ -352,7 +359,7 @@ def _coerce_positive_int(value: object, fallback: int) -> int:
     return parsed if parsed > 0 else fallback
 
 
-def _normalize_existing_statement_lines(value: object) -> list[dict[str, object]] | None:
+def _normalize_existing_line_rows(value: object) -> list[dict[str, object]] | None:
     if not isinstance(value, list):
         return None
     rows: list[dict[str, object]] = []
@@ -365,7 +372,12 @@ def _normalize_existing_statement_lines(value: object) -> list[dict[str, object]
     return rows
 
 
-def _build_statement_line_rows(full_text: str, wrap_width: int) -> list[dict[str, object]]:
+def _normalize_existing_statement_lines(value: object) -> list[dict[str, object]] | None:
+    # Legacy alias retained for existing statement tests/template logic.
+    return _normalize_existing_line_rows(value)
+
+
+def _build_wrapped_line_rows(full_text: str, wrap_width: int) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for paragraph in full_text.splitlines():
         normalized = paragraph.strip()
@@ -390,25 +402,102 @@ def _build_statement_line_rows(full_text: str, wrap_width: int) -> list[dict[str
     return [{"text": str(row.get("text", "")), "line_no": idx + 1} for idx, row in enumerate(rows)]
 
 
-def _apply_dynamic_statement_context(context: dict[str, object]) -> None:
-    statement_text = str(context.get("statement_text", "") or "")
-    continuation = str(context.get("statement_continuation", "") or "")
-    joined = statement_text
-    if continuation.strip():
-        joined = f"{statement_text}\n{continuation}" if statement_text else continuation
+def _build_statement_line_rows(full_text: str, wrap_width: int) -> list[dict[str, object]]:
+    # Legacy alias retained for existing statement tests/template logic.
+    return _build_wrapped_line_rows(full_text, wrap_width)
 
-    existing = _normalize_existing_statement_lines(context.get("statement_lines"))
+
+def _pick_first_non_empty_context_value(context: dict[str, object], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        raw = context.get(key)
+        if raw is None:
+            continue
+        text = str(raw)
+        if text.strip():
+            return text
+    return ""
+
+
+def _apply_dynamic_rows_context(
+    *,
+    context: dict[str, object],
+    source_keys: tuple[str, ...],
+    continuation_keys: tuple[str, ...],
+    lines_key: str,
+    rows_key: str,
+    full_text_key: str,
+    line_count_key: str,
+    has_continuation_key: str | None,
+    wrap_width_key: str,
+) -> None:
+    primary_text = _pick_first_non_empty_context_value(context, source_keys)
+    continuation = _pick_first_non_empty_context_value(context, continuation_keys) if continuation_keys else ""
+    joined = primary_text
+    if continuation.strip():
+        joined = f"{primary_text}\n{continuation}" if primary_text else continuation
+
+    existing = _normalize_existing_line_rows(context.get(lines_key))
+    if existing is None:
+        existing = _normalize_existing_line_rows(context.get(rows_key))
     if existing is not None:
         rows = existing if existing else [{"text": "", "line_no": 1}]
     else:
-        wrap_width = _coerce_positive_int(context.get("statement_line_wrap_width"), _DEFAULT_STATEMENT_WRAP_WIDTH)
-        rows = _build_statement_line_rows(joined, wrap_width)
+        wrap_width = _coerce_positive_int(context.get(wrap_width_key), _DEFAULT_STATEMENT_WRAP_WIDTH)
+        rows = _build_wrapped_line_rows(joined, wrap_width)
 
-    context["statement_full_text"] = joined
-    context["statement_lines"] = rows
-    context["statement_rows"] = rows
-    context["statement_line_count"] = len(rows)
-    context["statement_has_continuation"] = bool(continuation.strip())
+    context[full_text_key] = joined
+    context[lines_key] = rows
+    context[rows_key] = rows
+    context[line_count_key] = len(rows)
+    if has_continuation_key:
+        context[has_continuation_key] = bool(continuation.strip())
+
+
+def _apply_dynamic_statement_context(context: dict[str, object]) -> None:
+    _apply_dynamic_rows_context(
+        context=context,
+        source_keys=("statement_text", "narrative"),
+        continuation_keys=("statement_continuation",),
+        lines_key="statement_lines",
+        rows_key="statement_rows",
+        full_text_key="statement_full_text",
+        line_count_key="statement_line_count",
+        has_continuation_key="statement_has_continuation",
+        wrap_width_key="statement_line_wrap_width",
+    )
+
+
+def _apply_dynamic_settlement_context(context: dict[str, object]) -> None:
+    issue_article = _pick_first_non_empty_context_value(context, ("issue_article", "article"))
+    context.setdefault("issue_article", issue_article)
+
+    _apply_dynamic_rows_context(
+        context=context,
+        source_keys=("issue_text", "issue_and_article_text", "issue_contract_section", "narrative"),
+        continuation_keys=("issue_continuation",),
+        lines_key="issue_lines",
+        rows_key="issue_rows",
+        full_text_key="issue_full_text",
+        line_count_key="issue_line_count",
+        has_continuation_key="issue_has_continuation",
+        wrap_width_key="issue_line_wrap_width",
+    )
+    _apply_dynamic_rows_context(
+        context=context,
+        source_keys=(
+            "settlement_text",
+            "settlement_terms",
+            "union_proposed_settlement",
+            "company_proposed_settlement",
+        ),
+        continuation_keys=("settlement_continuation",),
+        lines_key="settlement_lines",
+        rows_key="settlement_rows",
+        full_text_key="settlement_full_text",
+        line_count_key="settlement_line_count",
+        has_continuation_key="settlement_has_continuation",
+        wrap_width_key="settlement_line_wrap_width",
+    )
 
 
 def _preferred_signer_email(payload: IntakeRequest) -> str | None:
@@ -1127,6 +1216,7 @@ def _build_template_context(
     context.setdefault("today_date", today)
     context.setdefault("request_date", today)
     _apply_dynamic_statement_context(context)
+    _apply_dynamic_settlement_context(context)
     layout_meta = _apply_layout_policy_context(
         cfg=cfg,
         doc_type=doc_type,

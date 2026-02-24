@@ -226,6 +226,81 @@ class LayoutPolicyTests(unittest.TestCase):
         self.assertEqual(context["seniority_date"], "2026-02-21")
         self.assertEqual(context["ncs_date"], "2026-02-22")
 
+    def test_settlement_context_builds_auto_expanding_rows(self) -> None:
+        payload = IntakeRequest(
+            request_id="req-3",
+            contract="CWA",
+            grievant_firstname="Jane",
+            grievant_lastname="Doe",
+            grievant_email="jane@example.com",
+            narrative="Base narrative",
+            template_data={
+                "issue_text": (
+                    "Issue details that are long enough to wrap to the next rendered row in "
+                    "the Settlement Form dynamic section."
+                ),
+                "settlement_text": (
+                    "Settlement details that are also long enough to wrap to another row so "
+                    "we validate row expansion."
+                ),
+                "issue_article": "5.2",
+            },
+        )
+        cfg = SimpleNamespace(
+            rendering=RenderingConfig(
+                normalize_split_placeholders=True,
+                layout_policies={},
+            )
+        )
+
+        context, _ = _build_template_context(
+            cfg=cfg,
+            payload=payload,
+            case_id="C124",
+            grievance_id="2026002",
+            document_id="D124",
+            doc_type="settlement_form_3106",
+            grievance_number="2026002",
+        )
+
+        issue_rows = context["issue_rows"]
+        settlement_rows = context["settlement_rows"]
+        self.assertIsInstance(issue_rows, list)
+        self.assertIsInstance(settlement_rows, list)
+        self.assertGreaterEqual(len(issue_rows), 2)
+        self.assertGreaterEqual(len(settlement_rows), 2)
+        self.assertEqual(context["issue_article"], "5.2")
+
+    def test_settlement_context_uses_article_fallback_and_blank_row_default(self) -> None:
+        payload = IntakeRequest(
+            request_id="req-4",
+            contract="CWA",
+            grievant_firstname="Jane",
+            grievant_lastname="Doe",
+            grievant_email="jane@example.com",
+            narrative="Narrative",
+            template_data={"article": "12.1"},
+        )
+        cfg = SimpleNamespace(
+            rendering=RenderingConfig(
+                normalize_split_placeholders=True,
+                layout_policies={},
+            )
+        )
+
+        context, _ = _build_template_context(
+            cfg=cfg,
+            payload=payload,
+            case_id="C125",
+            grievance_id="2026003",
+            document_id="D125",
+            doc_type="settlement_form_3106",
+            grievance_number="2026003",
+        )
+
+        self.assertEqual(context["issue_article"], "12.1")
+        self.assertEqual(context["settlement_rows"], [{"text": "", "line_no": 1}])
+
 
 if __name__ == "__main__":
     unittest.main()
