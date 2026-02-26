@@ -70,7 +70,8 @@ Approval flow:
   - Requires web credentials (`DOCUSEAL_WEB_EMAIL` / `DOCUSEAL_WEB_PASSWORD`) and HTTPS base (`docuseal.web_base_url` or `docuseal.public_base_url`).
   - If the generated PDF contains Adobe-style placeholders (`{{Sig_es_:signerN:signature}}`, `{{Dte_es_:signerN:date}}`, `{{Eml_es_:signerN:email}}`), app auto-aligns DocuSeal fields to those exact coordinates.
   - `Eml_es_` placeholders create locked text fields and are prefilled with the signer email used for that signer slot.
-- App-owned mail sends signature requests (DocuSeal SMTP is not used).
+- App-owned mail sends signature requests via Graph.
+- Compose also includes a local `smtp_graph_bridge` so DocuSeal SMTP traffic can be relayed through Graph when DocuSeal needs to emit mail.
 - DocuSeal links are rewritten to public HTTPS origin via `docuseal.public_base_url` when needed.
 
 ### Webhook completion
@@ -141,9 +142,22 @@ Core tables:
 
 ### DocuSeal HTTPS forwarding
 - `docuseal_proxy` (nginx) forwards Host + `X-Forwarded-*` headers to DocuSeal.
+- nginx uses Docker DNS re-resolution (`resolver 127.0.0.11`) so DocuSeal container IP changes do not require proxy restart.
 - Cloudflare tunnel can target `docuseal_proxy`.
 - `cloudflared` runs in host-network mode so tunnel ingress routes pointing to `localhost` / `127.0.0.1` are valid.
 - DocuSeal public URL is kept in sync by `sync-docuseal-public-url.sh`.
+
+### Local SMTP relay for DocuSeal
+- `smtp_graph_bridge` accepts SMTP locally and relays to Microsoft Graph `sendMail`.
+- `docuseal` is wired to `SMTP_ADDRESS=smtp_graph_bridge` and `SMTP_PORT=${DOCUSEAL_SMTP_PORT}`.
+- SMTP reachability is isolated on `smtp-relay-net`, shared only by `docuseal` and `smtp_graph_bridge`.
+- Relay reads Graph credentials and sender mailbox from `config/config.yaml`:
+  - `graph.tenant_id`, `graph.client_id`, `graph.cert_pem_path`, `graph.cert_thumbprint`
+  - `email.sender_user_id`
+- Optional env overrides in `.env`:
+  - `DOCUSEAL_SMTP_PORT` (default `1025`)
+  - `DOCUSEAL_SMTP_FROM` (default `admin@example.org`)
+  - `GRAPH_SENDER_USER_ID` (override sender mailbox for relay container only)
 
 ## 5) Runbook
 

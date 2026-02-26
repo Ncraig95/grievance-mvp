@@ -3,6 +3,8 @@ name: grievance_mvp
 networks:
   grievance-net:
     driver: bridge
+  smtp-relay-net:
+    driver: bridge
 
 services:
   api:
@@ -21,6 +23,22 @@ services:
       - grievance-net
     ports:
       - "127.0.0.1:${API_PORT:-8080}:8080"
+
+  smtp_graph_bridge:
+    build:
+      context: ./apps/smtp_graph_bridge
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      - TZ=UTC
+      - GRAPH_CONFIG_PATH=/app/config/config.yaml
+      - SMTP_BIND_HOST=0.0.0.0
+      - SMTP_BIND_PORT=${DOCUSEAL_SMTP_PORT:-1025}
+    volumes:
+      - ./config:/app/config:ro
+    networks:
+      - smtp-relay-net
 
   docuseal_db:
     image: postgres:16
@@ -48,6 +66,8 @@ services:
     depends_on:
       docuseal_db:
         condition: service_healthy
+      smtp_graph_bridge:
+        condition: service_started
     env_file:
       - ./.env
     environment:
@@ -59,10 +79,17 @@ services:
       - RAILS_LOG_TO_STDOUT=true
       - ADMIN_USERNAME=${DOCUSEAL_ADMIN_EMAIL:-admin@example.org}
       - ADMIN_PASSWORD=${DOCUSEAL_ADMIN_PASSWORD:-CHANGE_ME_please}
+      - SMTP_ADDRESS=smtp_graph_bridge
+      - SMTP_PORT=${DOCUSEAL_SMTP_PORT:-1025}
+      - SMTP_DOMAIN=${DOCUSEAL_HOST:-docuseal.local}
+      - SMTP_ENABLE_STARTTLS=false
+      - SMTP_ENABLE_STARTTLS_AUTO=false
+      - SMTP_FROM=${DOCUSEAL_SMTP_FROM:-admin@example.org}
     volumes:
       - ./data/docuseal:/data
     networks:
       - grievance-net
+      - smtp-relay-net
 
   docuseal_proxy:
     image: nginx:1.27-alpine
