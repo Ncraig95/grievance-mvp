@@ -807,19 +807,30 @@ async def webhook_docuseal(request: Request):
         approval_url = _approval_url(cfg.email.approval_request_url_base, case_id)
         document_link = sharepoint_signed_url or sharepoint_generated_url or docuseal_signing_url
 
-        attachments: list[MailAttachment] | None = None
-        if (
-            cfg.email.artifact_delivery_mode == "attach_pdf"
-            and signed_pdf_bytes
-            and len(signed_pdf_bytes) <= cfg.email.max_attachment_bytes
-        ):
-            attachments = [
+        signer_attachments: list[MailAttachment] | None = None
+        if signed_pdf_bytes and len(signed_pdf_bytes) <= cfg.email.max_attachment_bytes:
+            signer_attachments = [
                 MailAttachment(
                     filename=f"{doc_type}_signed.pdf",
                     content_type="application/pdf",
                     content_bytes=signed_pdf_bytes,
                 )
             ]
+        elif signed_pdf_bytes and len(signed_pdf_bytes) > cfg.email.max_attachment_bytes:
+            await db.add_event(
+                case_id,
+                document_id,
+                "signer_attachment_skipped_too_large",
+                {
+                    "doc_type": doc_type,
+                    "size_bytes": len(signed_pdf_bytes),
+                    "max_attachment_bytes": cfg.email.max_attachment_bytes,
+                },
+            )
+
+        attachments: list[MailAttachment] | None = None
+        if cfg.email.artifact_delivery_mode == "attach_pdf":
+            attachments = signer_attachments
 
         common_context = {
             "case_id": case_id,
@@ -849,7 +860,7 @@ async def webhook_docuseal(request: Request):
                     template_key="completion_signer",
                     context={**common_context, "signer_email": signer},
                     idempotency_key=f"{completion_idem_prefix}:completion_signer:{signer.lower()}",
-                    attachments=attachments if cfg.email.allow_signer_copy_link else None,
+                    attachments=signer_attachments,
                 )
 
             for recipient in cfg.email.internal_recipients:

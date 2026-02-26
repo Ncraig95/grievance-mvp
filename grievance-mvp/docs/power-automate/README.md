@@ -26,11 +26,11 @@ Supported guides:
 4. Parse JSON response
 5. Store `case_id`, `grievance_id`, and optional `documents[0].signing_link`
 
-## Global intake fields required in every payload
+## Global intake fields
 
 - `request_id` (unique per run, idempotency key)
 - `document_command`
-- `contract`
+- `contract` (optional for grievance_id-targeted existing-folder flows; include when contract-specific labeling/rules are needed)
 - `grievant_firstname`
 - `grievant_lastname`
 - `grievant_email`
@@ -43,4 +43,5 @@ Use `template_data` for document-specific placeholders.
 - Do not send `grievance_id` when system is in auto ID mode, except for docs that intentionally target an existing case folder (BellSouth/Mobility meeting requests).
 - Signature tags in DOCX (for example `Sig_es_:signer1:signature`) are template anchors; do not create Forms questions for those.
 - For 3-step sequential signature flows (like 3G3A), pass explicit signer order in `documents[0].signers`.
+- For signed documents, completion emails to signers include the signed PDF attachment when the file is within `email.max_attachment_bytes`.
 - If you retry the same Forms response, keep the same `request_id` to avoid duplicates.

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 
 from ..db.db import Db
 from ..services.contract_timeline import calculate_deadline, deadline_days_for_contract, resolve_contract_and_incident_date
+from ..services.graph_mail import MailAttachment
 from ..services.notification_service import NotificationService
 from .models import ResendNotificationRequest, ResendNotificationResult
 
@@ -28,6 +30,27 @@ def _parse_signers(raw: str | None) -> list[str]:
         return [str(v).strip() for v in values if str(v).strip()]
     except Exception:
         return []
+
+
+def _build_signed_pdf_attachment(
+    *,
+    cfg,  # noqa: ANN001
+    doc_type: str,
+    signed_pdf_path: str | None,
+) -> list[MailAttachment] | None:
+    path = Path(str(signed_pdf_path or "").strip())
+    if not path.exists() or not path.is_file():
+        return None
+    size_bytes = path.stat().st_size
+    if size_bytes <= 0 or size_bytes > cfg.email.max_attachment_bytes:
+        return None
+    return [
+        MailAttachment(
+            filename=f"{doc_type}_signed.pdf",
+            content_type="application/pdf",
+            content_bytes=path.read_bytes(),
+        )
+    ]
 
 
 @router.post(
@@ -57,15 +80,17 @@ async def resend_notification(case_id: str, body: ResendNotificationRequest, req
     signing_url = ""
     document_link = ""
     signer_order_json = ""
+    signed_pdf_path = ""
     if document_id:
         doc_row = await db.fetchone(
-            """SELECT doc_type, docuseal_signing_link, COALESCE(sharepoint_signed_url, sharepoint_generated_url, ''), signer_order_json
+            """SELECT doc_type, docuseal_signing_link, COALESCE(sharepoint_signed_url, sharepoint_generated_url, ''), signer_order_json,
+                      COALESCE(signed_pdf_path, pdf_path, '')
                FROM documents WHERE id=? AND case_id=?""",
             (document_id, case_id),
         )
         if not doc_row:
             raise HTTPException(status_code=404, detail="document_id not found for case")
-        doc_type, signing_url, document_link, signer_order_json = doc_row
+        doc_type, signing_url, document_link, signer_order_json, signed_pdf_path = doc_row
 
     template_key = body.template_key.strip()
     if not template_key:
@@ -118,6 +143,19 @@ async def resend_notification(case_id: str, body: ResendNotificationRequest, req
     }
     base_context.update(body.context_overrides)
 
+    signed_pdf_attachments = _build_signed_pdf_attachment(
+        cfg=cfg,
+        doc_type=doc_type,
+        signed_pdf_path=signed_pdf_path,
+    )
+
+    resend_attachments: list[MailAttachment] | None = None
+    if template_key == "completion_signer":
+        # Always try to include signed artifact copy for signer completion emails.
+        resend_attachments = signed_pdf_attachments
+    elif template_key in {"completion_internal", "completion_approval"} and cfg.email.artifact_delivery_mode == "attach_pdf":
+        resend_attachments = signed_pdf_attachments
+
     out: list[ResendNotificationResult] = []
     for recipient in recipients:
         idem = f"{body.idempotency_key}:{template_key}:{(document_id or '')}:{recipient.lower()}"
@@ -130,6 +168,7 @@ async def resend_notification(case_id: str, body: ResendNotificationRequest, req
                 context=base_context,
                 idempotency_key=idem,
                 allow_resend=True,
+                attachments=resend_attachments,
             )
             out.append(
                 ResendNotificationResult(
