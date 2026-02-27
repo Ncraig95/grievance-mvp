@@ -18,6 +18,7 @@ from .web.routes_approval import router as approval_router
 from .web.routes_health import router as health_router
 from .web.routes_intake import router as intake_router
 from .web.routes_notifications import router as notifications_router
+from .web.routes_ops import router as ops_router
 from .web.routes_webhook import router as webhook_router
 
 
@@ -80,6 +81,7 @@ def create_app() -> FastAPI:
     app.include_router(webhook_router)
     app.include_router(notifications_router)
     app.include_router(approval_router)
+    app.include_router(ops_router)
 
     return app
 

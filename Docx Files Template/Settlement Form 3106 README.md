@@ -10,8 +10,8 @@
 
 ## Recommended Forms questions (with subtext)
 
-Optional fixed flow value (not a Forms question):
-- `contract` (example: `CWA`; not required for grievance_id-based folder routing)
+Set this as a fixed flow value (not a Forms question):
+- `contract` (example: `CWA`)
 
 1. Question: `Existing Grievance ID`
 Type: `Text`

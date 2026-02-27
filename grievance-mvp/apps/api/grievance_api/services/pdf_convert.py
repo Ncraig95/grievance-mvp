@@ -65,14 +65,18 @@ def docx_to_pdf(
             temp_folder = "_docx_pdf_convert"
 
         unique_name = f"{Path(docx_path).stem}-{uuid.uuid4().hex}.docx"
-        pdf_bytes = graph_uploader.convert_local_docx_to_pdf_bytes(
-            site_hostname=graph_site_hostname,
-            site_path=graph_site_path,
-            library=graph_library,
-            temp_folder_path=temp_folder,
-            filename=unique_name,
-            local_path=docx_path,
-        )
+        try:
+            pdf_bytes = graph_uploader.convert_local_docx_to_pdf_bytes(
+                site_hostname=graph_site_hostname,
+                site_path=graph_site_path,
+                library=graph_library,
+                temp_folder_path=temp_folder,
+                filename=unique_name,
+                local_path=docx_path,
+            )
+        except Exception:
+            # Some DOCX templates are rejected by Word Online export; fall back to local conversion.
+            return _docx_to_pdf_libo(docx_path, out_dir, timeout_seconds)
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         pdf_path = str(Path(out_dir) / (Path(docx_path).stem + ".pdf"))
         Path(pdf_path).write_bytes(pdf_bytes)

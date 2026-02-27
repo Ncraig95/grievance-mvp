@@ -191,6 +191,196 @@ class DocuSealPlaceholderAlignmentTests(unittest.TestCase):
         )
         self.assertFalse(signature_true_intent["required"])
 
+    def test_alignment_expands_template_submitters_when_signer_placeholders_exceed_current_count(self) -> None:
+        areas = {
+            (1, "signature"): [
+                {
+                    "x_min": 120.0,
+                    "y_min": 440.0,
+                    "x_max": 260.0,
+                    "y_max": 452.0,
+                    "page": 0,
+                    "page_w": 612.0,
+                    "page_h": 792.0,
+                }
+            ],
+            (2, "signature"): [
+                {
+                    "x_min": 120.0,
+                    "y_min": 470.0,
+                    "x_max": 260.0,
+                    "y_max": 482.0,
+                    "page": 0,
+                    "page_w": 612.0,
+                    "page_h": 792.0,
+                }
+            ],
+            (3, "signature"): [
+                {
+                    "x_min": 120.0,
+                    "y_min": 500.0,
+                    "x_max": 260.0,
+                    "y_max": 512.0,
+                    "page": 0,
+                    "page_w": 612.0,
+                    "page_h": 792.0,
+                }
+            ],
+        }
+        template_two_submitters = {
+            "submitters": [{"uuid": "sub1", "name": "Company"}, {"uuid": "sub2", "name": "Steward"}],
+            "schema": [{"attachment_uuid": "att"}],
+        }
+        template_three_submitters = {
+            "submitters": [
+                {"uuid": "sub1", "name": "Company"},
+                {"uuid": "sub2", "name": "Steward"},
+                {"uuid": "sub3", "name": "Grievant"},
+            ],
+            "schema": [{"attachment_uuid": "att"}],
+        }
+
+        with patch.object(self.client, "_extract_placeholder_areas", return_value=areas):
+            with patch("grievance_api.services.docuseal_client.requests.get") as mock_get:
+                with patch("grievance_api.services.docuseal_client.requests.patch") as mock_patch:
+                    mock_get.side_effect = [
+                        SimpleNamespace(status_code=200, json=lambda: template_two_submitters),
+                        SimpleNamespace(status_code=200, json=lambda: template_three_submitters),
+                    ]
+                    mock_patch.side_effect = [
+                        SimpleNamespace(status_code=200, json=lambda: {"ok": True}),
+                        SimpleNamespace(status_code=200, json=lambda: {"ok": True}),
+                    ]
+
+                    self.client._apply_placeholder_field_alignment(template_id="123", pdf_bytes=b"fake")
+
+        self.assertEqual(mock_patch.call_count, 2)
+        expand_payload = mock_patch.call_args_list[0].kwargs["json"]
+        self.assertEqual(len(expand_payload["submitters"]), 3)
+        self.assertEqual(expand_payload["submitters"][0]["name"], "Company")
+        self.assertEqual(expand_payload["submitters"][1]["name"], "Steward")
+        self.assertEqual(expand_payload["submitters"][2]["name"], "Third Party")
+
+        field_payload = mock_patch.call_args_list[1].kwargs["json"]
+        self.assertEqual(len(field_payload["fields"]), 3)
+        field_submitters = {field["submitter_uuid"] for field in field_payload["fields"]}
+        self.assertSetEqual(field_submitters, {"sub1", "sub2", "sub3"})
+
+    def test_alignment_assigns_unique_default_names_for_signature_and_date_fields(self) -> None:
+        areas = {
+            (1, "signature"): [
+                {
+                    "x_min": 120.0,
+                    "y_min": 440.0,
+                    "x_max": 260.0,
+                    "y_max": 452.0,
+                    "page": 0,
+                    "page_w": 612.0,
+                    "page_h": 792.0,
+                }
+            ],
+            (1, "date"): [
+                {
+                    "x_min": 390.0,
+                    "y_min": 440.0,
+                    "x_max": 500.0,
+                    "y_max": 452.0,
+                    "page": 0,
+                    "page_w": 612.0,
+                    "page_h": 792.0,
+                }
+            ],
+            (2, "signature"): [
+                {
+                    "x_min": 120.0,
+                    "y_min": 470.0,
+                    "x_max": 260.0,
+                    "y_max": 482.0,
+                    "page": 0,
+                    "page_w": 612.0,
+                    "page_h": 792.0,
+                }
+            ],
+            (2, "date"): [
+                {
+                    "x_min": 390.0,
+                    "y_min": 470.0,
+                    "x_max": 500.0,
+                    "y_max": 482.0,
+                    "page": 0,
+                    "page_w": 612.0,
+                    "page_h": 792.0,
+                }
+            ],
+            (3, "signature"): [
+                {
+                    "x_min": 120.0,
+                    "y_min": 500.0,
+                    "x_max": 260.0,
+                    "y_max": 512.0,
+                    "page": 0,
+                    "page_w": 612.0,
+                    "page_h": 792.0,
+                }
+            ],
+            (3, "date"): [
+                {
+                    "x_min": 390.0,
+                    "y_min": 500.0,
+                    "x_max": 500.0,
+                    "y_max": 512.0,
+                    "page": 0,
+                    "page_w": 612.0,
+                    "page_h": 792.0,
+                }
+            ],
+        }
+        template_obj = {
+            "submitters": [
+                {"uuid": "sub1", "name": "Company"},
+                {"uuid": "sub2", "name": "Steward"},
+                {"uuid": "sub3", "name": "Grievant"},
+            ],
+            "schema": [{"attachment_uuid": "att"}],
+        }
+
+        with patch.object(self.client, "_extract_placeholder_areas", return_value=areas):
+            with patch("grievance_api.services.docuseal_client.requests.get") as mock_get:
+                with patch("grievance_api.services.docuseal_client.requests.patch") as mock_patch:
+                    mock_get.return_value = SimpleNamespace(status_code=200, json=lambda: template_obj)
+                    mock_patch.return_value = SimpleNamespace(status_code=200, json=lambda: {"ok": True})
+                    self.client._apply_placeholder_field_alignment(template_id="123", pdf_bytes=b"fake")
+
+        fields = mock_patch.call_args.kwargs["json"]["fields"]
+        self.assertEqual(len(fields), 6)
+        names = [str(field.get("name") or "") for field in fields]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertIn("signer1_signature", names)
+        self.assertIn("signer2_signature", names)
+        self.assertIn("signer3_signature", names)
+        self.assertIn("signer1_date", names)
+        self.assertIn("signer2_date", names)
+        self.assertIn("signer3_date", names)
+
+    def test_create_submission_retries_when_success_response_has_no_submission_id(self) -> None:
+        with patch.object(self.client, "_clone_and_replace_template", return_value="83"):
+            with patch.object(self.client, "_resolve_signer_email_fields", return_value={}):
+                with patch("grievance_api.services.docuseal_client.requests.post") as mock_post:
+                    mock_post.side_effect = [
+                        SimpleNamespace(status_code=200, json=lambda: []),
+                        SimpleNamespace(status_code=200, json=lambda: {"id": "sub123", "slug": "abc"}),
+                    ]
+                    submission = self.client.create_submission(
+                        pdf_bytes=b"%PDF",
+                        alignment_pdf_bytes=b"%PDF",
+                        signers=["one@example.org", "two@example.org", "three@example.org"],
+                        title="settlement",
+                        template_id=2,
+                    )
+
+        self.assertEqual(submission.submission_id, "sub123")
+        self.assertEqual(mock_post.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

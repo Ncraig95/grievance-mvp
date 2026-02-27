@@ -79,6 +79,17 @@ class DocuSealClient:
             cleaned = cleaned[2:-2]
         return cleaned.strip()
 
+    @staticmethod
+    def _default_submitter_name(index: int) -> str:
+        names = {
+            1: "First Party",
+            2: "Second Party",
+            3: "Third Party",
+            4: "Fourth Party",
+            5: "Fifth Party",
+        }
+        return names.get(index, f"Party {index}")
+
     def _headers(self, *, is_json: bool = True) -> dict:
         headers = {"X-Auth-Token": self.api_token}
         if is_json:
@@ -282,7 +293,8 @@ class DocuSealClient:
                 if "max_h" in hint:
                     max_h = float(hint.get("max_h", 0.0))
         elif field_type == "date":
-            min_w, min_h, pad_w, pad_h = 90.0, 18.0, 4.0, 2.0
+            # Keep generic date fields visually aligned with signature rows.
+            min_w, min_h, pad_w, pad_h = 120.0, 26.0, 4.0, 2.0
             y_lift = 6.0
             hint = _DATE_FIELD_DIMENSION_HINTS.get(field_name.lower())
             if hint:
@@ -323,6 +335,9 @@ class DocuSealClient:
         placeholder_areas = self._extract_placeholder_areas(pdf_bytes=pdf_bytes)
         if not placeholder_areas:
             return
+        signer_indexes = sorted({signer_idx for signer_idx, _ in placeholder_areas.keys()})
+        if not signer_indexes:
+            return
 
         template_resp = requests.get(
             f"{self.base_url}/api/templates/{template_id}",
@@ -334,25 +349,86 @@ class DocuSealClient:
 
         template_obj = self._json_object(template_resp)
         submitters = template_obj.get("submitters")
+        fields = template_obj.get("fields")
         schema = template_obj.get("schema")
         if not isinstance(submitters, list) or not submitters:
             return
+        required_submitter_count = max(signer_indexes)
+
+        # DocuSeal API can return submitter names without UUIDs. Restore/preserve UUIDs
+        # from existing fields and synthesize missing ones so submissions remain creatable.
+        field_submitter_uuids: list[str] = []
+        if isinstance(fields, list):
+            for field in fields:
+                if not isinstance(field, dict):
+                    continue
+                su = str(field.get("submitter_uuid") or "").strip()
+                if su and su not in field_submitter_uuids:
+                    field_submitter_uuids.append(su)
+
+        submitter_payload: list[dict[str, str]] = []
+        missing_submitter_uuid = False
+        for idx in range(1, required_submitter_count + 1):
+            existing = submitters[idx - 1] if idx - 1 < len(submitters) and isinstance(submitters[idx - 1], dict) else {}
+            name = str(existing.get("name") or "").strip() or self._default_submitter_name(idx)
+            submitter_uuid = str(existing.get("uuid") or "").strip()
+            if not submitter_uuid and idx - 1 < len(field_submitter_uuids):
+                submitter_uuid = field_submitter_uuids[idx - 1]
+            if not submitter_uuid:
+                submitter_uuid = str(uuid4())
+                missing_submitter_uuid = True
+            submitter_payload.append({"name": name, "uuid": submitter_uuid})
+
+        needs_submitter_patch = (
+            len(submitters) != required_submitter_count
+            or missing_submitter_uuid
+            or any(not str((s.get("uuid") if isinstance(s, dict) else "") or "").strip() for s in submitters[:required_submitter_count])
+        )
+        if needs_submitter_patch:
+            submitter_resp = requests.patch(
+                f"{self.base_url}/api/templates/{template_id}",
+                headers=self._headers(is_json=True),
+                json={"submitters": submitter_payload},
+                timeout=self.timeout,
+            )
+            if not (200 <= submitter_resp.status_code < 300):
+                return
+
+            template_resp = requests.get(
+                f"{self.base_url}/api/templates/{template_id}",
+                headers=self._headers(is_json=False),
+                timeout=self.timeout,
+            )
+            if not (200 <= template_resp.status_code < 300):
+                return
+            template_obj = self._json_object(template_resp)
+            submitters = template_obj.get("submitters")
+            fields = template_obj.get("fields")
+            schema = template_obj.get("schema")
+            if not isinstance(submitters, list) or len(submitters) < required_submitter_count:
+                return
         if not isinstance(schema, list) or not schema or not isinstance(schema[0], dict):
             return
         attachment_uuid = str(schema[0].get("attachment_uuid") or "").strip()
         if not attachment_uuid:
             return
 
+        submitter_uuid_by_index: dict[int, str] = {}
+        for idx in range(1, required_submitter_count + 1):
+            uuid_from_template = ""
+            if idx - 1 < len(submitters) and isinstance(submitters[idx - 1], dict):
+                uuid_from_template = str(submitters[idx - 1].get("uuid") or "").strip()
+            if not uuid_from_template and idx - 1 < len(submitter_payload):
+                uuid_from_template = submitter_payload[idx - 1]["uuid"]
+            if uuid_from_template:
+                submitter_uuid_by_index[idx] = uuid_from_template
+
         rebuilt_fields: list[dict] = []
-        signer_indexes = sorted({signer_idx for signer_idx, _ in placeholder_areas.keys()})
         for signer_idx in signer_indexes:
             submitter_pos = signer_idx - 1
-            if submitter_pos < 0 or submitter_pos >= len(submitters):
+            if submitter_pos < 0:
                 continue
-            submitter = submitters[submitter_pos]
-            if not isinstance(submitter, dict):
-                continue
-            submitter_uuid = str(submitter.get("uuid") or "").strip()
+            submitter_uuid = submitter_uuid_by_index.get(signer_idx, "").strip()
             if not submitter_uuid:
                 continue
 
@@ -370,6 +446,8 @@ class DocuSealClient:
                 if ":" in field_key:
                     field_type, field_name = field_key.split(":", 1)
                 field_name = field_name.strip().lower()
+                if not field_name:
+                    field_name = f"signer{signer_idx}_{field_type}"
 
                 required = True
                 readonly = False
@@ -525,6 +603,29 @@ class DocuSealClient:
                     return item
         return {}
 
+    @staticmethod
+    def _extract_submission_object(payload: object) -> dict:
+        # DocuSeal payload shape varies by endpoint/version:
+        # - direct object: {"id": ...}
+        # - wrapped object: {"data": [{...}]}
+        # - list: [{...}] or [] on failed create
+        if isinstance(payload, dict):
+            if any(key in payload for key in ("id", "submission_id", "submissionId")):
+                return payload
+            for key in ("submission", "data", "result"):
+                if key not in payload:
+                    continue
+                found = DocuSealClient._extract_submission_object(payload.get(key))
+                if found:
+                    return found
+            return {}
+        if isinstance(payload, list):
+            for item in payload:
+                found = DocuSealClient._extract_submission_object(item)
+                if found:
+                    return found
+        return {}
+
     def create_submission(
         self,
         *,
@@ -607,18 +708,36 @@ class DocuSealClient:
                 json=payload,
                 timeout=self.timeout,
             )
-            if 200 <= resp.status_code < 300:
-                submission = self._first_object(resp.json())
+            if not (200 <= resp.status_code < 300):
+                last_err = f"{resp.status_code} {resp.text[:400]}"
+                continue
+
+            try:
+                raw_payload = resp.json()
+            except Exception:
+                last_err = f"{resp.status_code} invalid JSON: {resp.text[:400]}"
+                continue
+
+            candidate = self._extract_submission_object(raw_payload)
+            candidate_id = str(
+                candidate.get("submission_id")
+                or candidate.get("submissionId")
+                or candidate.get("id")
+                or ""
+            ).strip()
+            if candidate_id:
+                submission = candidate
                 break
-            last_err = f"{resp.status_code} {resp.text[:400]}"
+
+            last_err = f"{resp.status_code} submission response missing id: {str(raw_payload)[:400]}"
 
         if submission is None:
             raise RuntimeError(f"DocuSeal submission create failed: {last_err}")
 
         submission_id = str(
-            submission.get("id")
-            or submission.get("submission_id")
+            submission.get("submission_id")
             or submission.get("submissionId")
+            or submission.get("id")
             or ""
         )
         if not submission_id:

@@ -43,9 +43,47 @@ def _event_type(payload: dict) -> str:
     return ""
 
 
+def _status_is_complete(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip().lower()
+    if not normalized:
+        return False
+    return any(token in normalized for token in ("completed", "finished", "done"))
+
+
+def _submission_status(payload: dict) -> str:
+    candidates: list[object] = []
+
+    for key in ("submission_status",):
+        candidates.append(payload.get(key))
+
+    submission = payload.get("submission")
+    if isinstance(submission, dict):
+        candidates.append(submission.get("status"))
+
+    data = payload.get("data")
+    if isinstance(data, dict):
+        candidates.append(data.get("submission_status"))
+        inner_submission = data.get("submission")
+        if isinstance(inner_submission, dict):
+            candidates.append(inner_submission.get("status"))
+
+    for raw in candidates:
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip().lower()
+    return ""
+
+
 def _is_completion_event(payload: dict) -> bool:
     et = _event_type(payload)
-    return any(token in et for token in ("completed", "finished", "done"))
+    if _status_is_complete(et):
+        # form.completed can fire per submitter. Only treat it as final completion
+        # when the enclosing submission status is also completed.
+        if et.startswith("form."):
+            return _status_is_complete(_submission_status(payload))
+        return True
+    return _status_is_complete(_submission_status(payload))
 
 
 def _resolve_submission_id(payload: dict) -> str | None:

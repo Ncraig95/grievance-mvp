@@ -22,6 +22,7 @@ doc_templates:
   grievance_data_request_form: /app/templates/docx/grievance_data_request_form.docx
   statement_of_occurrence: /app/templates/docx/statement_of_occurrence fixed.docx
   settlement_form_3106: /app/templates/docx/Settlement Form 3106.docx
+  settlement_form: /app/templates/docx/Settlement Form 3106.docx
   true_intent_grievance_brief: /app/templates/docx/form_true_intent_grievance_brief_revised_05.20.21.docx
   disciplinary_grievance_brief: /app/templates/docx/form_disciplinary_grievance_brief_revised_05.19.21.docx
   bst_grievance_form_3g3a: /app/templates/docx/bst_grievance_form_3g3a.docx

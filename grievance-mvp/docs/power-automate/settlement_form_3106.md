@@ -23,8 +23,8 @@ Core fields:
 - Grievant email -> `grievant_email` (use same response as `Grievant Signer Email`)
 - Narrative/intake summary (long text) -> `narrative`
 
-Optional system field (not collected in Forms):
-- Contract -> `contract` (optional; set a fixed value in flow such as `CWA` only if you want contract-based labels/deadlines)
+System-set field (not collected in Forms):
+- Contract -> `contract` (set a fixed value in flow, for example `CWA`)
 
 Template-specific (`template_data`):
 - Grievance number (display value on form) -> `grievance_number` (set from `grievance_id` in flow; no separate Forms question)
@@ -127,8 +127,7 @@ Payload key: `template_data.settlement_text`
 
 ## HTTP body skeleton
 
-`contract` is optional for this flow. Folder resolution is based on `grievance_id`.
-If you want contract-based labels/deadlines in downstream notifications, set `contract` as a fixed value in flow.
+`contract` is still required by the intake API. Set it as a fixed value in the flow, not a Forms question.
 For explicit 3-signer routing, send `documents[0].signers` as shown below.
 Set `template_data.grievance_number` from `grievance_id` in flow.
 Use the `Grievant Signer Email` response for both `documents[0].signers[2]` and top-level `grievant_email`.
@@ -137,7 +136,7 @@ Use the `Grievant Signer Email` response for both `documents[0].signers[2]` and 
 {
   "request_id": "forms-<responseId>",
   "grievance_id": "<existing grievance id>",
-  "contract": "<optional: CWA>",
+  "contract": "CWA",
   "grievant_firstname": "<first>",
   "grievant_lastname": "<last>",
   "grievant_email": "<same value as grievant signer email>",

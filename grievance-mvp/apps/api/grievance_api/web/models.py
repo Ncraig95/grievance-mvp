@@ -33,7 +33,7 @@ class IntakeRequest(BaseModel):
     request_id: str = Field(..., description="Client-generated idempotency key")
     grievance_id: str | None = Field(default=None, description="External grievance identifier such as 2026001")
     grievance_number: str | None = None
-    contract: str | None = Field(default=None, description="Optional contract label such as AT&T, COJ, or CWA")
+    contract: str = Field(..., description="AT&T or COJ (or other)")
     grievant_firstname: str
     grievant_lastname: str
     grievant_email: str | None = None

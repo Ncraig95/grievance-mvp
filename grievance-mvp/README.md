@@ -350,6 +350,12 @@ Rules:
 - `POST /cases/{case_id}/notifications/resend`
 - `GET /cases/{case_id}/approval`
 - `POST /cases/{case_id}/approval`
+- `GET /ops` (local/private ops page)
+- `GET /ops/cases/{case_id}/trace` (full trace JSON: docs, events, outbound emails)
+- `POST /ops/cases/{case_id}/resend-signature` (resend signature request emails for case docs)
+- `POST /ops/cases/{case_id}/resubmit` (replay saved intake payload with fresh request_id)
+
+`/ops` endpoints are restricted to loopback/private network clients.
 
 ## 10) Power Automate setup (Statement of Occurrence)
 

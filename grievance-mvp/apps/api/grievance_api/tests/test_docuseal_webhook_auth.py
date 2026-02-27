@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import unittest
 
-from grievance_api.web.routes_webhook import _build_receipt_key, verify_docuseal_webhook
+from grievance_api.web.routes_webhook import _build_receipt_key, _is_completion_event, verify_docuseal_webhook
 
 
 class DocuSealWebhookAuthTests(unittest.TestCase):
@@ -49,6 +49,24 @@ class DocuSealWebhookAuthTests(unittest.TestCase):
             "33",
         )
         self.assertNotEqual(viewed_key, completed_key)
+
+    def test_form_completed_is_not_final_when_submission_still_pending(self) -> None:
+        payload = {
+            "event_type": "form.completed",
+            "data": {"submission": {"status": "pending"}},
+        }
+        self.assertFalse(_is_completion_event(payload))
+
+    def test_form_completed_is_final_when_submission_completed(self) -> None:
+        payload = {
+            "event_type": "form.completed",
+            "data": {"submission": {"status": "completed"}},
+        }
+        self.assertTrue(_is_completion_event(payload))
+
+    def test_submission_completed_is_final(self) -> None:
+        payload = {"event_type": "submission.completed"}
+        self.assertTrue(_is_completion_event(payload))
 
 
 if __name__ == "__main__":
