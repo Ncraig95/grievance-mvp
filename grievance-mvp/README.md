@@ -69,7 +69,9 @@ Approval flow:
 - On self-hosted OSS DocuSeal where `POST /api/templates` is unavailable, app uses a base template (`docuseal.default_template_id`) and performs web `clone_and_replace` with the generated PDF before submission.
   - Requires web credentials (`DOCUSEAL_WEB_EMAIL` / `DOCUSEAL_WEB_PASSWORD`) and HTTPS base (`docuseal.web_base_url` or `docuseal.public_base_url`).
   - If the generated PDF contains Adobe-style placeholders (`{{Sig_es_:signerN:signature}}`, `{{Dte_es_:signerN:date}}`, `{{Eml_es_:signerN:email}}`), app auto-aligns DocuSeal fields to those exact coordinates.
+  - Signature/date placement supports hybrid table behavior (`docuseal.signature_layout_mode=table_preferred`): trace table cell geometry first, then per-form fixed map fallback (`docuseal.signature_table_maps`), then generic placeholder geometry.
   - `Eml_es_` placeholders create locked text fields and are prefilled with the signer email used for that signer slot.
+  - Template IDs can be isolated by form with `docuseal.template_ids.<template_key_or_doc_type>`. Set `docuseal.strict_template_ids=true` to fail closed if a form is missing an explicit mapping.
 - App-owned mail sends signature requests via Graph.
 - Compose also includes a local `smtp_graph_bridge` so DocuSeal SMTP traffic can be relayed through Graph when DocuSeal needs to emit mail.
 - DocuSeal links are rewritten to public HTTPS origin via `docuseal.public_base_url` when needed.
@@ -87,6 +89,7 @@ Approval flow:
   - optional local/NAS mirror copies: `graph.audit_local_backup_roots`
 - Always sends completion notifications to internal recipients.
 - `email.test_mode=true` prefixes outbound subjects with `[TEST]` and adds a test banner to body content.
+- Per-form overrides are supported via `email.test_mode_by_form.<template_key_or_doc_type>`.
 - Sends completion notifications to Derek only when `require_approver_decision=true`.
 - Moves case to `pending_approval` when `require_approver_decision=true`; otherwise auto-approves.
 

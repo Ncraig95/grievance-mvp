@@ -175,6 +175,18 @@ Use the `Grievant Signer Email` response for both `documents[0].signers[2]` and 
 - `{{Sig_es_:signer1:signature}}` -> Company Representative Signature.
 - `{{Sig_es_:signer2:signature}}` -> Steward Signature.
 - `{{Sig_es_:signer3:signature}}` -> Grievant Signature.
+- Placement strategy for signature/date fields in `table_preferred` mode:
+  - first: PDF table-cell tracing (`docuseal.signature_table_trace_enabled` / `signature_table_trace_by_form`)
+  - second: per-form fixed map fallback (`docuseal.signature_table_maps.<form_key>.cells`)
+  - third: generic placeholder-box fallback
+- Settlement row mapping is fixed by row order in the signature table:
+  - row 1 -> signer1 (company/manager)
+  - row 2 -> signer2 (steward)
+  - row 3 -> signer3 (grievant)
+- Troubleshooting placement:
+  - verify the submission used `template_key: settlement_form_3106`
+  - check API logs for `docuseal_signature_placement_strategy` (`trace`, `map_fallback`, `generic_fallback`)
+  - if tracing misses cells, tune `signature_table_maps.settlement_form_3106.cells.*` normalized `x/y/w/h`
 - On completion, the system sends completion/copy email notifications to every signer in `documents[0].signers`.
 - On completion, signer emails include the signed PDF attachment when file size is within `email.max_attachment_bytes`.
 - Optional: keep `email.allow_signer_copy_link: true` if you also want a link in the signer email body.

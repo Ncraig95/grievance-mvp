@@ -35,6 +35,19 @@ def create_app() -> FastAPI:
     app.state.db = Db(cfg.db_path)
     app.state.logger = logging.getLogger("grievance_api")
 
+    signature_table_maps: dict[str, dict[str, dict[str, float | int]]] = {}
+    for form_key, table_map in cfg.docuseal.signature_table_maps.items():
+        signature_table_maps[form_key] = {
+            cell_key: {
+                "page": int(cell.page),
+                "x": float(cell.x),
+                "y": float(cell.y),
+                "w": float(cell.w),
+                "h": float(cell.h),
+            }
+            for cell_key, cell in table_map.cells.items()
+        }
+
     app.state.docuseal = DocuSealClient(
         cfg.docuseal.base_url,
         cfg.docuseal.api_token,
@@ -42,6 +55,11 @@ def create_app() -> FastAPI:
         web_base_url=cfg.docuseal.web_base_url,
         web_email=cfg.docuseal.web_email,
         web_password=cfg.docuseal.web_password,
+        signature_layout_mode=cfg.docuseal.signature_layout_mode,
+        signature_layout_mode_by_form=cfg.docuseal.signature_layout_mode_by_form,
+        signature_table_trace_enabled=cfg.docuseal.signature_table_trace_enabled,
+        signature_table_trace_by_form=cfg.docuseal.signature_table_trace_by_form,
+        signature_table_maps=signature_table_maps,
     )
 
     app.state.graph = GraphUploader(

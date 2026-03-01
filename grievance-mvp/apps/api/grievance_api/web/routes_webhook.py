@@ -899,6 +899,7 @@ async def webhook_docuseal(request: Request):
                     context={**common_context, "signer_email": signer},
                     idempotency_key=f"{completion_idem_prefix}:completion_signer:{signer.lower()}",
                     attachments=signer_attachments,
+                    form_key=(template_key or doc_type),
                 )
 
             for recipient in cfg.email.internal_recipients:
@@ -910,6 +911,7 @@ async def webhook_docuseal(request: Request):
                     context=common_context,
                     idempotency_key=f"{completion_idem_prefix}:completion_internal:{recipient.lower()}",
                     attachments=attachments,
+                    form_key=(template_key or doc_type),
                 )
 
             if cfg.require_approver_decision and cfg.email.derek_email:
@@ -921,6 +923,7 @@ async def webhook_docuseal(request: Request):
                     context=common_context,
                     idempotency_key=f"{completion_idem_prefix}:completion_approval:{cfg.email.derek_email.lower()}",
                     attachments=attachments,
+                    form_key=(template_key or doc_type),
                 )
 
         remaining = await db.fetchone(

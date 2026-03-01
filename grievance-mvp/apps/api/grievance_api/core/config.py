@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -37,6 +42,26 @@ class DocuSealConfig:
     web_password: str | None
     default_template_id: int | None
     template_ids: dict[str, int]
+    strict_template_ids: bool = False
+    signature_layout_mode: str = "table_preferred"
+    signature_layout_mode_by_form: dict[str, str] = field(default_factory=dict)
+    signature_table_trace_enabled: bool = True
+    signature_table_trace_by_form: dict[str, bool] = field(default_factory=dict)
+    signature_table_maps: dict[str, "FormSignatureTableMap"] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SignatureTableCell:
+    page: int
+    x: float
+    y: float
+    w: float
+    h: float
+
+
+@dataclass(frozen=True)
+class FormSignatureTableMap:
+    cells: dict[str, SignatureTableCell] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -53,6 +78,7 @@ class EmailConfig:
     resend_cooldown_seconds: int
     dry_run: bool
     test_mode: bool = False
+    test_mode_by_form: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -199,6 +225,34 @@ def _as_int_value_mapping(value: object) -> dict[str, int]:
     return out
 
 
+def _as_bool_mapping(value: object) -> dict[str, bool]:
+    if not isinstance(value, dict):
+        return {}
+
+    def _to_bool(raw: object) -> bool | None:
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, int):
+            return raw != 0
+        text = str(raw or "").strip().lower()
+        if text in {"true", "1", "yes", "y", "on"}:
+            return True
+        if text in {"false", "0", "no", "n", "off"}:
+            return False
+        return None
+
+    out: dict[str, bool] = {}
+    for k, v in value.items():
+        key = str(k).strip()
+        if not key:
+            continue
+        parsed = _to_bool(v)
+        if parsed is None:
+            continue
+        out[key] = parsed
+    return out
+
+
 def _normalize_delivery_mode(value: object) -> str:
     mode = str(value or "sharepoint_link").strip().lower()
     if mode not in {"sharepoint_link", "attach_pdf"}:
@@ -233,6 +287,95 @@ def _normalize_docx_pdf_engine(value: object) -> str:
     if engine in {"graph_word_online", "graph", "microsoft_word_online", "word_online"}:
         return "graph_word_online"
     return "libreoffice"
+
+
+def _normalize_signature_layout_mode(value: object) -> str:
+    mode = str(value or "table_preferred").strip().lower()
+    if mode not in {"table_preferred", "generic"}:
+        return "table_preferred"
+    return mode
+
+
+def _as_signature_layout_mapping(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in value.items():
+        key = str(k).strip()
+        if not key:
+            continue
+        out[key] = _normalize_signature_layout_mode(v)
+    return out
+
+
+def _is_valid_cell_key(raw_key: object) -> bool:
+    key = str(raw_key or "").strip().lower()
+    return bool(key) and bool(re.match(r"^signer\d+_(signature|date)$", key))
+
+
+def _parse_signature_cell(raw: object) -> SignatureTableCell | None:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        page = int(raw.get("page", 0))
+        x = float(raw["x"])
+        y = float(raw["y"])
+        w = float(raw["w"])
+        h = float(raw["h"])
+    except Exception:
+        return None
+    if page < 0:
+        return None
+    if x < 0.0 or y < 0.0 or w <= 0.0 or h <= 0.0:
+        return None
+    if (x + w) > 1.0 or (y + h) > 1.0:
+        return None
+    return SignatureTableCell(page=page, x=x, y=y, w=w, h=h)
+
+
+def _as_signature_table_maps(value: object) -> dict[str, FormSignatureTableMap]:
+    if not isinstance(value, dict):
+        return {}
+
+    out: dict[str, FormSignatureTableMap] = {}
+    for raw_form_key, raw_form_map in value.items():
+        form_key = str(raw_form_key or "").strip()
+        if not form_key:
+            continue
+        if not isinstance(raw_form_map, dict):
+            _LOG.warning("config_signature_table_map_invalid_form", extra={"form_key": form_key})
+            continue
+
+        raw_cells = raw_form_map.get("cells", raw_form_map)
+        if not isinstance(raw_cells, dict):
+            _LOG.warning("config_signature_table_map_missing_cells", extra={"form_key": form_key})
+            continue
+
+        cells: dict[str, SignatureTableCell] = {}
+        for raw_cell_key, raw_cell in raw_cells.items():
+            cell_key = str(raw_cell_key or "").strip().lower()
+            if not _is_valid_cell_key(cell_key):
+                _LOG.warning(
+                    "config_signature_table_map_invalid_cell_key",
+                    extra={"form_key": form_key, "cell_key": str(raw_cell_key or "")},
+                )
+                continue
+
+            parsed = _parse_signature_cell(raw_cell)
+            if not parsed:
+                _LOG.warning(
+                    "config_signature_table_map_invalid_cell",
+                    extra={"form_key": form_key, "cell_key": cell_key},
+                )
+                continue
+            cells[cell_key] = parsed
+
+        if not cells:
+            _LOG.warning("config_signature_table_map_empty", extra={"form_key": form_key})
+            continue
+
+        out[form_key] = FormSignatureTableMap(cells=cells)
+    return out
 
 
 def _normalize_grievance_fallback(value: object) -> str | None:
@@ -358,6 +501,16 @@ def load_config(path: str) -> AppConfig:
                 else None
             ),
             template_ids=_as_int_mapping(docuseal_raw.get("template_ids")),
+            strict_template_ids=bool(docuseal_raw.get("strict_template_ids", False)),
+            signature_layout_mode=_normalize_signature_layout_mode(
+                docuseal_raw.get("signature_layout_mode", "table_preferred")
+            ),
+            signature_layout_mode_by_form=_as_signature_layout_mapping(
+                docuseal_raw.get("signature_layout_mode_by_form")
+            ),
+            signature_table_trace_enabled=bool(docuseal_raw.get("signature_table_trace_enabled", True)),
+            signature_table_trace_by_form=_as_bool_mapping(docuseal_raw.get("signature_table_trace_by_form")),
+            signature_table_maps=_as_signature_table_maps(docuseal_raw.get("signature_table_maps")),
         ),
         email=EmailConfig(
             enabled=bool(email_raw.get("enabled", bool(sender_user_id))),
@@ -372,6 +525,7 @@ def load_config(path: str) -> AppConfig:
             resend_cooldown_seconds=int(email_raw.get("resend_cooldown_seconds", 300)),
             dry_run=bool(email_raw.get("dry_run", False)),
             test_mode=bool(email_raw.get("test_mode", False)),
+            test_mode_by_form=_as_bool_mapping(email_raw.get("test_mode_by_form")),
         ),
         grievance_id=GrievanceIdConfig(
             mode=_normalize_grievance_mode(grievance_raw.get("mode")),

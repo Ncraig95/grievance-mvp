@@ -91,6 +91,31 @@ docuseal:
   web_email: ""     # optional; fallback uses DOCUSEAL_WEB_EMAIL or DOCUSEAL_ADMIN_EMAIL
   web_password: ""  # optional; fallback uses DOCUSEAL_WEB_PASSWORD or DOCUSEAL_ADMIN_PASSWORD
   default_template_id: 1  # base template id with signature fields; app clones+replaces with generated PDF
+  # Optional strict mode to force per-form template mapping.
+  strict_template_ids: false
+  # Global signature placement mode:
+  # - table_preferred: trace table cell geometry first, then per-form map fallback, then generic placeholder geometry
+  # - generic: always use placeholder-box geometry
+  signature_layout_mode: table_preferred
+  # Optional per-form override (keys are template_key or doc_type).
+  signature_layout_mode_by_form: {}
+  # Global toggle for table tracing in table_preferred mode.
+  signature_table_trace_enabled: true
+  # Optional per-form override for tracing behavior.
+  signature_table_trace_by_form: {}
+  # Optional deterministic per-form fallback map (normalized coordinates).
+  # Used when table tracing does not confidently map all required signer cells.
+  signature_table_maps:
+    settlement_form_3106:
+      cells:
+        signer1_signature: { page: 0, x: 0.40, y: 0.67, w: 0.30, h: 0.05 }
+        signer1_date: { page: 0, x: 0.72, y: 0.67, w: 0.20, h: 0.05 }
+        signer2_signature: { page: 0, x: 0.40, y: 0.74, w: 0.30, h: 0.05 }
+        signer2_date: { page: 0, x: 0.72, y: 0.74, w: 0.20, h: 0.05 }
+        signer3_signature: { page: 0, x: 0.40, y: 0.81, w: 0.30, h: 0.05 }
+        signer3_date: { page: 0, x: 0.72, y: 0.81, w: 0.20, h: 0.05 }
+  # Optional per-form template ids (keys are template_key or doc_type).
+  # In strict mode this must include every form that requires signature dispatch.
   template_ids: {}
 graph:
   tenant_id: REPLACE
@@ -116,6 +141,8 @@ graph:
 email:
   enabled: true
   test_mode: false
+  # Optional per-form test mode overrides (keys are template_key or doc_type).
+  test_mode_by_form: {}
   sender_user_id: grievance-mailbox@REPLACE.onmicrosoft.com
   templates_dir: /app/templates/email
   internal_recipients:

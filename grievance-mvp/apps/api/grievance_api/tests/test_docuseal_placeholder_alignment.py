@@ -381,6 +381,117 @@ class DocuSealPlaceholderAlignmentTests(unittest.TestCase):
         self.assertEqual(submission.submission_id, "sub123")
         self.assertEqual(mock_post.call_count, 2)
 
+    def test_table_trace_overrides_align_rows_and_columns(self) -> None:
+        areas = {
+            (1, "signature"): [
+                {"x_min": 250.0, "y_min": 650.0, "x_max": 350.0, "y_max": 662.0, "page": 0, "page_w": 612.0, "page_h": 792.0}
+            ],
+            (1, "date"): [
+                {"x_min": 435.0, "y_min": 650.0, "x_max": 510.0, "y_max": 662.0, "page": 0, "page_w": 612.0, "page_h": 792.0}
+            ],
+            (2, "signature"): [
+                {"x_min": 250.0, "y_min": 546.0, "x_max": 350.0, "y_max": 558.0, "page": 0, "page_w": 612.0, "page_h": 792.0}
+            ],
+            (2, "date"): [
+                {"x_min": 435.0, "y_min": 546.0, "x_max": 510.0, "y_max": 558.0, "page": 0, "page_w": 612.0, "page_h": 792.0}
+            ],
+            (3, "signature"): [
+                {"x_min": 250.0, "y_min": 598.0, "x_max": 350.0, "y_max": 610.0, "page": 0, "page_w": 612.0, "page_h": 792.0}
+            ],
+            (3, "date"): [
+                {"x_min": 435.0, "y_min": 598.0, "x_max": 510.0, "y_max": 610.0, "page": 0, "page_w": 612.0, "page_h": 792.0}
+            ],
+        }
+        segments = {
+            0: {
+                "page_w": 612.0,
+                "page_h": 792.0,
+                "vertical": [
+                    {"x": 240.0, "y_min": 520.0, "y_max": 700.0},
+                    {"x": 420.0, "y_min": 520.0, "y_max": 700.0},
+                    {"x": 530.0, "y_min": 520.0, "y_max": 700.0},
+                ],
+                "horizontal": [
+                    {"y": 520.0, "x_min": 240.0, "x_max": 530.0},
+                    {"y": 580.0, "x_min": 240.0, "x_max": 530.0},
+                    {"y": 640.0, "x_min": 240.0, "x_max": 530.0},
+                    {"y": 700.0, "x_min": 240.0, "x_max": 530.0},
+                ],
+            }
+        }
+
+        with patch.object(self.client, "_extract_pdf_table_segments", return_value=segments):
+            overrides, reason = self.client._build_table_trace_overrides(
+                placeholder_areas=areas,
+                pdf_bytes=b"fake",
+                form_key="settlement_form_3106",
+            )
+
+        self.assertEqual(reason, "trace_success")
+        self.assertEqual(len(overrides), 6)
+        sig1 = overrides[(1, "signature")][0]
+        sig2 = overrides[(2, "signature")][0]
+        sig3 = overrides[(3, "signature")][0]
+        date1 = overrides[(1, "date")][0]
+        self.assertLess(sig1["x_min"], sig1["x_max"])
+        self.assertLess(date1["x_min"], date1["x_max"])
+        self.assertLess(sig1["x_max"], date1["x_min"])
+        self.assertLess(sig1["y_min"], sig2["y_min"])
+        self.assertLess(sig2["y_min"], sig3["y_min"])
+
+    def test_resolve_overrides_uses_map_fallback_when_trace_fails(self) -> None:
+        mapped_client = DocuSealClient(
+            "http://docuseal:3000",
+            "token",
+            signature_table_maps={
+                "settlement_form_3106": {
+                    "signer1_signature": {"page": 0, "x": 0.40, "y": 0.67, "w": 0.30, "h": 0.05},
+                    "signer1_date": {"page": 0, "x": 0.72, "y": 0.67, "w": 0.20, "h": 0.05},
+                    "signer2_signature": {"page": 0, "x": 0.40, "y": 0.74, "w": 0.30, "h": 0.05},
+                    "signer2_date": {"page": 0, "x": 0.72, "y": 0.74, "w": 0.20, "h": 0.05},
+                    "signer3_signature": {"page": 0, "x": 0.40, "y": 0.81, "w": 0.30, "h": 0.05},
+                    "signer3_date": {"page": 0, "x": 0.72, "y": 0.81, "w": 0.20, "h": 0.05},
+                }
+            },
+        )
+        areas = {
+            (1, "signature"): [{"x_min": 250.0, "y_min": 546.0, "x_max": 350.0, "y_max": 558.0, "page": 0, "page_w": 612.0, "page_h": 792.0}],
+            (1, "date"): [{"x_min": 435.0, "y_min": 546.0, "x_max": 510.0, "y_max": 558.0, "page": 0, "page_w": 612.0, "page_h": 792.0}],
+            (2, "signature"): [{"x_min": 250.0, "y_min": 598.0, "x_max": 350.0, "y_max": 610.0, "page": 0, "page_w": 612.0, "page_h": 792.0}],
+            (2, "date"): [{"x_min": 435.0, "y_min": 598.0, "x_max": 510.0, "y_max": 610.0, "page": 0, "page_w": 612.0, "page_h": 792.0}],
+            (3, "signature"): [{"x_min": 250.0, "y_min": 650.0, "x_max": 350.0, "y_max": 662.0, "page": 0, "page_w": 612.0, "page_h": 792.0}],
+            (3, "date"): [{"x_min": 435.0, "y_min": 650.0, "x_max": 510.0, "y_max": 662.0, "page": 0, "page_w": 612.0, "page_h": 792.0}],
+        }
+
+        with patch.object(mapped_client, "_build_table_trace_overrides", return_value=({}, "trace_no_page_segments")):
+            overrides, strategy, reason = mapped_client._resolve_signature_table_overrides(
+                placeholder_areas=areas,
+                pdf_bytes=b"fake",
+                form_key="settlement_form_3106",
+            )
+
+        self.assertEqual(strategy, "map_fallback")
+        self.assertEqual(reason, "map_success")
+        self.assertEqual(len(overrides), 6)
+        sig1 = overrides[(1, "signature")][0]
+        self.assertAlmostEqual(sig1["x_min"], 0.40 * 612.0, places=3)
+
+    def test_resolve_overrides_uses_generic_when_trace_and_map_unavailable(self) -> None:
+        areas = {
+            (1, "signature"): [{"x_min": 250.0, "y_min": 546.0, "x_max": 350.0, "y_max": 558.0, "page": 0, "page_w": 612.0, "page_h": 792.0}],
+            (1, "date"): [{"x_min": 435.0, "y_min": 546.0, "x_max": 510.0, "y_max": 558.0, "page": 0, "page_w": 612.0, "page_h": 792.0}],
+        }
+        with patch.object(self.client, "_build_table_trace_overrides", return_value=({}, "trace_no_page_segments")):
+            overrides, strategy, reason = self.client._resolve_signature_table_overrides(
+                placeholder_areas=areas,
+                pdf_bytes=b"fake",
+                form_key="settlement_form_3106",
+            )
+
+        self.assertEqual(overrides, {})
+        self.assertEqual(strategy, "generic_fallback")
+        self.assertIn("trace_reason=trace_no_page_segments", reason)
+
 
 if __name__ == "__main__":
     unittest.main()

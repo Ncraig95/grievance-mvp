@@ -77,20 +77,21 @@ async def resend_notification(case_id: str, body: ResendNotificationRequest, req
 
     document_id = body.document_id
     doc_type = ""
+    document_template_key = ""
     signing_url = ""
     document_link = ""
     signer_order_json = ""
     signed_pdf_path = ""
     if document_id:
         doc_row = await db.fetchone(
-            """SELECT doc_type, docuseal_signing_link, COALESCE(sharepoint_signed_url, sharepoint_generated_url, ''), signer_order_json,
+            """SELECT doc_type, template_key, docuseal_signing_link, COALESCE(sharepoint_signed_url, sharepoint_generated_url, ''), signer_order_json,
                       COALESCE(signed_pdf_path, pdf_path, '')
                FROM documents WHERE id=? AND case_id=?""",
             (document_id, case_id),
         )
         if not doc_row:
             raise HTTPException(status_code=404, detail="document_id not found for case")
-        doc_type, signing_url, document_link, signer_order_json, signed_pdf_path = doc_row
+        doc_type, document_template_key, signing_url, document_link, signer_order_json, signed_pdf_path = doc_row
 
     template_key = body.template_key.strip()
     if not template_key:
@@ -169,6 +170,7 @@ async def resend_notification(case_id: str, body: ResendNotificationRequest, req
                 idempotency_key=idem,
                 allow_resend=True,
                 attachments=resend_attachments,
+                form_key=(document_template_key or doc_type or ""),
             )
             out.append(
                 ResendNotificationResult(

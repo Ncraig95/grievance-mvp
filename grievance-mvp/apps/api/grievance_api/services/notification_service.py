@@ -45,6 +45,20 @@ class NotificationService:
         self.template_store = template_store
         self.email_cfg = email_cfg
 
+    def _resolve_test_mode(self, *, form_key: str | None, override: bool | None) -> bool:
+        if override is not None:
+            return bool(override)
+
+        if form_key:
+            key = str(form_key).strip()
+            if key in self.email_cfg.test_mode_by_form:
+                return bool(self.email_cfg.test_mode_by_form[key])
+            lowered = key.lower()
+            if lowered in self.email_cfg.test_mode_by_form:
+                return bool(self.email_cfg.test_mode_by_form[lowered])
+
+        return bool(self.email_cfg.test_mode)
+
     async def send_one(
         self,
         *,
@@ -56,6 +70,8 @@ class NotificationService:
         document_id: str | None = None,
         attachments: list[MailAttachment] | None = None,
         allow_resend: bool = False,
+        form_key: str | None = None,
+        test_mode_override: bool | None = None,
     ) -> NotificationResult:
         recipient = recipient_email.strip()
         if not recipient:
@@ -131,7 +147,7 @@ class NotificationService:
         subject = rendered.subject
         text_body = rendered.text_body
         html_body = rendered.html_body
-        if self.email_cfg.test_mode:
+        if self._resolve_test_mode(form_key=form_key, override=test_mode_override):
             if not subject.upper().startswith("[TEST]"):
                 subject = f"[TEST] {subject}"
             test_text_banner = "TEST MESSAGE: this is a test workflow email.\n\n"

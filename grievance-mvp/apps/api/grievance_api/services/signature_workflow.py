@@ -14,11 +14,31 @@ class SignatureDispatchOutcome:
     signing_link: str | None = None
 
 
+def resolve_form_key(*, template_key: str | None, doc_type: str) -> str:
+    for key in (template_key, doc_type):
+        text = str(key or "").strip()
+        if text:
+            return text
+    return "document"
+
+
 def resolve_docuseal_template_id(cfg, *, template_key: str | None, doc_type: str) -> int | None:  # noqa: ANN001
-    if template_key and template_key in cfg.docuseal.template_ids:
-        return cfg.docuseal.template_ids[template_key]
-    if doc_type in cfg.docuseal.template_ids:
-        return cfg.docuseal.template_ids[doc_type]
+    lookup_order: list[str] = []
+    for key in (template_key, doc_type):
+        text = str(key or "").strip()
+        if text and text not in lookup_order:
+            lookup_order.append(text)
+
+    for key in lookup_order:
+        if key in cfg.docuseal.template_ids:
+            return cfg.docuseal.template_ids[key]
+
+    if getattr(cfg.docuseal, "strict_template_ids", False):
+        form_key = resolve_form_key(template_key=template_key, doc_type=doc_type)
+        raise RuntimeError(
+            f"No DocuSeal template id configured for form '{form_key}'. "
+            "Add docuseal.template_ids.<form_key> in config."
+        )
     return cfg.docuseal.default_template_id
 
 
@@ -77,6 +97,7 @@ async def send_document_for_signature(
         return SignatureDispatchOutcome(status="failed")
 
     try:
+        form_key = resolve_form_key(template_key=template_key, doc_type=doc_type)
         submission = docuseal.create_submission(
             pdf_bytes=pdf_bytes,
             alignment_pdf_bytes=alignment_pdf_bytes,
@@ -89,6 +110,7 @@ async def send_document_for_signature(
                 "doc_type": doc_type,
             },
             template_id=resolve_docuseal_template_id(cfg, template_key=template_key, doc_type=doc_type),
+            form_key=form_key,
         )
         signing_link = submission.signing_link
         status = "sent_for_signature"
@@ -129,6 +151,7 @@ async def send_document_for_signature(
                             "status": status,
                         },
                         idempotency_key=f"{idempotency_prefix}:signature_request:{signer.lower()}",
+                        form_key=form_key,
                     )
                 except Exception:
                     await db.add_event(
