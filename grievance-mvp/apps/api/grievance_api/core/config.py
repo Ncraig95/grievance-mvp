@@ -43,10 +43,15 @@ class DocuSealConfig:
     default_template_id: int | None
     template_ids: dict[str, int]
     strict_template_ids: bool = False
+    submitters_order: str = "preserved"
+    submitters_order_by_form: dict[str, str] = field(default_factory=dict)
     signature_layout_mode: str = "table_preferred"
     signature_layout_mode_by_form: dict[str, str] = field(default_factory=dict)
     signature_table_trace_enabled: bool = True
     signature_table_trace_by_form: dict[str, bool] = field(default_factory=dict)
+    signature_table_guard_enabled: bool = True
+    signature_table_guard_tolerance: float = 0.015
+    signature_table_guard_min_gap: float = 0.005
     signature_table_maps: dict[str, "FormSignatureTableMap"] = field(default_factory=dict)
 
 
@@ -289,11 +294,37 @@ def _normalize_docx_pdf_engine(value: object) -> str:
     return "libreoffice"
 
 
+def _as_float(value: object, default: float) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
 def _normalize_signature_layout_mode(value: object) -> str:
     mode = str(value or "table_preferred").strip().lower()
     if mode not in {"table_preferred", "generic"}:
         return "table_preferred"
     return mode
+
+
+def _normalize_submitters_order(value: object) -> str:
+    mode = str(value or "preserved").strip().lower()
+    if mode not in {"preserved", "random"}:
+        return "preserved"
+    return mode
+
+
+def _as_submitters_order_mapping(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in value.items():
+        key = str(k).strip()
+        if not key:
+            continue
+        out[key] = _normalize_submitters_order(v)
+    return out
 
 
 def _as_signature_layout_mapping(value: object) -> dict[str, str]:
@@ -502,6 +533,12 @@ def load_config(path: str) -> AppConfig:
             ),
             template_ids=_as_int_mapping(docuseal_raw.get("template_ids")),
             strict_template_ids=bool(docuseal_raw.get("strict_template_ids", False)),
+            submitters_order=_normalize_submitters_order(
+                docuseal_raw.get("submitters_order", "preserved")
+            ),
+            submitters_order_by_form=_as_submitters_order_mapping(
+                docuseal_raw.get("submitters_order_by_form")
+            ),
             signature_layout_mode=_normalize_signature_layout_mode(
                 docuseal_raw.get("signature_layout_mode", "table_preferred")
             ),
@@ -510,6 +547,15 @@ def load_config(path: str) -> AppConfig:
             ),
             signature_table_trace_enabled=bool(docuseal_raw.get("signature_table_trace_enabled", True)),
             signature_table_trace_by_form=_as_bool_mapping(docuseal_raw.get("signature_table_trace_by_form")),
+            signature_table_guard_enabled=bool(docuseal_raw.get("signature_table_guard_enabled", True)),
+            signature_table_guard_tolerance=max(
+                0.0,
+                _as_float(docuseal_raw.get("signature_table_guard_tolerance", 0.015), 0.015),
+            ),
+            signature_table_guard_min_gap=max(
+                0.0,
+                _as_float(docuseal_raw.get("signature_table_guard_min_gap", 0.005), 0.005),
+            ),
             signature_table_maps=_as_signature_table_maps(docuseal_raw.get("signature_table_maps")),
         ),
         email=EmailConfig(

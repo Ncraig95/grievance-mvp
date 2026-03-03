@@ -113,6 +113,27 @@ async def send_document_for_signature(
             form_key=form_key,
         )
         signing_link = submission.signing_link
+        signer_links_by_email: dict[str, str] = {}
+        try:
+            signer_links_by_email = docuseal.extract_signing_links_by_email(submission.raw)
+        except Exception:
+            signer_links_by_email = {}
+        if not signer_links_by_email:
+            try:
+                signer_links_by_email = docuseal.fetch_signing_links_by_email(submission_id=submission.submission_id)
+            except Exception:
+                signer_links_by_email = {}
+        await db.add_event(
+            case_id,
+            document_id,
+            "signature_links_resolved",
+            {
+                "submission_id": submission.submission_id,
+                "signer_count": len(normalized_signers),
+                "resolved_link_count": len(signer_links_by_email),
+                "has_fallback_link": bool(signing_link),
+            },
+        )
         status = "sent_for_signature"
         await db.exec(
             """UPDATE documents
@@ -133,8 +154,12 @@ async def send_document_for_signature(
             {"submission_id": submission.submission_id, "doc_type": doc_type},
         )
 
-        if cfg.email.enabled and signing_link:
+        if cfg.email.enabled and (signing_link or signer_links_by_email):
             for signer in normalized_signers:
+                signer_key = signer.strip().lower()
+                signer_link = signer_links_by_email.get(signer_key) or signing_link
+                if not signer_link:
+                    continue
                 try:
                     await notifications.send_one(
                         case_id=case_id,
@@ -146,7 +171,7 @@ async def send_document_for_signature(
                             "grievance_id": grievance_id,
                             "document_id": document_id,
                             "document_type": doc_type,
-                            "docuseal_signing_url": signing_link,
+                            "docuseal_signing_url": signer_link,
                             "signer_email": signer,
                             "status": status,
                         },

@@ -79,19 +79,29 @@ async def resend_notification(case_id: str, body: ResendNotificationRequest, req
     doc_type = ""
     document_template_key = ""
     signing_url = ""
+    docuseal_submission_id = ""
     document_link = ""
     signer_order_json = ""
     signed_pdf_path = ""
     if document_id:
         doc_row = await db.fetchone(
-            """SELECT doc_type, template_key, docuseal_signing_link, COALESCE(sharepoint_signed_url, sharepoint_generated_url, ''), signer_order_json,
+            """SELECT doc_type, template_key, COALESCE(docuseal_submission_id, ''), docuseal_signing_link,
+                      COALESCE(sharepoint_signed_url, sharepoint_generated_url, ''), signer_order_json,
                       COALESCE(signed_pdf_path, pdf_path, '')
                FROM documents WHERE id=? AND case_id=?""",
             (document_id, case_id),
         )
         if not doc_row:
             raise HTTPException(status_code=404, detail="document_id not found for case")
-        doc_type, document_template_key, signing_url, document_link, signer_order_json, signed_pdf_path = doc_row
+        (
+            doc_type,
+            document_template_key,
+            docuseal_submission_id,
+            signing_url,
+            document_link,
+            signer_order_json,
+            signed_pdf_path,
+        ) = doc_row
 
     template_key = body.template_key.strip()
     if not template_key:
@@ -157,16 +167,28 @@ async def resend_notification(case_id: str, body: ResendNotificationRequest, req
     elif template_key in {"completion_internal", "completion_approval"} and cfg.email.artifact_delivery_mode == "attach_pdf":
         resend_attachments = signed_pdf_attachments
 
+    per_signer_links: dict[str, str] = {}
+    if template_key in {"signature_request", "reminder_signature"} and document_id and docuseal_submission_id:
+        try:
+            docuseal = request.app.state.docuseal
+            per_signer_links = docuseal.fetch_signing_links_by_email(submission_id=docuseal_submission_id)
+        except Exception:
+            per_signer_links = {}
+
     out: list[ResendNotificationResult] = []
     for recipient in recipients:
         idem = f"{body.idempotency_key}:{template_key}:{(document_id or '')}:{recipient.lower()}"
+        context = dict(base_context)
+        recipient_link = per_signer_links.get(recipient.lower())
+        if recipient_link:
+            context["docuseal_signing_url"] = recipient_link
         try:
             result = await notifications.send_one(
                 case_id=case_id,
                 document_id=document_id,
                 recipient_email=recipient,
                 template_key=template_key,
-                context=base_context,
+                context=context,
                 idempotency_key=idem,
                 allow_resend=True,
                 attachments=resend_attachments,

@@ -74,6 +74,16 @@ _BELL_SOUTH_TBD_KEYS = (
 )
 _CHECKED_MARK = "☒"
 _UNCHECKED_MARK = "☐"
+_3G3A_STAGE_INTERACTIVE_MARK_FIELDS = (
+    "q8_is_accepted_mark",
+    "q8_is_rejected_mark",
+    "q8_is_appealed_mark",
+    "q8_is_requested_mediation_mark",
+    "q10_company_is_yes_mark",
+    "q10_company_is_no_mark",
+    "q10_union_is_yes_mark",
+    "q10_union_is_no_mark",
+)
 _3G3A_STAGE2_DATE_MARKER = "{{Dte_es_:signer2:q5_l2_date}}"
 _3G3A_WRAP_POLICIES: dict[str, dict[str, int]] = {
     # Render-time safety rails for long free-text blocks in fixed form sections.
@@ -467,6 +477,11 @@ def _apply_dynamic_statement_context(context: dict[str, object]) -> None:
     )
 
 
+def _is_settlement_doc_type(doc_type: str) -> bool:
+    normalized = (doc_type or "").strip().lower()
+    return normalized in {"settlement_form_3106", "settlement_form"}
+
+
 def _apply_dynamic_settlement_context(context: dict[str, object]) -> None:
     issue_article = _pick_first_non_empty_context_value(context, ("issue_article", "article"))
     context.setdefault("issue_article", issue_article)
@@ -711,6 +726,11 @@ def _apply_3g3a_defaults(*, context: dict[str, object], grievance_id: str) -> No
             break_on_hyphens=False,
         )
         context[field_key] = wrapped
+
+
+def _clear_3g3a_stage_interactive_marks(*, context: dict[str, object]) -> None:
+    for marker_key in _3G3A_STAGE_INTERACTIVE_MARK_FIELDS:
+        context[marker_key] = _UNCHECKED_MARK
 
 
 def _clamp_with_ellipsis(value: str, max_chars: int) -> str:
@@ -1181,6 +1201,8 @@ def _build_template_context(
         "created_at_utc": utcnow(),
     }
     protected_keys = set(context.keys())
+    if not str(context.get("grievance_number", "") or "").strip():
+        protected_keys.discard("grievance_number")
 
     for key, raw_val in merged_fields.items():
         value = _coerce_context_value(raw_val)
@@ -1192,6 +1214,15 @@ def _build_template_context(
 
         if normalized and normalized not in context:
             context[normalized] = value
+
+    if _is_settlement_doc_type(doc_type):
+        grievance_display_number = _pick_first_non_empty_context_value(
+            context,
+            ("grievance_number", "grievance number"),
+        )
+        if not grievance_display_number:
+            grievance_display_number = str(grievance_id or "").strip()
+        context["grievance_number"] = grievance_display_number
 
     _apply_statement_defaults(
         context=context,
@@ -1578,6 +1609,11 @@ async def intake(request: Request):
             doc_type=doc_type,
             grievance_number=grievance_number,
         )
+        is_staged_3g3a_document = is_3g3a_staged(cfg=cfg, doc_type=doc_type, template_key=doc_req.template_key)
+        render_context = context
+        if doc_req.requires_signature and is_staged_3g3a_document:
+            render_context = dict(context)
+            _clear_3g3a_stage_interactive_marks(context=render_context)
         if layout_meta.get("policy_applied"):
             await db.add_event(
                 case_id,
@@ -1600,7 +1636,7 @@ async def intake(request: Request):
                 try:
                     render_docx(
                         template_path,
-                        context,
+                        render_context,
                         anchor_docx_path,
                         strip_signature_placeholders=False,
                         normalize_split_placeholders=cfg.rendering.normalize_split_placeholders,
@@ -1617,7 +1653,7 @@ async def intake(request: Request):
                         graph_temp_folder_path=cfg.docx_pdf_graph_temp_folder,
                     )
                     alignment_pdf_bytes = Path(anchor_pdf_path).read_bytes()
-                    if is_3g3a_staged(cfg=cfg, doc_type=doc_type, template_key=doc_req.template_key):
+                    if is_staged_3g3a_document:
                         # Build stage-specific alignment PDFs so each stage can activate only its own fields.
                         stage1_bytes = _create_stage_alignment_pdf_from_anchor_docx(
                             anchor_docx_path=anchor_docx_path,
@@ -1663,7 +1699,7 @@ async def intake(request: Request):
 
                 render_docx(
                     template_path,
-                    context,
+                    render_context,
                     docx_path,
                     strip_signature_placeholders=True,
                     normalize_split_placeholders=cfg.rendering.normalize_split_placeholders,
@@ -1671,7 +1707,7 @@ async def intake(request: Request):
             else:
                 render_docx(
                     template_path,
-                    context,
+                    render_context,
                     docx_path,
                     normalize_split_placeholders=cfg.rendering.normalize_split_placeholders,
                 )

@@ -217,6 +217,14 @@ def _sync_checkbox_content_controls(xml_text: str) -> str:
         if checked is None:
             return block
 
+        # Some templates place non-checkbox text (for example grievance numbers) inside
+        # SDT blocks that still include checkbox metadata. Do not overwrite those values.
+        text_match = _SDT_TEXT_RE.search(block)
+        if text_match:
+            current_text = html.unescape(text_match.group(2) or "").strip()
+            if current_text and current_text not in {"☒", "☑", "☐"}:
+                return block
+
         checked_val = "1" if checked else "0"
         checked_mark = "☒" if checked else "☐"
 
@@ -276,6 +284,7 @@ def render_docx(
     *,
     strip_signature_placeholders: bool = False,
     normalize_split_placeholders: bool = True,
+    sync_checkbox_controls: bool | None = None,
 ) -> None:
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     patched_template_path: str | None = None
@@ -291,7 +300,9 @@ def render_docx(
             out_path,
             context,
             strip_signature_placeholders=strip_signature_placeholders,
-            sync_checkbox_controls=strip_signature_placeholders,
+            sync_checkbox_controls=(
+                strip_signature_placeholders if sync_checkbox_controls is None else bool(sync_checkbox_controls)
+            ),
         )
         return
     except Exception as exc:

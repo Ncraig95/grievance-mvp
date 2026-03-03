@@ -93,6 +93,14 @@ docuseal:
   default_template_id: 1  # base template id with signature fields; app clones+replaces with generated PDF
   # Optional strict mode to force per-form template mapping.
   strict_template_ids: false
+  # Signing order for submitters:
+  # - preserved: sequential order (signer 2 waits for signer 1, etc.)
+  # - random: any signer can sign at any time
+  submitters_order: preserved
+  # Optional per-form signing-order overrides (keys are template_key or doc_type).
+  submitters_order_by_form:
+    settlement_form_3106: random
+    settlement_form: random
   # Global signature placement mode:
   # - table_preferred: trace table cell geometry first, then per-form map fallback, then generic placeholder geometry
   # - generic: always use placeholder-box geometry
@@ -103,17 +111,23 @@ docuseal:
   signature_table_trace_enabled: true
   # Optional per-form override for tracing behavior.
   signature_table_trace_by_form: {}
+  # Guard stage for traced cells before accepting trace output.
+  signature_table_guard_enabled: true
+  # Max allowed absolute delta (normalized x/y/w/h) between trace and map cells when map exists.
+  signature_table_guard_tolerance: 0.015
+  # Minimum required normalized gap between signature cell right edge and date cell left edge.
+  signature_table_guard_min_gap: 0.005
   # Optional deterministic per-form fallback map (normalized coordinates).
   # Used when table tracing does not confidently map all required signer cells.
   signature_table_maps:
     settlement_form_3106:
       cells:
-        signer1_signature: { page: 0, x: 0.40, y: 0.67, w: 0.30, h: 0.05 }
-        signer1_date: { page: 0, x: 0.72, y: 0.67, w: 0.20, h: 0.05 }
-        signer2_signature: { page: 0, x: 0.40, y: 0.74, w: 0.30, h: 0.05 }
-        signer2_date: { page: 0, x: 0.72, y: 0.74, w: 0.20, h: 0.05 }
-        signer3_signature: { page: 0, x: 0.40, y: 0.81, w: 0.30, h: 0.05 }
-        signer3_date: { page: 0, x: 0.72, y: 0.81, w: 0.20, h: 0.05 }
+        signer1_signature: { page: 0, x: 0.333, y: 0.689, w: 0.355, h: 0.024 }
+        signer1_date: { page: 0, x: 0.705, y: 0.689, w: 0.168, h: 0.024 }
+        signer2_signature: { page: 0, x: 0.333, y: 0.719, w: 0.355, h: 0.024 }
+        signer2_date: { page: 0, x: 0.705, y: 0.719, w: 0.168, h: 0.024 }
+        signer3_signature: { page: 0, x: 0.333, y: 0.749, w: 0.355, h: 0.024 }
+        signer3_date: { page: 0, x: 0.705, y: 0.749, w: 0.168, h: 0.024 }
   # Optional per-form template ids (keys are template_key or doc_type).
   # In strict mode this must include every form that requires signature dispatch.
   template_ids: {}

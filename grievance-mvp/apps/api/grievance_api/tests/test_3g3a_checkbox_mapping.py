@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from grievance_api.web.routes_intake import _apply_3g3a_defaults
+from grievance_api.web.routes_intake import _apply_3g3a_defaults, _clear_3g3a_stage_interactive_marks
 
 
 class ThreeGThreeACheckboxMappingTests(unittest.TestCase):
@@ -98,6 +98,29 @@ class ThreeGThreeACheckboxMappingTests(unittest.TestCase):
         self.assertEqual(context["q10_company_is_no_mark"], "☐")
         self.assertEqual(context["q10_union_is_yes_mark"], "☐")
         self.assertEqual(context["q10_union_is_no_mark"], "☒")
+
+    def test_clear_stage_interactive_marks_resets_q8_and_q10_marks(self) -> None:
+        context: dict[str, object] = {
+            "q1_is_bst_mark": "☒",
+            "q8_is_accepted_mark": "☒",
+            "q8_is_rejected_mark": "☐",
+            "q8_is_appealed_mark": "☒",
+            "q8_is_requested_mediation_mark": "☒",
+            "q10_company_is_yes_mark": "☒",
+            "q10_company_is_no_mark": "☐",
+            "q10_union_is_yes_mark": "☒",
+            "q10_union_is_no_mark": "☐",
+        }
+        _clear_3g3a_stage_interactive_marks(context=context)
+        self.assertEqual(context["q1_is_bst_mark"], "☒")
+        self.assertEqual(context["q8_is_accepted_mark"], "☐")
+        self.assertEqual(context["q8_is_rejected_mark"], "☐")
+        self.assertEqual(context["q8_is_appealed_mark"], "☐")
+        self.assertEqual(context["q8_is_requested_mediation_mark"], "☐")
+        self.assertEqual(context["q10_company_is_yes_mark"], "☐")
+        self.assertEqual(context["q10_company_is_no_mark"], "☐")
+        self.assertEqual(context["q10_union_is_yes_mark"], "☐")
+        self.assertEqual(context["q10_union_is_no_mark"], "☐")
 
     def test_long_text_fields_are_wrapped_and_clamped(self) -> None:
         very_long = ("word " * 600).strip()

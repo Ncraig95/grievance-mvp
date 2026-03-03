@@ -177,6 +177,7 @@ Use the `Grievant Signer Email` response for both `documents[0].signers[2]` and 
 - `{{Sig_es_:signer3:signature}}` -> Grievant Signature.
 - Placement strategy for signature/date fields in `table_preferred` mode:
   - first: PDF table-cell tracing (`docuseal.signature_table_trace_enabled` / `signature_table_trace_by_form`)
+  - trace output is accepted only when guard checks pass (`docuseal.signature_table_guard_enabled`, `signature_table_guard_tolerance`, `signature_table_guard_min_gap`)
   - second: per-form fixed map fallback (`docuseal.signature_table_maps.<form_key>.cells`)
   - third: generic placeholder-box fallback
 - Settlement row mapping is fixed by row order in the signature table:
@@ -186,6 +187,7 @@ Use the `Grievant Signer Email` response for both `documents[0].signers[2]` and 
 - Troubleshooting placement:
   - verify the submission used `template_key: settlement_form_3106`
   - check API logs for `docuseal_signature_placement_strategy` (`trace`, `map_fallback`, `generic_fallback`)
+  - check guard reason codes in strategy log (for example `guard_fail_overlap`, `guard_fail_min_gap`, `guard_fail_map_delta`)
   - if tracing misses cells, tune `signature_table_maps.settlement_form_3106.cells.*` normalized `x/y/w/h`
 - On completion, the system sends completion/copy email notifications to every signer in `documents[0].signers`.
 - On completion, signer emails include the signed PDF attachment when file size is within `email.max_attachment_bytes`.

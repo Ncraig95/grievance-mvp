@@ -55,10 +55,15 @@ def create_app() -> FastAPI:
         web_base_url=cfg.docuseal.web_base_url,
         web_email=cfg.docuseal.web_email,
         web_password=cfg.docuseal.web_password,
+        submitters_order=cfg.docuseal.submitters_order,
+        submitters_order_by_form=cfg.docuseal.submitters_order_by_form,
         signature_layout_mode=cfg.docuseal.signature_layout_mode,
         signature_layout_mode_by_form=cfg.docuseal.signature_layout_mode_by_form,
         signature_table_trace_enabled=cfg.docuseal.signature_table_trace_enabled,
         signature_table_trace_by_form=cfg.docuseal.signature_table_trace_by_form,
+        signature_table_guard_enabled=cfg.docuseal.signature_table_guard_enabled,
+        signature_table_guard_tolerance=cfg.docuseal.signature_table_guard_tolerance,
+        signature_table_guard_min_gap=cfg.docuseal.signature_table_guard_min_gap,
         signature_table_maps=signature_table_maps,
     )
 

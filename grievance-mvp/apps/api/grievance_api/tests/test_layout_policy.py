@@ -301,6 +301,66 @@ class LayoutPolicyTests(unittest.TestCase):
         self.assertEqual(context["issue_article"], "12.1")
         self.assertEqual(context["settlement_rows"], [{"text": "", "line_no": 1}])
 
+    def test_settlement_context_uses_template_grievance_number_when_case_number_blank(self) -> None:
+        payload = IntakeRequest(
+            request_id="req-5",
+            contract="CWA",
+            grievant_firstname="Jane",
+            grievant_lastname="Doe",
+            grievant_email="jane@example.com",
+            narrative="Narrative",
+            template_data={
+                "grievance_number": "GR-9001",
+                "issue_text": "Issue details",
+            },
+        )
+        cfg = SimpleNamespace(
+            rendering=RenderingConfig(
+                normalize_split_placeholders=True,
+                layout_policies={},
+            )
+        )
+
+        context, _ = _build_template_context(
+            cfg=cfg,
+            payload=payload,
+            case_id="C126",
+            grievance_id="2026005",
+            document_id="D126",
+            doc_type="settlement_form_3106",
+            grievance_number=None,
+        )
+
+        self.assertEqual(context["grievance_number"], "GR-9001")
+
+    def test_settlement_context_falls_back_grievance_number_to_grievance_id(self) -> None:
+        payload = IntakeRequest(
+            request_id="req-6",
+            contract="CWA",
+            grievant_firstname="Jane",
+            grievant_lastname="Doe",
+            grievant_email="jane@example.com",
+            narrative="Narrative",
+            template_data={"issue_text": "Issue details"},
+        )
+        cfg = SimpleNamespace(
+            rendering=RenderingConfig(
+                normalize_split_placeholders=True,
+                layout_policies={},
+            )
+        )
+
+        context, _ = _build_template_context(
+            cfg=cfg,
+            payload=payload,
+            case_id="C127",
+            grievance_id="2026006",
+            document_id="D127",
+            doc_type="settlement_form_3106",
+            grievance_number=None,
+        )
+
+        self.assertEqual(context["grievance_number"], "2026006")
 
 if __name__ == "__main__":
     unittest.main()

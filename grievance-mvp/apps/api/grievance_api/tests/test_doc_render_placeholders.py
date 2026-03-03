@@ -101,6 +101,22 @@ class DocRenderPlaceholderTests(unittest.TestCase):
         self.assertIn('w14:checked w14:val="1"', synced)
         self.assertIn("<w:t xml:space=\"preserve\">☒</w:t>", synced)
 
+    def test_checkbox_sync_does_not_overwrite_non_checkbox_text(self) -> None:
+        xml = (
+            '<w:sdt><w:sdtPr><w:tag w:val="{{ q1_is_bst_mark }}"/>'
+            '<w14:checkbox><w14:checked w14:val="0"/>'
+            '<w14:checkedState w14:val="2612" w14:font="MS Gothic"/>'
+            '<w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/>'
+            "</w14:checkbox></w:sdtPr><w:sdtContent><w:r><w:t>2026062</w:t></w:r></w:sdtContent></w:sdt>"
+        )
+        rendered = _replace_leftover_placeholders(
+            xml,
+            {"q1_is_bst_mark": "☒"},
+            strip_signature_placeholders=False,
+        )
+        synced = _sync_checkbox_content_controls(rendered)
+        self.assertIn("<w:t>2026062</w:t>", synced)
+
     def test_split_placeholder_across_runs_is_normalized(self) -> None:
         xml = (
             "<w:r><w:t>{{ </w:t></w:r>"

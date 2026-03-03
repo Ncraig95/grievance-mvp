@@ -69,6 +69,14 @@ class ConfigSignatureTableMapTests(unittest.TestCase):
     def test_load_config_parses_valid_signature_table_map(self) -> None:
         path = self._write_config(
             docuseal_overrides={
+                "signature_table_guard_enabled": True,
+                "signature_table_guard_tolerance": 0.02,
+                "signature_table_guard_min_gap": 0.01,
+                "submitters_order": "random",
+                "submitters_order_by_form": {
+                    "settlement_form_3106": "random",
+                    "statement_of_occurrence": "preserved",
+                },
                 "signature_table_maps": {
                     "settlement_form_3106": {
                         "cells": {
@@ -85,6 +93,12 @@ class ConfigSignatureTableMapTests(unittest.TestCase):
             os.unlink(path)
 
         self.assertIn("settlement_form_3106", cfg.docuseal.signature_table_maps)
+        self.assertTrue(cfg.docuseal.signature_table_guard_enabled)
+        self.assertAlmostEqual(cfg.docuseal.signature_table_guard_tolerance, 0.02)
+        self.assertAlmostEqual(cfg.docuseal.signature_table_guard_min_gap, 0.01)
+        self.assertEqual(cfg.docuseal.submitters_order, "random")
+        self.assertEqual(cfg.docuseal.submitters_order_by_form.get("settlement_form_3106"), "random")
+        self.assertEqual(cfg.docuseal.submitters_order_by_form.get("statement_of_occurrence"), "preserved")
         parsed = cfg.docuseal.signature_table_maps["settlement_form_3106"]
         self.assertIn("signer1_signature", parsed.cells)
         self.assertAlmostEqual(parsed.cells["signer1_signature"].x, 0.40)
@@ -109,6 +123,11 @@ class ConfigSignatureTableMapTests(unittest.TestCase):
             os.unlink(path)
 
         self.assertNotIn("settlement_form_3106", cfg.docuseal.signature_table_maps)
+        self.assertTrue(cfg.docuseal.signature_table_guard_enabled)
+        self.assertAlmostEqual(cfg.docuseal.signature_table_guard_tolerance, 0.015)
+        self.assertAlmostEqual(cfg.docuseal.signature_table_guard_min_gap, 0.005)
+        self.assertEqual(cfg.docuseal.submitters_order, "preserved")
+        self.assertEqual(cfg.docuseal.submitters_order_by_form, {})
 
 
 if __name__ == "__main__":
