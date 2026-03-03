@@ -5,6 +5,7 @@ import logging
 import re
 import subprocess
 import tempfile
+from datetime import date
 from dataclasses import dataclass
 from html import unescape
 from urllib.parse import urlparse
@@ -165,6 +166,10 @@ class DocuSealClient:
         if mode not in {"preserved", "random"}:
             return "preserved"
         return mode
+
+    @staticmethod
+    def _current_date_iso() -> str:
+        return date.today().isoformat()
 
     def _resolve_submitters_order(self, *, form_key: str | None) -> str:
         key = str(form_key or "").strip()
@@ -374,6 +379,7 @@ class DocuSealClient:
         page_h = 0.0
         pending_parts: list[str] | None = None
         pending_box: dict[str, float | int] | None = None
+        pending_first_box: dict[str, float | int] | None = None
 
         for line in proc.stdout.splitlines():
             page_match = page_re.search(line)
@@ -383,6 +389,7 @@ class DocuSealClient:
                 page_h = float(page_match.group(2))
                 pending_parts = None
                 pending_box = None
+                pending_first_box = None
                 continue
 
             word_match = word_re.search(line)
@@ -411,20 +418,43 @@ class DocuSealClient:
                 if "}}" not in token_raw:
                     continue
                 token_candidate = "".join(pending_parts)
+                y_min = float(pending_box["y_min"])
+                y_max = float(pending_box["y_max"])
+                if pending_first_box is not None:
+                    first_y_min = float(pending_first_box["y_min"])
+                    first_y_max = float(pending_first_box["y_max"])
+                    first_h = max(1.0, first_y_max - first_y_min)
+                    merged_h = max(1.0, y_max - y_min)
+                    # Wrapped placeholders can split onto a second line in narrow cells
+                    # (for example date_true_intent). Keep first-line vertical bounds so
+                    # the field anchor does not become artificially tall/low.
+                    if merged_h > (first_h * 1.6):
+                        y_min = first_y_min
+                        y_max = first_y_max
                 aggregate_box = {
                     "x_min": float(pending_box["x_min"]),
-                    "y_min": float(pending_box["y_min"]),
+                    "y_min": y_min,
                     "x_max": float(pending_box["x_max"]),
-                    "y_max": float(pending_box["y_max"]),
+                    "y_max": y_max,
                     "page": int(pending_box["page"]),
                     "page_w": float(pending_box["page_w"]),
                     "page_h": float(pending_box["page_h"]),
                 }
                 pending_parts = None
                 pending_box = None
+                pending_first_box = None
             elif "{{" in token_raw and "}}" not in token_raw:
                 pending_parts = [token_raw]
                 pending_box = {
+                    "x_min": raw_box["x_min"],
+                    "y_min": raw_box["y_min"],
+                    "x_max": raw_box["x_max"],
+                    "y_max": raw_box["y_max"],
+                    "page": raw_box["page"],
+                    "page_w": raw_box["page_w"],
+                    "page_h": raw_box["page_h"],
+                }
+                pending_first_box = {
                     "x_min": raw_box["x_min"],
                     "y_min": raw_box["y_min"],
                     "x_max": raw_box["x_max"],
@@ -1809,6 +1839,7 @@ class DocuSealClient:
                 required = True
                 readonly = False
                 preferences: dict[str, object] = {}
+                default_value: str | None = None
                 if field_type == "text":
                     required = "true_intent" not in field_name
                     if field_name in _MULTILINE_TEXT_FIELDS:
@@ -1819,6 +1850,11 @@ class DocuSealClient:
                     required = False
                     readonly = True
                 elif field_type in {"signature", "date"}:
+                    if field_type == "date":
+                        # Enforce system date for signer date fields so they track
+                        # signing-time context without manual user entry.
+                        readonly = True
+                        default_value = self._current_date_iso()
                     if "true_intent" in field_name:
                         required = False
 
@@ -1851,6 +1887,8 @@ class DocuSealClient:
                         )
                 if readonly:
                     field_payload["readonly"] = True
+                if default_value:
+                    field_payload["default_value"] = default_value
                 rebuilt_fields.append(field_payload)
 
         is_3g3a_stage2_alignment = (

@@ -23,6 +23,14 @@ _SDT_TAG_VAL_RE = re.compile(r'<w:tag\b[^>]*\bw:val="([^"]*)"', flags=re.IGNOREC
 _SDT_CHECKED_RE = re.compile(r"<w14:checked\b[^>]*/>", flags=re.IGNORECASE)
 _SDT_TEXT_RE = re.compile(r"(<w:sdtContent>.*?<w:t(?:\s[^>/]*)?>)(.*?)(</w:t>)", flags=re.DOTALL)
 _SDT_TEXT_SELF_CLOSING_RE = re.compile(r"(<w:sdtContent>.*?<w:t(?:\s[^>]*)?)\s*/>", flags=re.DOTALL)
+_LEGACY_TEXTINPUT_BLOCK_RE = re.compile(
+    r"(?P<begin><w:fldChar w:fldCharType=\"begin\"><w:ffData>.*?<w:textInput/>.*?</w:ffData></w:fldChar>)"
+    r"(?P<body>.*?)"
+    r"(?P<end><w:fldChar w:fldCharType=\"end\"/>)",
+    flags=re.DOTALL,
+)
+_LEGACY_TEXT_NODE_RE = re.compile(r"<w:t(?:\s[^>/]*)?>(.*?)</w:t>", flags=re.DOTALL)
+_LEGACY_SEPARATE_MARK = '<w:fldChar w:fldCharType="separate"/>'
 
 
 def _is_xml_tag_token(token: str) -> bool:
@@ -242,6 +250,45 @@ def _sync_checkbox_content_controls(xml_text: str) -> str:
     return _SDT_CHECKBOX_BLOCK_RE.sub(_patch_block, xml_text)
 
 
+def _sanitize_legacy_textinput_checkbox_artifacts(xml_text: str) -> str:
+    def _patch_block(match: re.Match[str]) -> str:
+        begin = match.group("begin")
+        body = match.group("body")
+        end = match.group("end")
+
+        sep_idx = body.find(_LEGACY_SEPARATE_MARK)
+        if sep_idx < 0:
+            return match.group(0)
+
+        sep_end = sep_idx + len(_LEGACY_SEPARATE_MARK)
+        before_sep = body[:sep_end]
+        after_sep = body[sep_end:]
+
+        text_nodes = _LEGACY_TEXT_NODE_RE.findall(after_sep)
+        if not text_nodes:
+            return match.group(0)
+
+        rendered = html.unescape("".join(text_nodes))
+        normalized = (
+            rendered.replace("\u2002", " ")
+            .replace("\u2003", " ")
+            .replace("\u00A0", " ")
+            .strip()
+        )
+        if normalized not in {"☐", "☑", "☒"}:
+            return match.group(0)
+
+        for glyph in ("☐", "☑", "☒"):
+            glyph_idx = after_sep.find(glyph)
+            if glyph_idx >= 0:
+                after_sep = after_sep[:glyph_idx] + after_sep[glyph_idx + 1 :]
+                break
+
+        return begin + before_sep + after_sep + end
+
+    return _LEGACY_TEXTINPUT_BLOCK_RE.sub(_patch_block, xml_text)
+
+
 def _postprocess_rendered_docx(
     out_path: str,
     context: dict,
@@ -269,6 +316,7 @@ def _postprocess_rendered_docx(
                     )
                     if sync_checkbox_controls:
                         patched = _sync_checkbox_content_controls(patched)
+                    patched = _sanitize_legacy_textinput_checkbox_artifacts(patched)
                     data = patched.encode("utf-8")
                 zout.writestr(info, data)
         tmp_path.replace(source)

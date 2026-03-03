@@ -102,8 +102,8 @@ class DocuSealPlaceholderAlignmentTests(unittest.TestCase):
 
         self.assertIn((1, "date:date_true_intent"), areas)
         merged = areas[(1, "date:date_true_intent")][0]
-        self.assertLessEqual(merged["y_min"], 597.115)
-        self.assertGreaterEqual(merged["y_max"], 613.170)
+        self.assertAlmostEqual(merged["y_min"], 597.115, places=3)
+        self.assertAlmostEqual(merged["y_max"], 604.920, places=3)
 
     def test_inject_3g3a_missing_date_anchor_for_stage2_signature_row(self) -> None:
         placeholder_areas = {
@@ -344,6 +344,8 @@ class DocuSealPlaceholderAlignmentTests(unittest.TestCase):
             by_name["q6_company_statement"]["preferences"],
             {"multiline": True, "align": "left", "valign": "top"},
         )
+        self.assertTrue(by_name["signer1_date"]["readonly"])
+        self.assertRegex(str(by_name["signer1_date"]["default_value"]), r"^\d{4}-\d{2}-\d{2}$")
         self.assertFalse(by_name["q10_company_true_intent_note"]["required"])
 
         signature_true_intent = next(

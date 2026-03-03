@@ -8,6 +8,7 @@ from pathlib import Path
 from grievance_api.services.doc_render import (
     _normalize_split_placeholders_in_xml,
     _replace_leftover_placeholders,
+    _sanitize_legacy_textinput_checkbox_artifacts,
     _sync_checkbox_content_controls,
     render_docx,
 )
@@ -116,6 +117,29 @@ class DocRenderPlaceholderTests(unittest.TestCase):
         )
         synced = _sync_checkbox_content_controls(rendered)
         self.assertIn("<w:t>2026062</w:t>", synced)
+
+    def test_legacy_textinput_checkbox_artifact_is_stripped(self) -> None:
+        xml = (
+            '<w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="Text3"/>'
+            "<w:textInput/></w:ffData></w:fldChar>"
+            '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+            "<w:r><w:t>☐</w:t></w:r><w:r><w:t>\u2002\u2002\u2002</w:t></w:r>"
+            '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+        )
+        sanitized = _sanitize_legacy_textinput_checkbox_artifacts(xml)
+        self.assertNotIn("☐", sanitized)
+        self.assertIn("\u2002\u2002\u2002", sanitized)
+
+    def test_legacy_textinput_with_real_text_is_preserved(self) -> None:
+        xml = (
+            '<w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="Text3"/>'
+            "<w:textInput/></w:ffData></w:fldChar>"
+            '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+            "<w:r><w:t>3106</w:t></w:r>"
+            '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+        )
+        sanitized = _sanitize_legacy_textinput_checkbox_artifacts(xml)
+        self.assertIn("<w:t>3106</w:t>", sanitized)
 
     def test_split_placeholder_across_runs_is_normalized(self) -> None:
         xml = (
