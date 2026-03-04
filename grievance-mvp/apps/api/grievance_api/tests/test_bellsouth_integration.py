@@ -78,15 +78,27 @@ class BellSouthCommandTests(unittest.TestCase):
                     folder_resolution="existing_exact_grievance_id",
                     default_signer_field="union_rep_email",
                     default_requires_signature=True,
+                ),
+                "mobility_formal_grievance_meeting_request": DocumentPolicyConfig(
+                    folder_resolution="existing_exact_grievance_id",
+                    default_signer_field="union_rep_email",
+                    default_requires_signature=True,
                 )
             }
         )
-        doc_req = DocumentRequest(
+        bellsouth_doc_req = DocumentRequest(
             doc_type="bellsouth_meeting_request",
             template_key="bellsouth_formal_grievance_meeting_request",
             requires_signature=True,
         )
-        self.assertTrue(_doc_requires_existing_exact_folder(cfg=cfg, doc_req=doc_req))
+        self.assertTrue(_doc_requires_existing_exact_folder(cfg=cfg, doc_req=bellsouth_doc_req))
+
+        mobility_doc_req = DocumentRequest(
+            doc_type="mobility_formal_grievance_meeting_request",
+            template_key="mobility_formal_grievance_meeting_request",
+            requires_signature=True,
+        )
+        self.assertTrue(_doc_requires_existing_exact_folder(cfg=cfg, doc_req=mobility_doc_req))
 
     def test_existing_folder_mode_requires_incoming_grievance_id(self) -> None:
         with self.assertRaises(HTTPException) as ctx:
@@ -212,6 +224,35 @@ class BellSouthSignerTests(unittest.TestCase):
         self.assertEqual(signer, "grievances@cwa3106.com")
         self.assertEqual(source, "template_data.union_rep_email")
 
+    def test_mobility_union_rep_email_is_default_signer(self) -> None:
+        cfg = SimpleNamespace(
+            document_policies={
+                "mobility_formal_grievance_meeting_request": DocumentPolicyConfig(
+                    folder_resolution="existing_exact_grievance_id",
+                    default_signer_field="union_rep_email",
+                    default_requires_signature=True,
+                )
+            }
+        )
+        payload = IntakeRequest(
+            request_id="req-2c",
+            contract="AT&T Mobility",
+            grievant_firstname="John",
+            grievant_lastname="Doe",
+            grievant_email="grievant@example.com",
+            narrative="test",
+            template_data={"union_rep_email": "mobility-rep@example.com"},
+        )
+
+        signer, source = _preferred_signer_email_for_doc(
+            payload=payload,
+            doc_type="mobility_formal_grievance_meeting_request",
+            template_key="mobility_formal_grievance_meeting_request",
+            cfg=cfg,
+        )
+        self.assertEqual(signer, "mobility-rep@example.com")
+        self.assertEqual(source, "template_data.union_rep_email")
+
 
 class BellSouthContextTests(unittest.TestCase):
     def test_template_context_populates_bellsouth_fields(self) -> None:
@@ -333,6 +374,31 @@ class BellSouthContextTests(unittest.TestCase):
         self.assertEqual(context["meeting_requested_place"], "TBD")
         self.assertEqual(context["reply_to_name_1"], "CWA Local 3106")
         self.assertEqual(context["reply_to_address_1"], "4076 Union Hall Pl")
+
+    def test_mobility_meeting_requested_fields_default_to_tbd_when_missing(self) -> None:
+        payload = IntakeRequest(
+            request_id="req-6b",
+            contract="AT&T Mobility",
+            grievant_firstname="John",
+            grievant_lastname="Doe",
+            grievant_email="john@example.com",
+            narrative="Mobility meeting request context",
+            template_data={},
+        )
+        cfg = SimpleNamespace(rendering=SimpleNamespace(layout_policies={}))
+
+        context, _ = _build_template_context(
+            cfg=cfg,
+            payload=payload,
+            case_id="C1",
+            grievance_id="2026001",
+            document_id="D1",
+            doc_type="mobility_formal_grievance_meeting_request",
+            grievance_number=None,
+        )
+        self.assertEqual(context["meeting_requested_date"], "TBD")
+        self.assertEqual(context["meeting_requested_time"], "TBD")
+        self.assertEqual(context["meeting_requested_place"], "TBD")
 
 
 class FolderMatcherTests(unittest.TestCase):

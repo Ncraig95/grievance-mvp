@@ -14,6 +14,8 @@ class ContractTimelineTests(unittest.TestCase):
         self.assertEqual(deadline_days_for_contract("core southeast"), 60)
         self.assertEqual(deadline_days_for_contract("wire tech"), 60)
         self.assertEqual(deadline_days_for_contract("mobility"), 45)
+        self.assertEqual(deadline_days_for_contract("AT&T Mobility"), 45)
+        self.assertEqual(deadline_days_for_contract("att mobility"), 45)
         self.assertEqual(deadline_days_for_contract("City of Jacksonville"), 10)
         self.assertEqual(deadline_days_for_contract("contruction"), 60)
         self.assertEqual(deadline_days_for_contract("construction"), 60)

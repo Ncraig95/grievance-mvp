@@ -9,6 +9,17 @@
 
 Use existing grievance folder resolution same as BellSouth; include `grievance_id` of existing case folder.
 
+## Single-form selector pattern (BellSouth vs AT&T Mobility)
+
+If you are using one Microsoft Form for both templates, add one multiple-choice question:
+- `Contract bucket` with choices `BellSouth` and `AT&T Mobility`
+
+Then in Power Automate (Switch/Condition):
+- If `BellSouth`: set `document_command` to `bellsouth_meeting_request` and `contract` to `BellSouth`
+- If `AT&T Mobility`: set `document_command` to `mobility_meeting_request` and `contract` to `AT&T Mobility`
+
+Everything else in the payload can stay the same.
+
 ## Recommended Forms questions and key mapping
 
 Use the same question structure as BellSouth and map to the same keys:
@@ -45,7 +56,7 @@ Template-specific (`template_data`):
   "request_id": "forms-<responseId>",
   "document_command": "mobility_meeting_request",
   "grievance_id": "2026001",
-  "contract": "Mobility",
+  "contract": "AT&T Mobility",
   "grievant_firstname": "<first>",
   "grievant_lastname": "<last>",
   "grievant_email": "<email>",

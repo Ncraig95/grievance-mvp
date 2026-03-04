@@ -22,6 +22,8 @@ def deadline_days_for_contract(contract: str | None) -> int | None:
     key = _canonical_contract_key(contract)
     if not key:
         return None
+    if key in {"at&t mobility", "att mobility"}:
+        return _CONTRACT_DEADLINE_DAYS["mobility"]
     if key in _CONTRACT_DEADLINE_DAYS:
         return _CONTRACT_DEADLINE_DAYS[key]
     if key == "core southest":

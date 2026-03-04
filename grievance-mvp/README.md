@@ -1,6 +1,26 @@
 # Grievance Automation MVP
 
-Production-oriented grievance automation service on Ubuntu + Docker Compose.
+Production-grade grievance operations platform for union locals running on Ubuntu + Docker Compose.
+It accepts Microsoft Forms submissions, generates grievance documents from template libraries, routes signatures through DocuSeal, emails participants through Microsoft Graph, and files artifacts into SharePoint with a full audit trail.
+
+This repo is set up for real workflow operations: idempotent intake, staged signature handling, approval controls, automated notifications, SharePoint foldering, and recovery-oriented runtime tooling (health checks, watchdog, smoke tests).
+
+## Public Form Links (Local Testing)
+
+Use this section in GitHub so other locals can run the process end-to-end.
+Replace each placeholder URL with the published Microsoft Form link for that local.
+
+| Local | Form | Document command | Test form link |
+|---|---|---|---|
+| Local 3106 | Statement of Occurrence | `statement_of_occurrence` | `https://forms.office.com/Pages/ResponsePage.aspx?id=Gm8hRgwHT0uKp3F4_OjDLETN-f9DdKFBsB6MNcKlT95UMFFIODk2WDNaNzJNUDJQVlVSS1QxUVRFMi4u` |
+| Local 3106 | BellSouth Meeting Request | `bellsouth_meeting_request` | `https://forms.office.com/Pages/ResponsePage.aspx?id=Gm8hRgwHT0uKp3F4_OjDLETN-f9DdKFBsB6MNcKlT95URUlRMlI3TzFRQVpWMFhKRk5CVE4zU0daNi4u` |
+| Local 3106 | Mobility Meeting Request | `mobility_meeting_request` | `https://forms.office.com/Pages/ResponsePage.aspx?id=Gm8hRgwHT0uKp3F4_OjDLETN-f9DdKFBsB6MNcKlT95UMERRWUI3VkIwNVlRNzZVWFU4MU8yU0FKVC4u` |
+| Local 3106 | Grievance Data Request | `grievance_data_request` | `https://forms.office.com/r/REPLACE-DATA-3106` |
+| Local 3106 | True Intent Grievance Brief | `true_intent_brief` | `https://forms.office.com/r/REPLACE-TRUEINTENT-3106` |
+| Local 3106 | Disciplinary Grievance Brief | `disciplinary_brief` | `https://forms.office.com/r/REPLACE-DISCIPLINARY-3106` |
+| Local 3106 | Settlement Form 3106 | `settlement_form` | `https://forms.office.com/Pages/ResponsePage.aspx?id=Gm8hRgwHT0uKp3F4_OjDLETN-f9DdKFBsB6MNcKlT95UQzY4TVFaSUJPMVk0T1RUODhGVU0yQTE5UC4u` |
+| Local 3106 | BST Grievance Form 3G3A | `bst_grievance_form_3g3a` | `https://forms.office.com/r/REPLACE-3G3A-3106` |
+| Local (add rows) | Any additional local-specific form | `<document_command>` | `https://forms.office.com/r/REPLACE-LINK` |
 
 ## 1) Architecture
 
@@ -565,6 +585,18 @@ BellSouth payload example:
   }
 }
 ```
+
+## 10c) Single Microsoft Form for BellSouth + Mobility meeting requests
+
+If you want one shared Form/Flow:
+- Add a required multiple-choice question, for example `Contract bucket`
+- Choices: `BellSouth`, `AT&T Mobility`
+
+In Power Automate (Condition or Switch), map that answer to command + contract:
+- `BellSouth` -> `document_command: "bellsouth_meeting_request"`, `contract: "BellSouth"`
+- `AT&T Mobility` -> `document_command: "mobility_meeting_request"`, `contract: "AT&T Mobility"`
+
+All other meeting-request fields can stay identical between the two branches.
 
 ## 11) Dynamic Statement Rows (Template-ready backend)
 

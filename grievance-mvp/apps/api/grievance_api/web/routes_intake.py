@@ -72,6 +72,10 @@ _BELL_SOUTH_TBD_KEYS = (
     "meeting_requested_time",
     "meeting_requested_place",
 )
+_MEETING_REQUEST_DOC_TYPES = {
+    "bellsouth_meeting_request",
+    "mobility_formal_grievance_meeting_request",
+}
 _CHECKED_MARK = "☒"
 _UNCHECKED_MARK = "☐"
 _3G3A_STAGE_INTERACTIVE_MARK_FIELDS = (
@@ -1230,7 +1234,7 @@ def _build_template_context(
         grievance_id=grievance_id,
         grievance_number=grievance_number,
     )
-    if doc_type == "bellsouth_meeting_request":
+    if doc_type in _MEETING_REQUEST_DOC_TYPES:
         _apply_bellsouth_defaults(context=context, payload=payload)
     if doc_type == "bst_grievance_form_3g3a":
         _apply_3g3a_defaults(context=context, grievance_id=grievance_id)

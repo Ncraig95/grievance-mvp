@@ -35,6 +35,10 @@ document_policies:
     folder_resolution: existing_exact_grievance_id
     default_signer_field: union_rep_email
     default_requires_signature: true
+  mobility_formal_grievance_meeting_request:
+    folder_resolution: existing_exact_grievance_id
+    default_signer_field: union_rep_email
+    default_requires_signature: true
   bst_grievance_form_3g3a:
     staged_flow_enabled: true
     auto_advance: true
