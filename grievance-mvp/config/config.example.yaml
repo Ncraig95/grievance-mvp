@@ -110,11 +110,19 @@ docuseal:
   # - generic: always use placeholder-box geometry
   signature_layout_mode: table_preferred
   # Optional per-form override (keys are template_key or doc_type).
-  signature_layout_mode_by_form: {}
+  # Keep statement/grievance forms pinned to generic placement until a new traced layout
+  # is explicitly revalidated against the live packet.
+  signature_layout_mode_by_form:
+    statement_of_occurrence: generic
+    grievance_form: generic
   # Global toggle for table tracing in table_preferred mode.
   signature_table_trace_enabled: true
   # Optional per-form override for tracing behavior.
-  signature_table_trace_by_form: {}
+  # Statement/grievance forms are intentionally trace-disabled to preserve the last
+  # known-good three-line signature placement.
+  signature_table_trace_by_form:
+    statement_of_occurrence: false
+    grievance_form: false
   # Guard stage for traced cells before accepting trace output.
   signature_table_guard_enabled: true
   # Max allowed absolute delta (normalized x/y/w/h) between trace and map cells when map exists.

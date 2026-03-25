@@ -129,6 +129,29 @@ class ConfigSignatureTableMapTests(unittest.TestCase):
         self.assertEqual(cfg.docuseal.submitters_order, "preserved")
         self.assertEqual(cfg.docuseal.submitters_order_by_form, {})
 
+    def test_statement_forms_can_be_pinned_to_generic_no_trace_layout(self) -> None:
+        path = self._write_config(
+            docuseal_overrides={
+                "signature_layout_mode_by_form": {
+                    "statement_of_occurrence": "generic",
+                    "grievance_form": "generic",
+                },
+                "signature_table_trace_by_form": {
+                    "statement_of_occurrence": False,
+                    "grievance_form": False,
+                },
+            }
+        )
+        try:
+            cfg = load_config(path)
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(cfg.docuseal.signature_layout_mode_by_form.get("statement_of_occurrence"), "generic")
+        self.assertEqual(cfg.docuseal.signature_layout_mode_by_form.get("grievance_form"), "generic")
+        self.assertFalse(cfg.docuseal.signature_table_trace_by_form.get("statement_of_occurrence"))
+        self.assertFalse(cfg.docuseal.signature_table_trace_by_form.get("grievance_form"))
+
 
 if __name__ == "__main__":
     unittest.main()
