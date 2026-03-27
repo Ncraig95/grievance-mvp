@@ -13,6 +13,7 @@ from grievance_api.web.routes_ops import (
     _load_active_signature_queue,
     _load_grievance_doc_catalog,
     ops_clear_document,
+    ops_page,
     ops_update_document_email,
     ops_resubmit_by_grievance,
 )
@@ -388,6 +389,17 @@ class OpsCaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(case_row[0], "ops_cleared")
         self.assertEqual(event_row[0], "ops_document_cleared")
         self.assertEqual(json.loads(event_row[1])["reason"], "testing cleanup")
+
+    async def test_ops_page_uses_data_action_buttons_for_active_queue(self) -> None:
+        request = _Request(state=SimpleNamespace(cfg=self._cfg(), db=self.db))
+
+        html = await ops_page(request)
+
+        self.assertIn('data-action="clear-case-document"', html)
+        self.assertIn('data-action="clear-standalone-document"', html)
+        self.assertIn("activeQueueBody.addEventListener('click'", html)
+        self.assertNotIn('onclick="clearCaseDocument(', html)
+        self.assertNotIn('onclick="clearStandaloneDocument(', html)
 
     async def test_ops_update_document_email_updates_docuseal_and_local_signers(self) -> None:
         await self.db.exec(

@@ -1160,10 +1160,15 @@ async def ops_page(request: Request):
             <td>${esc(item.document_status || '')}<br><span class="muted">${esc(item.case_status || '')}</span></td>
             <td>${esc(item.created_at_utc || '')}</td>
             <td class="link-group">
-              <button onclick="traceCase(${JSON.stringify(item.case_id || '')})">Trace</button>
+              <button type="button" data-action="trace-case" data-case-id="${esc(item.case_id || '')}">Trace</button>
               ${item.docuseal_signing_link ? `<a href="${esc(item.docuseal_signing_link)}" target="_blank" rel="noreferrer">Open Link</a>` : ''}
-              <button onclick="fixCaseEmail(${JSON.stringify(item.document_id || '')}, ${JSON.stringify(signerText(item.signer_order))})">Fix Email</button>
-              <button onclick="clearCaseDocument(${JSON.stringify(item.document_id || '')})">Clear</button>
+              <button
+                type="button"
+                data-action="fix-case-email"
+                data-document-id="${esc(item.document_id || '')}"
+                data-signer-summary="${esc(signerText(item.signer_order))}"
+              >Fix Email</button>
+              <button type="button" data-action="clear-case-document" data-document-id="${esc(item.document_id || '')}">Clear</button>
             </td>
           </tr>
         `);
@@ -1179,16 +1184,49 @@ async def ops_page(request: Request):
             <td>${esc(item.document_status || '')}<br><span class="muted">${esc(item.submission_status || '')}</span></td>
             <td>${esc(item.created_at_utc || '')}</td>
             <td class="link-group">
-              <button onclick="traceStandalone(${JSON.stringify(item.submission_id || '')})">Trace</button>
+              <button type="button" data-action="trace-standalone" data-submission-id="${esc(item.submission_id || '')}">Trace</button>
               ${item.docuseal_signing_link ? `<a href="${esc(item.docuseal_signing_link)}" target="_blank" rel="noreferrer">Open Link</a>` : ''}
-              <button onclick="fixStandaloneEmail(${JSON.stringify(item.document_id || '')}, ${JSON.stringify(item.signer_email || '')})">Fix Email</button>
-              <button onclick="clearStandaloneDocument(${JSON.stringify(item.document_id || '')})">Clear</button>
+              <button
+                type="button"
+                data-action="fix-standalone-email"
+                data-document-id="${esc(item.document_id || '')}"
+                data-current-email="${esc(item.signer_email || '')}"
+              >Fix Email</button>
+              <button type="button" data-action="clear-standalone-document" data-document-id="${esc(item.document_id || '')}">Clear</button>
             </td>
           </tr>
         `);
       }
       activeQueueBody.innerHTML = rows.length ? rows.join('') : '<tr><td colspan="8">No active signature requests found.</td></tr>';
     }
+    activeQueueBody.addEventListener('click', (event) => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      const action = button.dataset.action || '';
+      if (action === 'trace-case') {
+        void traceCase(button.dataset.caseId || '');
+        return;
+      }
+      if (action === 'trace-standalone') {
+        void traceStandalone(button.dataset.submissionId || '');
+        return;
+      }
+      if (action === 'fix-case-email') {
+        void fixCaseEmail(button.dataset.documentId || '', button.dataset.signerSummary || '');
+        return;
+      }
+      if (action === 'fix-standalone-email') {
+        void fixStandaloneEmail(button.dataset.documentId || '', button.dataset.currentEmail || '');
+        return;
+      }
+      if (action === 'clear-case-document') {
+        void clearCaseDocument(button.dataset.documentId || '');
+        return;
+      }
+      if (action === 'clear-standalone-document') {
+        void clearStandaloneDocument(button.dataset.documentId || '');
+      }
+    });
     function updateDocTypeSelect(data) {
       const current = docTypeSelect.value;
       docTypeSelect.innerHTML = '<option value="">Select doc type after loading grievance docs</option>';
