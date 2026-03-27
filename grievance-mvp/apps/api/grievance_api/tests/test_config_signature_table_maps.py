@@ -57,6 +57,15 @@ class ConfigSignatureTableMapTests(unittest.TestCase):
                 "min_width": 3,
                 "separator": "",
             },
+            "standalone_forms": {
+                "att_mobility_bargaining_suggestion": {
+                    "template_path": "/app/templates/docx/AT&TMobility2023BargainingSuggestion_Form.docx",
+                    "form_label": "AT&T Mobility Bargaining Suggestion",
+                    "sharepoint_folder_label": "AT&T Mobility Bargaining Suggestion",
+                    "signer_count": 1,
+                    "default_signer_email": "president@example.org",
+                }
+            },
         }
         tmp = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
         try:
@@ -151,6 +160,37 @@ class ConfigSignatureTableMapTests(unittest.TestCase):
         self.assertEqual(cfg.docuseal.signature_layout_mode_by_form.get("grievance_form"), "generic")
         self.assertFalse(cfg.docuseal.signature_table_trace_by_form.get("statement_of_occurrence"))
         self.assertFalse(cfg.docuseal.signature_table_trace_by_form.get("grievance_form"))
+
+    def test_load_config_parses_standalone_sharepoint_storage_policy(self) -> None:
+        path = self._write_config(docuseal_overrides={})
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh)
+        raw["standalone_forms"]["att_mobility_bargaining_suggestion"]["sharepoint_storage"] = {
+            "root_folder": "Mobility Demand Forms",
+            "label_prefix": "Mobility Demand",
+            "sequence_scope": "yearly",
+            "year_subfolders": True,
+            "upload_generated": False,
+            "upload_signed": True,
+            "upload_audit": True,
+        }
+        with open(path, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(raw, fh)
+
+        try:
+            cfg = load_config(path)
+        finally:
+            os.unlink(path)
+
+        form_cfg = cfg.standalone_forms["att_mobility_bargaining_suggestion"]
+        self.assertEqual(form_cfg.sharepoint_storage.root_folder, "Mobility Demand Forms")
+        self.assertEqual(form_cfg.sharepoint_storage.label_prefix, "Mobility Demand")
+        self.assertEqual(form_cfg.sharepoint_storage.sequence_scope, "yearly")
+        self.assertTrue(form_cfg.sharepoint_storage.year_subfolders)
+        self.assertFalse(form_cfg.sharepoint_storage.upload_generated)
+        self.assertTrue(form_cfg.sharepoint_storage.upload_signed)
+        self.assertTrue(form_cfg.sharepoint_storage.upload_audit)
+        self.assertEqual(form_cfg.default_signer_email, "president@example.org")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,8 @@
+A signature is required for standalone form $form_title.
+
+Submission ID: $submission_id
+Document ID: $document_id
+Form Key: $form_key
+
+Open signing link:
+$docuseal_signing_url

@@ -20,6 +20,7 @@ Replace each placeholder URL with the published Microsoft Form link for that loc
 | Local 3106 | Disciplinary Grievance Brief | `disciplinary_brief` | `https://forms.office.com/r/REPLACE-DISCIPLINARY-3106` |
 | Local 3106 | Settlement Form 3106 | `settlement_form` | `https://forms.office.com/Pages/ResponsePage.aspx?id=Gm8hRgwHT0uKp3F4_OjDLETN-f9DdKFBsB6MNcKlT95UQzY4TVFaSUJPMVk0T1RUODhGVU0yQTE5UC4u` |
 | Local 3106 | BST Grievance Form 3G3A | `bst_grievance_form_3g3a` | `https://forms.office.com/r/REPLACE-3G3A-3106` |
+| Standalone | AT&T Mobility Bargaining Suggestion | `att_mobility_bargaining_suggestion` | `https://forms.office.com/r/REPLACE-ATT-MOBILITY-BARGAINING` |
 | Local (add rows) | Any additional local-specific form | `<document_command>` | `https://forms.office.com/r/REPLACE-LINK` |
 
 ## 1) Architecture
@@ -371,6 +372,9 @@ Rules:
 - `POST /cases/{case_id}/grievance-number`
 - `POST /webhook/docuseal`
 - `POST /cases/{case_id}/notifications/resend`
+- `POST /standalone/forms/{form_key}/submissions`
+- `GET /standalone/submissions/{submission_id}`
+- `POST /standalone/submissions/{submission_id}/notifications/resend`
 - `GET /cases/{case_id}/approval`
 - `POST /cases/{case_id}/approval`
 - `GET /ops` (local/private ops page)
@@ -516,6 +520,7 @@ Detailed per-document setup guides:
 - `docs/power-automate/true_intent_grievance_brief.md`
 - `docs/power-automate/disciplinary_grievance_brief.md`
 - `docs/power-automate/settlement_form_3106.md`
+- `docs/power-automate/att_mobility_bargaining_suggestion.md` (combined Forms + Power Automate handoff)
 
 ## 10b) Power Automate setup (BellSouth Meeting Request)
 

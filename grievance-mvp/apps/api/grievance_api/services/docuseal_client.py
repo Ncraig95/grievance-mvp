@@ -940,6 +940,57 @@ class DocuSealClient:
         return out
 
     @staticmethod
+    def _inject_true_intent_date_anchors(
+        *,
+        placeholder_areas: dict[tuple[int, str], list[dict]],
+    ) -> dict[tuple[int, str], list[dict]]:
+        out: dict[tuple[int, str], list[dict]] = {
+            key: [dict(anchor) for anchor in anchors]
+            for key, anchors in placeholder_areas.items()
+        }
+        signer_indexes = sorted({idx for idx, _ in out.keys()})
+        for signer_idx in signer_indexes:
+            if out.get((signer_idx, "date")):
+                continue
+            sig_anchor = ((out.get((signer_idx, "signature:signature_true_intent")) or [None])[0])
+            if not sig_anchor:
+                continue
+
+            ref_date = ((out.get((signer_idx, "date:date_true_intent")) or [None])[0])
+            page_w = float(sig_anchor["page_w"])
+            if ref_date:
+                width = max(40.0, float(ref_date["x_max"]) - float(ref_date["x_min"]))
+                x_min = float(ref_date["x_min"])
+                y_min = float(ref_date["y_min"])
+                y_max = float(ref_date["y_max"])
+            else:
+                width = max(72.0, page_w * 0.13)
+                x_min = float(sig_anchor["x_max"]) + max(12.0, page_w * 0.02)
+                y_min = float(sig_anchor["y_min"])
+                y_max = float(sig_anchor["y_max"])
+
+            min_x = float(sig_anchor["x_max"]) + max(12.0, page_w * 0.02)
+            if x_min < min_x:
+                x_min = min_x
+            x_min = max(0.0, min(x_min, page_w - 1.0))
+            x_max = min(page_w, x_min + width)
+            if x_max <= x_min:
+                continue
+
+            out[(signer_idx, "date")] = [
+                {
+                    "x_min": x_min,
+                    "y_min": y_min,
+                    "x_max": x_max,
+                    "y_max": y_max,
+                    "page": int(sig_anchor["page"]),
+                    "page_w": float(sig_anchor["page_w"]),
+                    "page_h": float(sig_anchor["page_h"]),
+                }
+            ]
+        return out
+
+    @staticmethod
     def _is_settlement_form(form_key: str | None) -> bool:
         key = str(form_key or "").strip().lower()
         return key in {"settlement_form_3106", "settlement_form"}
@@ -1681,6 +1732,9 @@ class DocuSealClient:
             placeholder_areas=placeholder_areas,
             form_key=form_key,
         )
+        placeholder_areas = self._inject_true_intent_date_anchors(
+            placeholder_areas=placeholder_areas,
+        )
         signer_indexes = sorted({signer_idx for signer_idx, _ in placeholder_areas.keys()})
         if not signer_indexes:
             return
@@ -1809,6 +1863,8 @@ class DocuSealClient:
                 if ":" in field_key:
                     field_type, field_name = field_key.split(":", 1)
                 field_name = field_name.strip().lower()
+                if field_type == "date" and field_name == "date_true_intent":
+                    continue
                 if not field_name:
                     field_name = f"signer{signer_idx}_{field_type}"
 

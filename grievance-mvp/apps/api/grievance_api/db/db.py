@@ -61,6 +61,83 @@ class Db:
             await con.commit()
             return next_seq
 
+    async def ensure_standalone_submission_filing_assignment(
+        self,
+        *,
+        submission_id: str,
+        form_key: str,
+        filing_year: int,
+        root_folder: str,
+        label_prefix: str,
+        year_subfolders: bool,
+    ) -> tuple[int, int, str, str]:
+        normalized_root = str(root_folder or "").strip().strip("/")
+        normalized_prefix = str(label_prefix or "").strip() or "Document"
+
+        def _folder_path(*, year: int, label: str) -> str:
+            parts = [normalized_root]
+            if year_subfolders:
+                parts.append(str(int(year)))
+            parts.append(label.strip("/"))
+            return "/".join(part for part in parts if part)
+
+        async with aiosqlite.connect(self.db_path) as con:
+            await con.execute("BEGIN IMMEDIATE")
+            cur = await con.execute(
+                """SELECT filing_year, filing_sequence, filing_label, COALESCE(sharepoint_folder_path, '')
+                   FROM standalone_submissions
+                   WHERE id=?""",
+                (submission_id,),
+            )
+            row = await cur.fetchone()
+            if not row:
+                raise RuntimeError(f"standalone submission not found: {submission_id}")
+
+            existing_year = int(row[0]) if row[0] is not None else None
+            existing_sequence = int(row[1]) if row[1] is not None else None
+            existing_label = str(row[2] or "").strip()
+            existing_folder = str(row[3] or "").strip()
+            if existing_year and existing_sequence and existing_label:
+                folder_path = existing_folder or _folder_path(year=existing_year, label=existing_label)
+                if folder_path != existing_folder:
+                    await con.execute(
+                        "UPDATE standalone_submissions SET sharepoint_folder_path=? WHERE id=?",
+                        (folder_path, submission_id),
+                    )
+                    await con.commit()
+                else:
+                    await con.commit()
+                return existing_year, existing_sequence, existing_label, folder_path
+
+            cur = await con.execute(
+                """SELECT last_seq
+                   FROM standalone_form_sequences
+                   WHERE form_key=? AND year=?""",
+                (form_key, filing_year),
+            )
+            seq_row = await cur.fetchone()
+            next_sequence = (int(seq_row[0]) if seq_row else 0) + 1
+            filing_label = f"{normalized_prefix} {next_sequence}"
+            folder_path = _folder_path(year=filing_year, label=filing_label)
+            await con.execute(
+                """
+                INSERT INTO standalone_form_sequences(form_key, year, last_seq, updated_at_utc)
+                VALUES(?,?,?,?)
+                ON CONFLICT(form_key, year) DO UPDATE SET
+                  last_seq=excluded.last_seq,
+                  updated_at_utc=excluded.updated_at_utc
+                """,
+                (form_key, filing_year, next_sequence, utcnow()),
+            )
+            await con.execute(
+                """UPDATE standalone_submissions
+                   SET filing_year=?, filing_sequence=?, filing_label=?, sharepoint_folder_path=?
+                   WHERE id=?""",
+                (filing_year, next_sequence, filing_label, folder_path, submission_id),
+            )
+            await con.commit()
+            return filing_year, next_sequence, filing_label, folder_path
+
     async def table_columns(self, table: str) -> set[str]:
         if table in self._table_columns_cache:
             return self._table_columns_cache[table]
@@ -106,6 +183,25 @@ class Db:
             )
             return
         raise RuntimeError("events table missing required case/grievance id column")
+
+    async def add_standalone_event(
+        self,
+        submission_id: str,
+        document_id: str | None,
+        event_type: str,
+        details: dict,
+    ) -> None:
+        await self.exec(
+            """INSERT INTO standalone_events(submission_id, document_id, ts_utc, event_type, details_json)
+               VALUES(?,?,?,?,?)""",
+            (
+                submission_id,
+                document_id,
+                utcnow(),
+                event_type,
+                json.dumps(details, ensure_ascii=False),
+            ),
+        )
 
     async def receipt_seen(self, provider: str, receipt_key: str) -> bool:
         row = await self.fetchone(
@@ -166,6 +262,22 @@ class Db:
             (case_id, document_scope_id, template_key, recipient_email, idempotency_key),
         )
 
+    async def standalone_outbound_email_by_idempotency(
+        self,
+        *,
+        submission_id: str,
+        document_scope_id: str,
+        template_key: str,
+        recipient_email: str,
+        idempotency_key: str,
+    ):
+        return await self.fetchone(
+            """SELECT id, status, graph_message_id, internet_message_id, resend_count, last_sent_at_utc
+               FROM standalone_outbound_emails
+               WHERE submission_id=? AND document_scope_id=? AND template_key=? AND recipient_email=? AND idempotency_key=?""",
+            (submission_id, document_scope_id, template_key, recipient_email, idempotency_key),
+        )
+
     async def next_resend_count(
         self,
         *,
@@ -179,6 +291,24 @@ class Db:
                FROM outbound_emails
                WHERE case_id=? AND document_scope_id=? AND template_key=? AND recipient_email=? AND status='sent'""",
             (case_id, document_scope_id, template_key, recipient_email),
+        )
+        if not row:
+            return 0
+        return int(row[0]) + 1
+
+    async def next_standalone_resend_count(
+        self,
+        *,
+        submission_id: str,
+        document_scope_id: str,
+        template_key: str,
+        recipient_email: str,
+    ) -> int:
+        row = await self.fetchone(
+            """SELECT COALESCE(MAX(resend_count), -1)
+               FROM standalone_outbound_emails
+               WHERE submission_id=? AND document_scope_id=? AND template_key=? AND recipient_email=? AND status='sent'""",
+            (submission_id, document_scope_id, template_key, recipient_email),
         )
         if not row:
             return 0
@@ -216,6 +346,38 @@ class Db:
             ),
         )
 
+    async def create_standalone_outbound_email(
+        self,
+        *,
+        submission_id: str,
+        document_scope_id: str,
+        template_key: str,
+        recipient_email: str,
+        idempotency_key: str,
+        status: str,
+        resend_count: int,
+        metadata: dict,
+    ) -> int:
+        ts = utcnow()
+        return await self.insert(
+            """INSERT INTO standalone_outbound_emails(
+                 submission_id, document_scope_id, template_key, recipient_email, idempotency_key, status,
+                 resend_count, created_at_utc, updated_at_utc, metadata_json
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                submission_id,
+                document_scope_id,
+                template_key,
+                recipient_email,
+                idempotency_key,
+                status,
+                resend_count,
+                ts,
+                ts,
+                json.dumps(metadata, ensure_ascii=False),
+            ),
+        )
+
     async def mark_outbound_email_sent(
         self,
         *,
@@ -235,6 +397,25 @@ class Db:
             (graph_message_id, internet_message_id, now, now, row_id),
         )
 
+    async def mark_standalone_outbound_email_sent(
+        self,
+        *,
+        row_id: int,
+        graph_message_id: str,
+        internet_message_id: str | None,
+    ) -> None:
+        now = utcnow()
+        await self.exec(
+            """UPDATE standalone_outbound_emails
+               SET status='sent',
+                   graph_message_id=?,
+                   internet_message_id=?,
+                   last_sent_at_utc=?,
+                   updated_at_utc=?
+               WHERE id=?""",
+            (graph_message_id, internet_message_id, now, now, row_id),
+        )
+
     async def mark_outbound_email_pending(self, *, row_id: int) -> None:
         now = utcnow()
         await self.exec(
@@ -242,10 +423,24 @@ class Db:
             (now, row_id),
         )
 
+    async def mark_standalone_outbound_email_pending(self, *, row_id: int) -> None:
+        now = utcnow()
+        await self.exec(
+            "UPDATE standalone_outbound_emails SET status='pending', updated_at_utc=? WHERE id=?",
+            (now, row_id),
+        )
+
     async def mark_outbound_email_failed(self, *, row_id: int, error_message: str) -> None:
         now = utcnow()
         await self.exec(
             "UPDATE outbound_emails SET status='failed', updated_at_utc=?, metadata_json=? WHERE id=?",
+            (now, json.dumps({"error": error_message}, ensure_ascii=False), row_id),
+        )
+
+    async def mark_standalone_outbound_email_failed(self, *, row_id: int, error_message: str) -> None:
+        now = utcnow()
+        await self.exec(
+            "UPDATE standalone_outbound_emails SET status='failed', updated_at_utc=?, metadata_json=? WHERE id=?",
             (now, json.dumps({"error": error_message}, ensure_ascii=False), row_id),
         )
 

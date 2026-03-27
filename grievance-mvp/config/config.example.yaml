@@ -164,6 +164,8 @@ graph:
   client_supplied_subfolder: Client supplied data
   # Global SharePoint folder path (under library root) for failed-process review copies.
   failed_processes_folder: config files/failed
+  # Parent folder for standalone non-grievance form artifacts.
+  standalone_parent_folder: Standalone Forms
 email:
   enabled: true
   test_mode: false
@@ -180,3 +182,19 @@ email:
   max_attachment_bytes: 2000000
   resend_cooldown_seconds: 300
   dry_run: false
+standalone_forms:
+  att_mobility_bargaining_suggestion:
+    template_path: /app/templates/docx/AT&TMobility2023BargainingSuggestion_Form.docx
+    form_label: AT&T Mobility Bargaining Suggestion
+    sharepoint_folder_label: AT&T Mobility Bargaining Suggestion
+    signer_count: 1
+    # Set this in the live config to the Local President signer email.
+    default_signer_email: ""
+    sharepoint_storage:
+      root_folder: Mobility Demand Forms
+      label_prefix: Mobility Demand
+      sequence_scope: yearly
+      year_subfolders: true
+      upload_generated: false
+      upload_signed: true
+      upload_audit: true

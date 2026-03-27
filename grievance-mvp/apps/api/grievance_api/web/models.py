@@ -65,6 +65,34 @@ class IntakeResponse(BaseModel):
     documents: list[DocumentStatus]
 
 
+class StandaloneDocumentStatus(BaseModel):
+    document_id: str
+    form_key: str
+    status: str
+    signing_link: str | None = None
+    document_link: str | None = None
+
+
+class StandaloneSubmissionRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    request_id: str = Field(..., description="Client-generated idempotency key")
+    form_key: str = Field(..., description="Standalone form key, for example att_mobility_bargaining_suggestion")
+    local_president_signer_email: str | None = Field(
+        None,
+        description="Optional signer email override for signer1; if omitted, the form config default is used",
+    )
+    template_data: dict[str, object] = Field(default_factory=dict, description="Template merge fields for standalone form")
+
+
+class StandaloneSubmissionResponse(BaseModel):
+    submission_id: str
+    form_key: str
+    form_title: str
+    status: str
+    documents: list[StandaloneDocumentStatus]
+
+
 class CaseStatusResponse(BaseModel):
     case_id: str
     grievance_id: str

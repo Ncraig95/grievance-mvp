@@ -29,6 +29,7 @@ class GraphConfig:
     audit_local_backup_roots: tuple[str, ...]
     client_supplied_subfolder: str
     failed_processes_folder: str
+    standalone_parent_folder: str = "Standalone Forms"
 
 
 @dataclass(frozen=True)
@@ -127,6 +128,27 @@ class IntakeAuthConfig:
     cloudflare_access_client_secret: str
 
 
+@dataclass(frozen=True)
+class StandaloneSharepointStorageConfig:
+    root_folder: str | None = None
+    label_prefix: str = ""
+    sequence_scope: str = "none"
+    year_subfolders: bool = False
+    upload_generated: bool = True
+    upload_signed: bool = True
+    upload_audit: bool = True
+
+
+@dataclass(frozen=True)
+class StandaloneFormConfig:
+    template_path: str
+    form_label: str
+    sharepoint_folder_label: str
+    signer_count: int = 1
+    default_signer_email: str = ""
+    sharepoint_storage: StandaloneSharepointStorageConfig = field(default_factory=StandaloneSharepointStorageConfig)
+
+
 def _default_intake_auth() -> IntakeAuthConfig:
     return IntakeAuthConfig(
         shared_header_name="X-Intake-Key",
@@ -158,6 +180,7 @@ class AppConfig:
     intake_auth: IntakeAuthConfig = field(default_factory=_default_intake_auth)
     rendering: RenderingConfig = field(default_factory=_default_rendering)
     document_policies: dict[str, DocumentPolicyConfig] = field(default_factory=dict)
+    standalone_forms: dict[str, StandaloneFormConfig] = field(default_factory=dict)
     docx_pdf_engine: str = "libreoffice"
     docx_pdf_graph_temp_folder: str = "_docx_pdf_convert"
     wait_for_grievance_number_before_signature: bool = True
@@ -430,6 +453,68 @@ def _normalize_input_source(value: object) -> str:
     return mode
 
 
+def _normalize_standalone_sequence_scope(value: object) -> str:
+    scope = str(value or "none").strip().lower()
+    if scope not in {"none", "yearly"}:
+        return "none"
+    return scope
+
+
+def _parse_standalone_sharepoint_storage(
+    raw_storage: object,
+    *,
+    form_label: str,
+) -> StandaloneSharepointStorageConfig:
+    storage = raw_storage if isinstance(raw_storage, dict) else {}
+    root_folder = str(storage.get("root_folder", "")).strip() or None
+    label_prefix = str(storage.get("label_prefix", "")).strip() or form_label
+    return StandaloneSharepointStorageConfig(
+        root_folder=root_folder,
+        label_prefix=label_prefix,
+        sequence_scope=_normalize_standalone_sequence_scope(storage.get("sequence_scope")),
+        year_subfolders=bool(storage.get("year_subfolders", False)),
+        upload_generated=bool(storage.get("upload_generated", True)),
+        upload_signed=bool(storage.get("upload_signed", True)),
+        upload_audit=bool(storage.get("upload_audit", True)),
+    )
+
+
+def _as_standalone_forms(value: object) -> dict[str, StandaloneFormConfig]:
+    if not isinstance(value, dict):
+        return {}
+
+    out: dict[str, StandaloneFormConfig] = {}
+    for raw_key, raw_form in value.items():
+        key = str(raw_key or "").strip()
+        if not key or not isinstance(raw_form, dict):
+            continue
+
+        template_path = str(raw_form.get("template_path", "")).strip()
+        if not template_path:
+            continue
+
+        form_label = str(raw_form.get("form_label", "")).strip() or key
+        sharepoint_folder_label = (
+            str(raw_form.get("sharepoint_folder_label", "")).strip()
+            or form_label
+        )
+        signer_count = max(1, int(raw_form.get("signer_count", 1)))
+        default_signer_email = str(raw_form.get("default_signer_email", "")).strip()
+
+        out[key] = StandaloneFormConfig(
+            template_path=template_path,
+            form_label=form_label,
+            sharepoint_folder_label=sharepoint_folder_label,
+            signer_count=signer_count,
+            default_signer_email=default_signer_email,
+            sharepoint_storage=_parse_standalone_sharepoint_storage(
+                raw_form.get("sharepoint_storage"),
+                form_label=form_label,
+            ),
+        )
+    return out
+
+
 def load_config(path: str) -> AppConfig:
     p = Path(path)
     raw = yaml.safe_load(p.read_text(encoding="utf-8"))
@@ -440,6 +525,7 @@ def load_config(path: str) -> AppConfig:
     intake_auth_raw = raw.get("intake_auth", {}) or {}
     rendering_raw = raw.get("rendering", {}) or {}
     document_policies_raw = raw.get("document_policies", {}) or {}
+    standalone_forms_raw = raw.get("standalone_forms", {}) or {}
 
     sender_user_id = str(email_raw.get("sender_user_id", "")).strip()
     raw_layout_policies = rendering_raw.get("layout_policies", {})
@@ -501,6 +587,10 @@ def load_config(path: str) -> AppConfig:
             failed_processes_folder=(
                 str(graph_raw.get("failed_processes_folder", "config files/failed")).strip()
                 or "config files/failed"
+            ),
+            standalone_parent_folder=(
+                str(graph_raw.get("standalone_parent_folder", "Standalone Forms")).strip()
+                or "Standalone Forms"
             ),
         ),
         docuseal=DocuSealConfig(
@@ -601,6 +691,7 @@ def load_config(path: str) -> AppConfig:
             layout_policies=parsed_layout_policies,
         ),
         document_policies=parsed_document_policies,
+        standalone_forms=_as_standalone_forms(standalone_forms_raw),
         docx_pdf_engine=_normalize_docx_pdf_engine(raw.get("docx_pdf_engine")),
         docx_pdf_graph_temp_folder=(
             str(raw.get("docx_pdf_graph_temp_folder", "_docx_pdf_convert")).strip()

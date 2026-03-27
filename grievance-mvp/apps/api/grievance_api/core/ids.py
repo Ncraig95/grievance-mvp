@@ -29,5 +29,9 @@ def new_case_id() -> str:
     return f"C{_utc_ts()}_{secrets.token_hex(4)}"
 
 
+def new_submission_id() -> str:
+    return f"S{_utc_ts()}_{secrets.token_hex(4)}"
+
+
 def new_document_id() -> str:
     return f"D{_utc_ts()}_{secrets.token_hex(4)}"

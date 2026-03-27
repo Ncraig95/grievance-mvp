@@ -50,6 +50,18 @@ def migrate(db_path: str) -> None:
 
         con.execute(
             """
+            CREATE TABLE IF NOT EXISTS standalone_form_sequences (
+              form_key TEXT NOT NULL,
+              year INTEGER NOT NULL,
+              last_seq INTEGER NOT NULL,
+              updated_at_utc TEXT NOT NULL,
+              PRIMARY KEY (form_key, year)
+            )
+            """
+        )
+
+        con.execute(
+            """
             CREATE TABLE IF NOT EXISTS document_stages (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               case_id TEXT NOT NULL,
@@ -96,6 +108,83 @@ def migrate(db_path: str) -> None:
             """
         )
 
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS standalone_submissions (
+              id TEXT PRIMARY KEY,
+              request_id TEXT NOT NULL,
+              form_key TEXT NOT NULL,
+              form_title TEXT NOT NULL,
+              signer_email TEXT NOT NULL,
+              status TEXT NOT NULL,
+              created_at_utc TEXT NOT NULL,
+              template_data_json TEXT NOT NULL,
+              sharepoint_folder_path TEXT,
+              sharepoint_folder_web_url TEXT
+            )
+            """
+        )
+
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS standalone_documents (
+              id TEXT PRIMARY KEY,
+              submission_id TEXT NOT NULL,
+              created_at_utc TEXT NOT NULL,
+              form_key TEXT NOT NULL,
+              template_key TEXT,
+              status TEXT NOT NULL,
+              requires_signature INTEGER NOT NULL DEFAULT 1,
+              signer_order_json TEXT,
+              docx_path TEXT,
+              pdf_path TEXT,
+              pdf_sha256 TEXT,
+              docuseal_submission_id TEXT,
+              docuseal_signing_link TEXT,
+              signed_pdf_path TEXT,
+              audit_zip_path TEXT,
+              sharepoint_generated_url TEXT,
+              sharepoint_signed_url TEXT,
+              sharepoint_audit_url TEXT,
+              completed_at_utc TEXT
+            )
+            """
+        )
+
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS standalone_events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              submission_id TEXT NOT NULL,
+              document_id TEXT,
+              ts_utc TEXT NOT NULL,
+              event_type TEXT NOT NULL,
+              details_json TEXT NOT NULL
+            )
+            """
+        )
+
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS standalone_outbound_emails (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              submission_id TEXT NOT NULL,
+              document_scope_id TEXT NOT NULL DEFAULT '',
+              template_key TEXT NOT NULL,
+              recipient_email TEXT NOT NULL,
+              idempotency_key TEXT NOT NULL,
+              status TEXT NOT NULL,
+              graph_message_id TEXT,
+              internet_message_id TEXT,
+              resend_count INTEGER NOT NULL DEFAULT 0,
+              created_at_utc TEXT NOT NULL,
+              last_sent_at_utc TEXT,
+              updated_at_utc TEXT NOT NULL,
+              metadata_json TEXT NOT NULL
+            )
+            """
+        )
+
         # Backwards-compatible column evolution
         _ensure_column(con, "cases", "grievance_id", "TEXT")
         _ensure_column(con, "cases", "approval_status", "TEXT NOT NULL DEFAULT 'pending'")
@@ -114,6 +203,44 @@ def migrate(db_path: str) -> None:
         _ensure_column(con, "documents", "sharepoint_signed_url", "TEXT")
         _ensure_column(con, "documents", "sharepoint_audit_url", "TEXT")
         _ensure_column(con, "documents", "audit_backup_locations_json", "TEXT")
+
+        _ensure_column(con, "standalone_submissions", "request_id", "TEXT")
+        _ensure_column(con, "standalone_submissions", "form_key", "TEXT")
+        _ensure_column(con, "standalone_submissions", "form_title", "TEXT")
+        _ensure_column(con, "standalone_submissions", "signer_email", "TEXT")
+        _ensure_column(con, "standalone_submissions", "status", "TEXT")
+        _ensure_column(con, "standalone_submissions", "created_at_utc", "TEXT")
+        _ensure_column(con, "standalone_submissions", "template_data_json", "TEXT")
+        _ensure_column(con, "standalone_submissions", "filing_year", "INTEGER")
+        _ensure_column(con, "standalone_submissions", "filing_sequence", "INTEGER")
+        _ensure_column(con, "standalone_submissions", "filing_label", "TEXT")
+        _ensure_column(con, "standalone_submissions", "sharepoint_folder_path", "TEXT")
+        _ensure_column(con, "standalone_submissions", "sharepoint_folder_web_url", "TEXT")
+
+        _ensure_column(con, "standalone_documents", "submission_id", "TEXT")
+        _ensure_column(con, "standalone_documents", "created_at_utc", "TEXT")
+        _ensure_column(con, "standalone_documents", "form_key", "TEXT")
+        _ensure_column(con, "standalone_documents", "template_key", "TEXT")
+        _ensure_column(con, "standalone_documents", "status", "TEXT")
+        _ensure_column(con, "standalone_documents", "requires_signature", "INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(con, "standalone_documents", "signer_order_json", "TEXT")
+        _ensure_column(con, "standalone_documents", "docx_path", "TEXT")
+        _ensure_column(con, "standalone_documents", "pdf_path", "TEXT")
+        _ensure_column(con, "standalone_documents", "pdf_sha256", "TEXT")
+        _ensure_column(con, "standalone_documents", "docuseal_submission_id", "TEXT")
+        _ensure_column(con, "standalone_documents", "docuseal_signing_link", "TEXT")
+        _ensure_column(con, "standalone_documents", "signed_pdf_path", "TEXT")
+        _ensure_column(con, "standalone_documents", "audit_zip_path", "TEXT")
+        _ensure_column(con, "standalone_documents", "sharepoint_generated_url", "TEXT")
+        _ensure_column(con, "standalone_documents", "sharepoint_signed_url", "TEXT")
+        _ensure_column(con, "standalone_documents", "sharepoint_audit_url", "TEXT")
+        _ensure_column(con, "standalone_documents", "completed_at_utc", "TEXT")
+
+        _ensure_column(con, "standalone_events", "submission_id", "TEXT")
+        _ensure_column(con, "standalone_events", "document_id", "TEXT")
+
+        _ensure_column(con, "standalone_outbound_emails", "submission_id", "TEXT")
+        _ensure_column(con, "standalone_outbound_emails", "document_scope_id", "TEXT NOT NULL DEFAULT ''")
 
         doc_cols = _table_columns(con, "documents")
         if "pdf_sha256" not in doc_cols and "pdf_sa256" in doc_cols:
@@ -148,14 +275,27 @@ def migrate(db_path: str) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_docuseal_submission ON documents(docuseal_submission_id)",
             "DROP INDEX IF EXISTS idx_documents_case_doc_type",
             "CREATE INDEX IF NOT EXISTS idx_documents_case_doc_type ON documents(case_id, doc_type)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_standalone_submissions_request_id ON standalone_submissions(request_id)",
+            "CREATE INDEX IF NOT EXISTS idx_standalone_documents_submission_id ON standalone_documents(submission_id)",
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_standalone_documents_docuseal_submission "
+                "ON standalone_documents(docuseal_submission_id)"
+            ),
             "CREATE INDEX IF NOT EXISTS idx_events_case_id ON events(case_id)",
             "CREATE INDEX IF NOT EXISTS idx_events_document_id ON events(document_id)",
+            "CREATE INDEX IF NOT EXISTS idx_standalone_events_submission_id ON standalone_events(submission_id)",
+            "CREATE INDEX IF NOT EXISTS idx_standalone_events_document_id ON standalone_events(document_id)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_receipts_provider_key ON webhook_receipts(provider, receipt_key)",
             (
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_outbound_emails_dedup "
                 "ON outbound_emails(case_id, document_scope_id, template_key, recipient_email, idempotency_key)"
             ),
             "CREATE INDEX IF NOT EXISTS idx_outbound_emails_case ON outbound_emails(case_id)",
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_standalone_outbound_emails_dedup "
+                "ON standalone_outbound_emails(submission_id, document_scope_id, template_key, recipient_email, idempotency_key)"
+            ),
+            "CREATE INDEX IF NOT EXISTS idx_standalone_outbound_emails_submission ON standalone_outbound_emails(submission_id)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_document_stages_doc_stage ON document_stages(document_id, stage_no)",
             "CREATE INDEX IF NOT EXISTS idx_document_stages_submission_id ON document_stages(docuseal_submission_id)",
             "CREATE INDEX IF NOT EXISTS idx_document_stages_document_id ON document_stages(document_id)",

@@ -15,8 +15,16 @@ from ..db.db import Db, utcnow
 from ..services.audit_backups import fanout_audit_backups, merge_backup_locations_json
 from ..services.case_folder_naming import build_case_folder_member_name, resolve_contract_label
 from ..services.contract_timeline import calculate_deadline, deadline_days_for_contract, resolve_contract_and_incident_date
+from ..services.grievance_id_allocator import current_year_in_timezone
 from ..services.graph_mail import MailAttachment
 from ..services.notification_service import NotificationService
+from ..services.standalone_forms import (
+    standalone_audit_filename,
+    standalone_document_dir,
+    standalone_sharepoint_folder_path,
+    standalone_sharepoint_root_folder,
+    standalone_signed_filename,
+)
 from ..services.staged_signature_workflow import (
     create_or_send_stage,
     is_3g3a_staged,
@@ -218,6 +226,23 @@ def _approval_url(base: str | None, case_id: str) -> str:
     return f"{base.rstrip('/')}/{case_id}"
 
 
+def _resolve_standalone_form_cfg(cfg, form_key: str, fallback_title: str):  # noqa: ANN001
+    wanted = str(form_key or "").strip()
+    if wanted in cfg.standalone_forms:
+        return cfg.standalone_forms[wanted]
+    lowered = wanted.lower()
+    if lowered in cfg.standalone_forms:
+        return cfg.standalone_forms[lowered]
+    from ..core.config import StandaloneFormConfig
+
+    return StandaloneFormConfig(
+        template_path="",
+        form_label=fallback_title or wanted or "Standalone Form",
+        sharepoint_folder_label=fallback_title or wanted or "Standalone Form",
+        signer_count=1,
+    )
+
+
 def _extract_bearer_token(headers: Mapping[str, str]) -> str | None:
     auth_header = headers.get("Authorization")
     if not auth_header:
@@ -299,10 +324,378 @@ async def webhook_docuseal(request: Request):
            WHERE d.docuseal_submission_id=?""",
         (submission_id,),
     )
+    standalone_row = None
     if not row:
+        standalone_row = await db.fetchone(
+            """SELECT d.id, d.submission_id, d.form_key, d.template_key, d.signer_order_json, d.pdf_path,
+                      d.docuseal_signing_link, s.form_title, s.signer_email, s.template_data_json,
+                      s.filing_year, s.filing_sequence, s.filing_label,
+                      s.sharepoint_folder_path, s.sharepoint_folder_web_url
+               FROM standalone_documents d
+               JOIN standalone_submissions s ON s.id = d.submission_id
+               WHERE d.docuseal_submission_id=?""",
+            (submission_id,),
+        )
+    if not row and not standalone_row:
         await db.mark_receipt_handled("docuseal", receipt_key)
         logger.warning("docuseal_webhook_unknown_submission", extra={"correlation_id": submission_id})
         return {"ok": True, "handled": False, "reason": "unknown_submission"}
+
+    if standalone_row:
+        (
+            document_id,
+            standalone_submission_id,
+            standalone_form_key,
+            template_key,
+            signer_order_json,
+            pdf_path,
+            signing_link,
+            form_title,
+            signer_email,
+            template_data_json,
+            existing_filing_year,
+            existing_filing_sequence,
+            existing_filing_label,
+            existing_folder_path,
+            existing_folder_web_url,
+        ) = standalone_row
+        form_cfg = _resolve_standalone_form_cfg(cfg, standalone_form_key, form_title)
+        storage_cfg = form_cfg.sharepoint_storage
+        await db.add_standalone_event(
+            standalone_submission_id,
+            document_id,
+            "docuseal_webhook_received",
+            {"event_type": _event_type(payload), "receipt_key": receipt_key},
+        )
+
+        if not _is_completion_event(payload):
+            await db.mark_receipt_handled("docuseal", receipt_key)
+            return {"ok": True, "handled": False, "reason": "non_completion_event"}
+
+        completion_receipt_key = f"completion:{document_id}:{submission_id}"
+        completion_claim_raw = json.dumps(
+            {"source_receipt_key": receipt_key, "event_type": _event_type(payload)},
+            ensure_ascii=False,
+        )
+        if not await db.try_claim_receipt("docuseal", completion_receipt_key, completion_claim_raw):
+            await db.mark_receipt_handled("docuseal", receipt_key)
+            logger.info(
+                "docuseal_completion_deduped",
+                extra={"correlation_id": standalone_submission_id, "document_id": document_id},
+            )
+            return {"ok": True, "deduped": True, "reason": "completion_already_processed"}
+
+        try:
+            doc_dir = standalone_document_dir(
+                data_root=cfg.data_root,
+                submission_id=standalone_submission_id,
+                document_id=document_id,
+            )
+            doc_dir.mkdir(parents=True, exist_ok=True)
+
+            signed_pdf_bytes: bytes | None = None
+            signed_pdf_path: str | None = None
+            audit_zip_path: str | None = None
+            audit_file_name = f"{standalone_form_key}_audit.zip"
+            submission_details: dict | None = None
+
+            try:
+                artifacts = docuseal.download_completed_artifacts(submission_id=submission_id)
+                maybe_submission = artifacts.get("submission")
+                if isinstance(maybe_submission, dict):
+                    submission_details = maybe_submission
+                zip_bytes = artifacts.get("completed_zip_bytes")
+                if isinstance(zip_bytes, (bytes, bytearray)) and len(zip_bytes) > 0:
+                    audit_zip_path = str(doc_dir / "docuseal_completed.zip")
+                    Path(audit_zip_path).write_bytes(bytes(zip_bytes))
+                    extracted = _extract_first_pdf(bytes(zip_bytes))
+                    if extracted:
+                        _, signed_pdf_bytes = extracted
+                        signed_pdf_path = str(doc_dir / "signed.pdf")
+                        Path(signed_pdf_path).write_bytes(signed_pdf_bytes)
+                await db.add_standalone_event(
+                    standalone_submission_id,
+                    document_id,
+                    "docuseal_artifacts_downloaded",
+                    {},
+                )
+            except Exception as exc:
+                await db.add_standalone_event(
+                    standalone_submission_id,
+                    document_id,
+                    "docuseal_artifact_download_failed",
+                    {"error": str(exc)},
+                )
+                logger.exception(
+                    "docuseal_artifact_download_failed",
+                    extra={"correlation_id": standalone_submission_id, "document_id": document_id},
+                )
+
+            if signed_pdf_bytes is None:
+                candidate_doc_url = ""
+                doc_urls = _iter_document_urls(payload)
+                if not doc_urls and submission_details:
+                    doc_urls = _iter_document_urls(submission_details)
+                if doc_urls:
+                    candidate_doc_url = doc_urls[0]
+                downloaded_signed = _download_public_bytes(candidate_doc_url)
+                if downloaded_signed:
+                    signed_pdf_bytes = downloaded_signed
+                    signed_pdf_path = str(doc_dir / "signed.pdf")
+                    Path(signed_pdf_path).write_bytes(signed_pdf_bytes)
+                    await db.add_standalone_event(
+                        standalone_submission_id,
+                        document_id,
+                        "docuseal_signed_pdf_downloaded",
+                        {"source": "document_url"},
+                    )
+
+            if audit_zip_path is None:
+                audit_url = _find_audit_url(payload)
+                if not audit_url and submission_details:
+                    audit_url = _find_audit_url(submission_details)
+                downloaded_audit = _download_public_bytes(audit_url)
+                if downloaded_audit:
+                    ext = ".zip" if downloaded_audit[:2] == b"PK" else ".pdf"
+                    audit_zip_path = str(doc_dir / f"docuseal_audit_log{ext}")
+                    Path(audit_zip_path).write_bytes(downloaded_audit)
+                    audit_file_name = f"{standalone_form_key}_audit{ext}"
+                    await db.add_standalone_event(
+                        standalone_submission_id,
+                        document_id,
+                        "docuseal_audit_downloaded",
+                        {"source": "audit_log_url", "file_extension": ext},
+                    )
+
+            if signed_pdf_bytes is None and storage_cfg.sequence_scope != "yearly" and pdf_path and Path(pdf_path).exists():
+                signed_pdf_bytes = Path(pdf_path).read_bytes()
+                signed_pdf_path = pdf_path
+
+            sharepoint_generated_url: str | None = None
+            sharepoint_signed_url: str | None = None
+            sharepoint_audit_url: str | None = None
+            sharepoint_folder_path = existing_folder_path or None
+            signed_file_name = f"{standalone_form_key}_{document_id}_signed.pdf"
+
+            if storage_cfg.sequence_scope == "yearly":
+                filing_year = int(existing_filing_year) if existing_filing_year is not None else current_year_in_timezone(
+                    cfg.grievance_id.timezone
+                )
+                filing_year, _, filing_label, sharepoint_folder_path = await db.ensure_standalone_submission_filing_assignment(
+                    submission_id=standalone_submission_id,
+                    form_key=standalone_form_key,
+                    filing_year=filing_year,
+                    root_folder=standalone_sharepoint_root_folder(
+                        standalone_parent_folder=cfg.graph.standalone_parent_folder,
+                        form_cfg=form_cfg,
+                    ),
+                    label_prefix=storage_cfg.label_prefix,
+                    year_subfolders=storage_cfg.year_subfolders,
+                )
+                signed_file_name = standalone_signed_filename(filing_label=filing_label)
+                audit_file_name = standalone_audit_filename(
+                    filing_label=filing_label,
+                    extension=Path(audit_zip_path).suffix if audit_zip_path else ".zip",
+                )
+                if storage_cfg.upload_signed and not signed_pdf_path:
+                    raise RuntimeError("signed pdf missing for standalone completion upload")
+                if storage_cfg.upload_audit and not audit_zip_path:
+                    raise RuntimeError("audit artifact missing for standalone completion upload")
+
+            try:
+                if cfg.graph.site_hostname and cfg.graph.site_path and cfg.graph.document_library:
+                    if not sharepoint_folder_path:
+                        sharepoint_folder_path = standalone_sharepoint_folder_path(
+                            standalone_parent_folder=cfg.graph.standalone_parent_folder,
+                            form_cfg=form_cfg,
+                            submission_id=standalone_submission_id,
+                        )
+
+                    generated_pdf_path = Path(pdf_path) if pdf_path else None
+                    if storage_cfg.upload_generated and generated_pdf_path and generated_pdf_path.exists():
+                        generated_upload = graph.upload_local_file_to_folder_path(
+                            site_hostname=cfg.graph.site_hostname,
+                            site_path=cfg.graph.site_path,
+                            library=cfg.graph.document_library,
+                            folder_path="/".join((sharepoint_folder_path, cfg.graph.generated_subfolder)),
+                            filename=f"{standalone_form_key}_{document_id}.pdf",
+                            local_path=str(generated_pdf_path),
+                        )
+                        sharepoint_generated_url = generated_upload.web_url
+                    if storage_cfg.upload_signed and signed_pdf_path and Path(signed_pdf_path).exists():
+                        signed_target_folder = (
+                            sharepoint_folder_path
+                            if storage_cfg.sequence_scope == "yearly"
+                            else "/".join((sharepoint_folder_path, cfg.graph.signed_subfolder))
+                        )
+                        signed_upload = graph.upload_local_file_to_folder_path(
+                            site_hostname=cfg.graph.site_hostname,
+                            site_path=cfg.graph.site_path,
+                            library=cfg.graph.document_library,
+                            folder_path=signed_target_folder,
+                            filename=signed_file_name,
+                            local_path=signed_pdf_path,
+                        )
+                        sharepoint_signed_url = signed_upload.web_url
+                    if storage_cfg.upload_audit and audit_zip_path and Path(audit_zip_path).exists():
+                        audit_target_folder = (
+                            sharepoint_folder_path
+                            if storage_cfg.sequence_scope == "yearly"
+                            else "/".join((sharepoint_folder_path, cfg.graph.audit_subfolder))
+                        )
+                        audit_upload = graph.upload_local_file_to_folder_path(
+                            site_hostname=cfg.graph.site_hostname,
+                            site_path=cfg.graph.site_path,
+                            library=cfg.graph.document_library,
+                            folder_path=audit_target_folder,
+                            filename=audit_file_name,
+                            local_path=audit_zip_path,
+                        )
+                        sharepoint_audit_url = audit_upload.web_url
+                    if storage_cfg.sequence_scope == "yearly":
+                        if storage_cfg.upload_signed and not sharepoint_signed_url:
+                            raise RuntimeError("signed SharePoint upload did not complete")
+                        if storage_cfg.upload_audit and not sharepoint_audit_url:
+                            raise RuntimeError("audit SharePoint upload did not complete")
+                await db.add_standalone_event(
+                    standalone_submission_id,
+                    document_id,
+                    "sharepoint_upload_completed",
+                    {
+                        "folder_path": sharepoint_folder_path,
+                        "generated_url": sharepoint_generated_url,
+                        "signed_url": sharepoint_signed_url,
+                        "audit_url": sharepoint_audit_url,
+                    },
+                )
+            except Exception as exc:
+                await db.add_standalone_event(
+                    standalone_submission_id,
+                    document_id,
+                    "sharepoint_upload_failed",
+                    {"error": str(exc)},
+                )
+                logger.exception(
+                    "sharepoint_upload_failed",
+                    extra={"correlation_id": standalone_submission_id, "document_id": document_id},
+                )
+                if storage_cfg.sequence_scope == "yearly":
+                    raise
+
+            await db.exec(
+                """UPDATE standalone_documents
+                   SET status=?, completed_at_utc=?, signed_pdf_path=?, audit_zip_path=?,
+                       sharepoint_generated_url=?, sharepoint_signed_url=?, sharepoint_audit_url=?
+                   WHERE id=?""",
+                (
+                    "completed",
+                    utcnow(),
+                    signed_pdf_path,
+                    audit_zip_path,
+                    sharepoint_generated_url,
+                    sharepoint_signed_url,
+                    sharepoint_audit_url,
+                    document_id,
+                ),
+            )
+            await db.exec(
+                """UPDATE standalone_submissions
+                   SET status=?, sharepoint_folder_path=?, sharepoint_folder_web_url=?
+                   WHERE id=?""",
+                (
+                    "completed",
+                    sharepoint_folder_path,
+                    existing_folder_web_url,
+                    standalone_submission_id,
+                ),
+            )
+
+            signer_emails: list[str] = []
+            if signer_order_json:
+                try:
+                    parsed = json.loads(signer_order_json)
+                    if isinstance(parsed, list):
+                        signer_emails = [str(s).strip() for s in parsed if str(s).strip()]
+                except Exception:
+                    signer_emails = []
+            if not signer_emails and signer_email:
+                signer_emails = [str(signer_email).strip()]
+
+            docuseal_signing_url = signing_link or _find_signing_url(payload)
+            document_link = sharepoint_signed_url or sharepoint_generated_url or docuseal_signing_url
+            signer_attachments: list[MailAttachment] | None = None
+            if signed_pdf_bytes and len(signed_pdf_bytes) <= cfg.email.max_attachment_bytes:
+                signer_attachments = [
+                    MailAttachment(
+                        filename=f"{standalone_form_key}_signed.pdf",
+                        content_type="application/pdf",
+                        content_bytes=signed_pdf_bytes,
+                    )
+                ]
+
+            common_context = {
+                "submission_id": standalone_submission_id,
+                "form_key": standalone_form_key,
+                "form_title": form_title,
+                "document_id": document_id,
+                "document_type": form_title,
+                "docuseal_signing_url": docuseal_signing_url,
+                "document_link": document_link,
+                "copy_link": document_link if cfg.email.allow_signer_copy_link else "Not permitted",
+                "status": "completed",
+                "completed_at_utc": utcnow(),
+            }
+
+            if cfg.email.enabled:
+                completion_idem_prefix = f"standalone_completion:{document_id}:{submission_id}"
+                for signer in signer_emails:
+                    await notifications.send_one(
+                        case_id=standalone_submission_id,
+                        document_id=document_id,
+                        recipient_email=signer,
+                        template_key="standalone_completion_signer",
+                        context={**common_context, "signer_email": signer},
+                        idempotency_key=f"{completion_idem_prefix}:completion_signer:{signer.lower()}",
+                        attachments=signer_attachments,
+                        form_key=standalone_form_key,
+                        scope_kind="standalone",
+                    )
+
+                internal_attachments: list[MailAttachment] | None = None
+                if cfg.email.artifact_delivery_mode == "attach_pdf":
+                    internal_attachments = signer_attachments
+                for recipient in cfg.email.internal_recipients:
+                    await notifications.send_one(
+                        case_id=standalone_submission_id,
+                        document_id=document_id,
+                        recipient_email=recipient,
+                        template_key="standalone_completion_internal",
+                        context=common_context,
+                        idempotency_key=f"{completion_idem_prefix}:completion_internal:{recipient.lower()}",
+                        attachments=internal_attachments,
+                        form_key=standalone_form_key,
+                        scope_kind="standalone",
+                    )
+
+            await db.add_standalone_event(
+                standalone_submission_id,
+                document_id,
+                "docuseal_completion_processed",
+                {"receipt_key": receipt_key},
+            )
+            await db.mark_receipt_handled("docuseal", completion_receipt_key)
+            await db.mark_receipt_handled("docuseal", receipt_key)
+            logger.info(
+                "docuseal_completion_processed",
+                extra={"correlation_id": standalone_submission_id, "document_id": document_id},
+            )
+            return {"ok": True, "handled": True}
+        except Exception:
+            await db.exec("UPDATE standalone_documents SET status='failed' WHERE id=?", (document_id,))
+            await db.exec("UPDATE standalone_submissions SET status='failed' WHERE id=?", (standalone_submission_id,))
+            await db.release_receipt_claim("docuseal", completion_receipt_key)
+            await db.release_receipt_claim("docuseal", receipt_key)
+            raise
 
     (
         document_id,

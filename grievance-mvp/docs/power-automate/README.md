@@ -1,6 +1,7 @@
 # Power Automate + Forms Integration Guides
 
 This folder contains per-document setup guides for the intake API.
+The AT&T Mobility bargaining suggestion guide is the combined operator handoff for both the Microsoft Form build and the Power Automate flow.
 
 Supported guides:
 
@@ -12,6 +13,7 @@ Supported guides:
 - `disciplinary_grievance_brief.md`
 - `settlement_form_3106.md`
 - `bst_grievance_form_3g3a.md` (Q1-Q10 staging guide)
+- `att_mobility_bargaining_suggestion.md` (combined Forms + Power Automate handoff for the standalone workflow)
 
 ## Common flow pattern (all docs)
 
@@ -25,6 +27,11 @@ Supported guides:
      - intake auth headers if enabled in your config
 4. Parse JSON response
 5. Store `case_id`, `grievance_id`, and optional `documents[0].signing_link`
+
+Standalone exception:
+
+- `att_mobility_bargaining_suggestion.md` uses the standalone endpoint instead of `/intake`.
+- Its SharePoint filing happens only after DocuSeal signature completion.
 
 ## Global intake fields required in every payload
 

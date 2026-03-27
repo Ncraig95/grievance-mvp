@@ -1,0 +1,14 @@
+Standalone signature workflow completed.
+
+Submission ID: $submission_id
+Document ID: $document_id
+Form: $form_title
+
+DocuSeal record:
+$docuseal_signing_url
+
+Document link:
+$document_link
+
+Copy link (if allowed):
+$copy_link
