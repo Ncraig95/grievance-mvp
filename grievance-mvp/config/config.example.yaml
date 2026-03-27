@@ -138,8 +138,6 @@ docuseal:
         signer1_date: { page: 0, x: 0.705, y: 0.689, w: 0.168, h: 0.024 }
         signer2_signature: { page: 0, x: 0.333, y: 0.719, w: 0.355, h: 0.024 }
         signer2_date: { page: 0, x: 0.705, y: 0.719, w: 0.168, h: 0.024 }
-        signer3_signature: { page: 0, x: 0.333, y: 0.749, w: 0.355, h: 0.024 }
-        signer3_date: { page: 0, x: 0.705, y: 0.749, w: 0.168, h: 0.024 }
   # Optional per-form template ids (keys are template_key or doc_type).
   # In strict mode this must include every form that requires signature dispatch.
   template_ids: {}
