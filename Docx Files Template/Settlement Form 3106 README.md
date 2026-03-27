@@ -63,6 +63,11 @@ Type: `Long text`
 Subtext: `Main issue text. Auto-expands in the DOCX issue block.`
 Payload key: `template_data.issue_text`
 
+11. Question: `Settlement Terms`
+Type: `Long text`
+Subtext: `Main settlement terms. Auto-expands in the DOCX settlement block.`
+Payload key: `template_data.settlement_text`
+
 No separate question for display grievance number:
 - Set `template_data.grievance_number` from `grievance_id` in flow.
 No separate question for intake narrative:

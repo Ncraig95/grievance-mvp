@@ -33,9 +33,11 @@ Template-specific (`template_data`):
 - Union representative in attendance -> `union_rep_attending`
 - Issue article number -> `issue_article`
 - Issue details (Long text, auto-expanding) -> `issue_text`
+- Settlement terms (Long text, auto-expanding) -> `settlement_text`
 
 Optional line-wrap controls:
 - Issue wrap width (integer) -> `issue_line_wrap_width` (default `95`)
+- Settlement wrap width (integer) -> `settlement_line_wrap_width` (default `95`)
 
 Signer emails (`documents[0].signers`, required for 2-signature flow):
 - Company representative/manager signer email -> `documents[0].signers[0]`
@@ -104,6 +106,12 @@ Required: `Yes`
 Subtext: `Main issue text; this field auto-expands in the issue rows.`
 Payload key: `template_data.issue_text`
 
+11. Question text: `Settlement Terms`
+Question type: `Long text`
+Required: `Yes`
+Subtext: `Main settlement terms; this field auto-expands in the settlement rows.`
+Payload key: `template_data.settlement_text`
+
 ## HTTP body skeleton
 
 `contract` is still required by the intake API. Set it as a fixed value in the flow, not a Forms question.
@@ -138,6 +146,8 @@ Set `template_data.grievance_number` from `grievance_id` in flow.
     "union_rep_attending": "<union rep>",
     "issue_article": "<article>",
     "issue_text": "<long issue narrative>",
+    "settlement_text": "<long settlement terms>",
+    "settlement_line_wrap_width": 95,
     "issue_line_wrap_width": 95
   }
 }
@@ -146,6 +156,7 @@ Set `template_data.grievance_number` from `grievance_id` in flow.
 ## Template behavior notes
 
 - `issue_text` is rendered as a dynamic row block (`issue_rows`) so it can expand vertically without manual line edits.
+- `settlement_text` is rendered as a dynamic row block (`settlement_rows`) so it can expand vertically without manual line edits.
 - If `issue_article` is blank but `article` is provided, the template uses `article` as fallback.
 - Signature fields are wired as DocuSeal tags.
 - `{{Sig_es_:signer1:signature}}` -> Company Representative Signature.
