@@ -71,6 +71,22 @@ class _FakeGraphUploader:
         )
 
 
+class _FakeNotifications:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def send_one(self, **kwargs):  # noqa: ANN003
+        self.calls.append(dict(kwargs))
+        return SimpleNamespace(
+            recipient_email=str(kwargs.get("recipient_email") or ""),
+            status="sent",
+            graph_message_id="g1",
+            internet_message_id="i1",
+            resend_count=0,
+            deduped=False,
+        )
+
+
 class _Request:
     def __init__(self, *, state, body: bytes = b"", headers: dict[str, str] | None = None) -> None:  # noqa: ANN001
         self.app = SimpleNamespace(state=state)
@@ -401,6 +417,82 @@ class StandaloneWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(submission_row[2], 1)
         self.assertEqual(submission_row[3], "Mobility Demand 1")
         self.assertEqual(submission_row[4], "Mobility Demand Forms/2026/Mobility Demand 1")
+
+    async def test_webhook_completion_emails_attach_signed_pdf_for_signer_and_internal(self) -> None:
+        submission_id = "S202603270003"
+        document_id = "D202603270003"
+        pdf_dir = Path(self.data_root) / "standalone" / submission_id / document_id
+        pdf_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = pdf_dir / "generated.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n% generated pdf\n")
+
+        await self.db.exec(
+            """INSERT INTO standalone_submissions(
+                 id, request_id, form_key, form_title, signer_email, status, created_at_utc, template_data_json
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                submission_id,
+                "forms-999",
+                "att_mobility_bargaining_suggestion",
+                "AT&T Mobility Bargaining Suggestion",
+                "president@example.org",
+                "awaiting_signature",
+                "2026-03-27T12:00:00+00:00",
+                "{}",
+            ),
+        )
+        await self.db.exec(
+            """INSERT INTO standalone_documents(
+                 id, submission_id, created_at_utc, form_key, template_key, status, requires_signature,
+                 signer_order_json, pdf_path, docuseal_submission_id, docuseal_signing_link
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                document_id,
+                submission_id,
+                "2026-03-27T12:00:00+00:00",
+                "att_mobility_bargaining_suggestion",
+                "att_mobility_bargaining_suggestion",
+                "awaiting_signature",
+                1,
+                json.dumps(["president@example.org"]),
+                str(pdf_path),
+                "ds-submission-4",
+                "https://sign.local/4",
+            ),
+        )
+
+        cfg = self._cfg()
+        cfg.docuseal = SimpleNamespace(webhook_secret="REPLACE", default_template_id=1, template_ids={}, strict_template_ids=False)
+        cfg.graph.site_hostname = "contoso.sharepoint.com"
+        cfg.graph.site_path = "/sites/Grievances"
+        cfg.graph.document_library = "Documents"
+        cfg.email.enabled = True
+        cfg.email.internal_recipients = ("staff@example.org",)
+        notifications = _FakeNotifications()
+        state = SimpleNamespace(
+            cfg=cfg,
+            db=self.db,
+            logger=logging.getLogger("test"),
+            graph=_FakeGraphUploader(),
+            docuseal=_FakeDocuSealWebhook(),
+            notifications=notifications,
+        )
+        payload = {"event": "submission.completed", "submission_id": "ds-submission-4"}
+        request = _Request(state=state, body=json.dumps(payload).encode("utf-8"), headers={})
+
+        with patch("grievance_api.web.routes_webhook.current_year_in_timezone", return_value=2026):
+            result = await webhook_docuseal(request)
+
+        self.assertTrue(result["handled"])
+        self.assertEqual(len(notifications.calls), 2)
+        signer_call = notifications.calls[0]
+        internal_call = notifications.calls[1]
+        self.assertEqual(signer_call["template_key"], "standalone_completion_signer")
+        self.assertEqual(internal_call["template_key"], "standalone_completion_internal")
+        self.assertIsNotNone(signer_call["attachments"])
+        self.assertIsNotNone(internal_call["attachments"])
+        self.assertEqual(signer_call["attachments"][0].filename, "att_mobility_bargaining_suggestion_signed.pdf")
+        self.assertEqual(internal_call["attachments"][0].filename, "att_mobility_bargaining_suggestion_signed.pdf")
 
 
 if __name__ == "__main__":

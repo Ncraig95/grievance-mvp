@@ -8,6 +8,8 @@ Incident Date: $incident_date
 Deadline ($deadline_days days from incident): $deadline_date
 If approved, grievance number will be: $projected_grievance_number
 
+The signed PDF is attached when available.
+
 Approval link:
 $approval_url
 

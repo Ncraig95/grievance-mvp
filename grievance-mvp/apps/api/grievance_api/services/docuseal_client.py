@@ -2152,6 +2152,100 @@ class DocuSealClient:
             return {}
         return self.extract_signing_links_by_email(sub)
 
+    def delete_submission(self, *, submission_id: str, permanently: bool = True) -> dict[str, object]:
+        sid = str(submission_id or "").strip()
+        if not sid:
+            raise RuntimeError("DocuSeal submission delete requires a submission_id")
+
+        resp = requests.delete(
+            f"{self.base_url}/api/submissions/{sid}",
+            headers=self._headers(is_json=False),
+            params={"permanently": "true"} if permanently else None,
+            timeout=self.timeout,
+        )
+        try:
+            response_payload: object = resp.json()
+        except Exception:
+            response_payload = resp.text[:400]
+
+        if resp.status_code == 404:
+            return {
+                "ok": True,
+                "already_missing": True,
+                "status_code": resp.status_code,
+                "response": response_payload,
+            }
+        if not (200 <= resp.status_code < 300):
+            raise RuntimeError(
+                f"DocuSeal submission delete failed: {resp.status_code} {str(response_payload)[:400]}"
+            )
+
+        return {
+            "ok": True,
+            "already_missing": False,
+            "status_code": resp.status_code,
+            "response": response_payload,
+        }
+
+    def list_submitters(self, *, submission_id: str) -> list[dict[str, object]]:
+        sid = str(submission_id or "").strip()
+        if not sid:
+            raise RuntimeError("DocuSeal submitter lookup requires a submission_id")
+
+        resp = requests.get(
+            f"{self.base_url}/api/submitters",
+            headers=self._headers(is_json=False),
+            params={"submission_id": sid, "limit": 100},
+            timeout=self.timeout,
+        )
+        if not (200 <= resp.status_code < 300):
+            raise RuntimeError(f"DocuSeal submitter lookup failed: {resp.status_code} {resp.text[:400]}")
+
+        try:
+            payload = resp.json()
+        except Exception as exc:
+            raise RuntimeError("DocuSeal submitter lookup returned invalid JSON") from exc
+
+        if isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, list):
+                return [item for item in data if isinstance(item, dict)]
+            if all(key in payload for key in ("id", "submission_id")):
+                return [payload]
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        return []
+
+    def update_submitter(
+        self,
+        *,
+        submitter_id: str | int,
+        email: str | None = None,
+        send_email: bool = False,
+    ) -> dict[str, object]:
+        submitter_key = str(submitter_id or "").strip()
+        if not submitter_key:
+            raise RuntimeError("DocuSeal submitter update requires a submitter_id")
+
+        payload: dict[str, object] = {"send_email": bool(send_email)}
+        normalized_email = str(email or "").strip()
+        if normalized_email:
+            payload["email"] = normalized_email
+
+        resp = requests.put(
+            f"{self.base_url}/api/submitters/{submitter_key}",
+            headers=self._headers(is_json=True),
+            json=payload,
+            timeout=self.timeout,
+        )
+        if not (200 <= resp.status_code < 300):
+            raise RuntimeError(f"DocuSeal submitter update failed: {resp.status_code} {resp.text[:400]}")
+        try:
+            response_payload = resp.json()
+        except Exception:
+            response_payload = {"raw_text": resp.text[:400]}
+        return response_payload if isinstance(response_payload, dict) else {"data": response_payload}
+
     @staticmethod
     def _first_object(payload: object) -> dict:
         if isinstance(payload, dict):

@@ -316,7 +316,7 @@ async def webhook_docuseal(request: Request):
         return {"ok": True, "handled": False, "reason": "missing_submission_id"}
 
     row = await db.fetchone(
-        """SELECT d.id, d.case_id, d.doc_type, d.template_key, d.signer_order_json, d.pdf_path, d.docuseal_signing_link,
+        """SELECT d.id, d.case_id, d.doc_type, d.template_key, d.status, d.signer_order_json, d.pdf_path, d.docuseal_signing_link,
                   c.grievance_id, c.grievance_number, c.member_name, c.member_email, c.intake_payload_json,
                   c.sharepoint_case_folder, c.sharepoint_case_web_url
            FROM documents d
@@ -327,8 +327,8 @@ async def webhook_docuseal(request: Request):
     standalone_row = None
     if not row:
         standalone_row = await db.fetchone(
-            """SELECT d.id, d.submission_id, d.form_key, d.template_key, d.signer_order_json, d.pdf_path,
-                      d.docuseal_signing_link, s.form_title, s.signer_email, s.template_data_json,
+            """SELECT d.id, d.submission_id, d.form_key, d.template_key, d.status, d.signer_order_json, d.pdf_path,
+                      d.docuseal_signing_link, s.form_title, s.signer_email, s.status, s.template_data_json,
                       s.filing_year, s.filing_sequence, s.filing_label,
                       s.sharepoint_folder_path, s.sharepoint_folder_web_url
                FROM standalone_documents d
@@ -347,11 +347,13 @@ async def webhook_docuseal(request: Request):
             standalone_submission_id,
             standalone_form_key,
             template_key,
+            standalone_document_status,
             signer_order_json,
             pdf_path,
             signing_link,
             form_title,
             signer_email,
+            standalone_submission_status,
             template_data_json,
             existing_filing_year,
             existing_filing_sequence,
@@ -359,6 +361,11 @@ async def webhook_docuseal(request: Request):
             existing_folder_path,
             existing_folder_web_url,
         ) = standalone_row
+        if str(standalone_document_status or "").strip() == "ops_cleared" or str(
+            standalone_submission_status or ""
+        ).strip() == "ops_cleared":
+            await db.mark_receipt_handled("docuseal", receipt_key)
+            return {"ok": True, "handled": False, "reason": "ops_cleared_submission"}
         form_cfg = _resolve_standalone_form_cfg(cfg, standalone_form_key, form_title)
         storage_cfg = form_cfg.sharepoint_storage
         await db.add_standalone_event(
@@ -661,9 +668,7 @@ async def webhook_docuseal(request: Request):
                         scope_kind="standalone",
                     )
 
-                internal_attachments: list[MailAttachment] | None = None
-                if cfg.email.artifact_delivery_mode == "attach_pdf":
-                    internal_attachments = signer_attachments
+                internal_attachments: list[MailAttachment] | None = signer_attachments
                 for recipient in cfg.email.internal_recipients:
                     await notifications.send_one(
                         case_id=standalone_submission_id,
@@ -702,6 +707,7 @@ async def webhook_docuseal(request: Request):
         case_id,
         doc_type,
         template_key,
+        document_status,
         signer_order_json,
         pdf_path,
         signing_link,
@@ -713,6 +719,9 @@ async def webhook_docuseal(request: Request):
         existing_case_folder_name,
         existing_case_folder_web_url,
     ) = row
+    if str(document_status or "").strip() == "ops_cleared":
+        await db.mark_receipt_handled("docuseal", receipt_key)
+        return {"ok": True, "handled": False, "reason": "ops_cleared_document"}
     contract_label, incident_dt = resolve_contract_and_incident_date(intake_payload_json)
     if not contract_label:
         contract_label = resolve_contract_label(intake_payload_json)
@@ -1259,9 +1268,7 @@ async def webhook_docuseal(request: Request):
                 },
             )
 
-        attachments: list[MailAttachment] | None = None
-        if cfg.email.artifact_delivery_mode == "attach_pdf":
-            attachments = signer_attachments
+        attachments: list[MailAttachment] | None = signer_attachments
 
         common_context = {
             "case_id": case_id,

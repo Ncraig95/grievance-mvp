@@ -161,10 +161,8 @@ async def resend_notification(case_id: str, body: ResendNotificationRequest, req
     )
 
     resend_attachments: list[MailAttachment] | None = None
-    if template_key == "completion_signer":
-        # Always try to include signed artifact copy for signer completion emails.
-        resend_attachments = signed_pdf_attachments
-    elif template_key in {"completion_internal", "completion_approval"} and cfg.email.artifact_delivery_mode == "attach_pdf":
+    if template_key in {"completion_signer", "completion_internal", "completion_approval"}:
+        # Completion recipients should receive the signed PDF directly when available.
         resend_attachments = signed_pdf_attachments
 
     per_signer_links: dict[str, str] = {}

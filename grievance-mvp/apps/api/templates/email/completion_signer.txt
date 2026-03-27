@@ -4,6 +4,8 @@ Case ID: $case_id
 Document ID: $document_id
 Document Type: $document_type
 
+The signed PDF is attached when available.
+
 DocuSeal record:
 $docuseal_signing_url
 

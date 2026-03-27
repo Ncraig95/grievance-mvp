@@ -529,9 +529,7 @@ async def resend_standalone_notification(
     base_context.update(body.context_overrides)
 
     attachments = None
-    if requested_template_key == "completion_signer":
-        attachments = _build_signed_pdf_attachment(cfg=cfg, form_key=form_key, signed_pdf_path=signed_pdf_path)
-    elif requested_template_key == "completion_internal" and cfg.email.artifact_delivery_mode == "attach_pdf":
+    if requested_template_key in {"completion_signer", "completion_internal"}:
         attachments = _build_signed_pdf_attachment(cfg=cfg, form_key=form_key, signed_pdf_path=signed_pdf_path)
 
     out: list[ResendNotificationResult] = []

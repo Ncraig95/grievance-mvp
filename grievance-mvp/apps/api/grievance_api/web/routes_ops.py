@@ -11,9 +11,11 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from ..core.hmac_auth import compute_signature
-from ..db.db import Db
+from ..db.db import Db, utcnow
 
 router = APIRouter()
+
+_OPS_CLEARED_STATUS = "ops_cleared"
 
 
 def _require_local_access(request: Request) -> None:
@@ -58,6 +60,581 @@ def _build_intake_headers(*, cfg, body: bytes) -> dict[str, str]:  # noqa: ANN00
         headers["X-Signature"] = compute_signature(hmac_secret, ts, body)
 
     return headers
+
+
+def _normalize_ops_reason(value: object) -> str:
+    reason = str(value or "").strip()
+    return reason or "Cleared from ops queue"
+
+
+def _normalize_email(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _is_case_signature_active(status: object) -> bool:
+    return str(status or "").strip().lower().startswith("sent_for_signature")
+
+
+def _is_standalone_signature_active(status: object) -> bool:
+    normalized = str(status or "").strip().lower()
+    return normalized == "awaiting_signature" or normalized.startswith("sent_for_signature")
+
+
+async def _load_active_signature_queue(*, db: Db, grievance_ref: str | None = None) -> dict[str, object]:
+    ref = str(grievance_ref or "").strip()
+
+    case_sql = """
+        SELECT c.id, c.grievance_id, c.grievance_number, c.status, c.approval_status, c.member_name,
+               d.id, d.doc_type, d.template_key, d.status, d.signer_order_json, d.docuseal_submission_id,
+               d.docuseal_signing_link, d.created_at_utc, d.completed_at_utc,
+               c.sharepoint_case_folder, c.sharepoint_case_web_url
+        FROM documents d
+        JOIN cases c ON c.id=d.case_id
+        WHERE d.requires_signature=1
+          AND COALESCE(d.docuseal_submission_id, '')<>''
+          AND lower(COALESCE(d.status, '')) LIKE 'sent_for_signature%'
+    """
+    case_params: list[object] = []
+    if ref:
+        case_sql += " AND (c.grievance_id=? OR c.grievance_number=?)"
+        case_params.extend([ref, ref])
+    case_sql += " ORDER BY d.created_at_utc DESC, d.id DESC"
+
+    standalone_sql = """
+        SELECT s.id, s.form_key, s.form_title, s.signer_email, s.status,
+               d.id, d.template_key, d.status, d.docuseal_submission_id,
+               d.docuseal_signing_link, d.created_at_utc, d.completed_at_utc,
+               s.sharepoint_folder_path, s.sharepoint_folder_web_url
+        FROM standalone_documents d
+        JOIN standalone_submissions s ON s.id=d.submission_id
+        WHERE d.requires_signature=1
+          AND COALESCE(d.docuseal_submission_id, '')<>''
+          AND (
+            lower(COALESCE(d.status, ''))='awaiting_signature'
+            OR lower(COALESCE(d.status, '')) LIKE 'sent_for_signature%'
+          )
+    """
+    standalone_params: list[object] = []
+    if ref:
+        standalone_sql += " AND (s.id=? OR s.request_id=? OR s.filing_label=?)"
+        standalone_params.extend([ref, ref, ref])
+    standalone_sql += " ORDER BY d.created_at_utc DESC, d.id DESC"
+
+    case_rows = await db.fetchall(case_sql, tuple(case_params))
+    standalone_rows = await db.fetchall(standalone_sql, tuple(standalone_params))
+
+    case_documents = [
+        {
+            "case_id": row[0],
+            "grievance_id": row[1],
+            "grievance_number": row[2],
+            "case_status": row[3],
+            "approval_status": row[4],
+            "member_name": row[5],
+            "document_id": row[6],
+            "doc_type": row[7],
+            "template_key": row[8],
+            "document_status": row[9],
+            "signer_order": _parse_json_safely(row[10]),
+            "docuseal_submission_id": row[11],
+            "docuseal_signing_link": row[12],
+            "created_at_utc": row[13],
+            "completed_at_utc": row[14],
+            "sharepoint_case_folder": row[15],
+            "sharepoint_case_web_url": row[16],
+        }
+        for row in case_rows
+    ]
+    standalone_documents = [
+        {
+            "submission_id": row[0],
+            "form_key": row[1],
+            "form_title": row[2],
+            "signer_email": row[3],
+            "submission_status": row[4],
+            "document_id": row[5],
+            "template_key": row[6],
+            "document_status": row[7],
+            "docuseal_submission_id": row[8],
+            "docuseal_signing_link": row[9],
+            "created_at_utc": row[10],
+            "completed_at_utc": row[11],
+            "sharepoint_folder_path": row[12],
+            "sharepoint_folder_web_url": row[13],
+        }
+        for row in standalone_rows
+    ]
+
+    return {
+        "grievance_ref": ref or None,
+        "case_document_count": len(case_documents),
+        "standalone_document_count": len(standalone_documents),
+        "total_count": len(case_documents) + len(standalone_documents),
+        "case_documents": case_documents,
+        "standalone_documents": standalone_documents,
+    }
+
+
+async def _recalculate_case_status_after_ops_clear(*, db: Db, case_id: str) -> str:
+    rows = await db.fetchall("SELECT status FROM documents WHERE case_id=? ORDER BY created_at_utc", (case_id,))
+    statuses = [str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()]
+
+    if any(_is_case_signature_active(status) for status in statuses):
+        return "awaiting_signatures"
+    if any(status == "pending_grievance_number" for status in statuses):
+        return "pending_grievance_number"
+
+    non_cleared = [status for status in statuses if status != _OPS_CLEARED_STATUS]
+    if not non_cleared:
+        return _OPS_CLEARED_STATUS
+    if any(status == "pending_approval" for status in non_cleared):
+        return "pending_approval"
+    if all(status in {"approved", "uploaded", "completed"} for status in non_cleared):
+        return "approved"
+    if all(status == "failed" for status in non_cleared):
+        return "failed"
+    if all(status in {"approved", "uploaded", "completed", "failed"} for status in non_cleared):
+        if any(status in {"approved", "uploaded", "completed"} for status in non_cleared):
+            return "approved"
+        return "failed"
+    return _OPS_CLEARED_STATUS
+
+
+async def _recalculate_standalone_status_after_ops_clear(*, db: Db, submission_id: str) -> str:
+    rows = await db.fetchall(
+        "SELECT status FROM standalone_documents WHERE submission_id=? ORDER BY created_at_utc",
+        (submission_id,),
+    )
+    statuses = [str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()]
+
+    if any(_is_standalone_signature_active(status) for status in statuses):
+        return "awaiting_signature"
+
+    non_cleared = [status for status in statuses if status != _OPS_CLEARED_STATUS]
+    if not non_cleared:
+        return _OPS_CLEARED_STATUS
+    if all(status in {"completed", "approved", "uploaded"} for status in non_cleared):
+        return "completed"
+    if all(status == "failed" for status in non_cleared):
+        return "failed"
+    if all(status in {"completed", "approved", "uploaded", "failed"} for status in non_cleared):
+        if any(status in {"completed", "approved", "uploaded"} for status in non_cleared):
+            return "completed"
+        return "failed"
+    return _OPS_CLEARED_STATUS
+
+
+async def _clear_case_document(*, db: Db, docuseal, document_id: str, reason: str) -> dict[str, object]:  # noqa: ANN001
+    row = await db.fetchone(
+        """SELECT d.id, d.case_id, d.doc_type, d.template_key, d.status, d.docuseal_submission_id,
+                  c.grievance_id, c.grievance_number
+           FROM documents d
+           JOIN cases c ON c.id=d.case_id
+           WHERE d.id=?""",
+        (document_id,),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="document_id not found")
+
+    current_status = str(row[4] or "").strip()
+    if not _is_case_signature_active(current_status):
+        raise HTTPException(status_code=400, detail="document is not actively awaiting signatures")
+
+    submission_id = str(row[5] or "").strip()
+    delete_result: dict[str, object] | None = None
+    if submission_id:
+        try:
+            delete_result = await asyncio.to_thread(docuseal.delete_submission, submission_id=submission_id)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"DocuSeal submission delete failed: {exc}") from exc
+
+    await db.exec(
+        "UPDATE documents SET status=?, docuseal_signing_link=? WHERE id=?",
+        (_OPS_CLEARED_STATUS, None, document_id),
+    )
+    if submission_id:
+        await db.exec(
+            """UPDATE document_stages
+               SET status=?, failed_at_utc=COALESCE(failed_at_utc, ?)
+               WHERE document_id=? AND docuseal_submission_id=? AND status LIKE 'sent_for_signature%'""",
+            (_OPS_CLEARED_STATUS, utcnow(), document_id, submission_id),
+        )
+
+    case_id = str(row[1])
+    updated_case_status = await _recalculate_case_status_after_ops_clear(db=db, case_id=case_id)
+    await db.exec("UPDATE cases SET status=? WHERE id=?", (updated_case_status, case_id))
+    await db.add_event(
+        case_id,
+        document_id,
+        "ops_document_cleared",
+        {
+            "reason": _normalize_ops_reason(reason),
+            "previous_status": current_status,
+            "updated_status": _OPS_CLEARED_STATUS,
+            "docuseal_submission_id": submission_id,
+            "remote_delete": delete_result or {"ok": True, "already_missing": False, "status_code": None},
+        },
+    )
+
+    return {
+        "case_id": case_id,
+        "document_id": str(row[0]),
+        "doc_type": row[2],
+        "template_key": row[3],
+        "grievance_id": row[6],
+        "grievance_number": row[7],
+        "document_status": _OPS_CLEARED_STATUS,
+        "case_status": updated_case_status,
+        "reason": _normalize_ops_reason(reason),
+        "docuseal_submission_id": submission_id or None,
+        "remote_delete": delete_result,
+    }
+
+
+async def _clear_standalone_document(
+    *,
+    db: Db,
+    docuseal,  # noqa: ANN001
+    document_id: str,
+    reason: str,
+) -> dict[str, object]:
+    row = await db.fetchone(
+        """SELECT d.id, d.submission_id, d.form_key, d.template_key, d.status, d.docuseal_submission_id,
+                  s.form_title, s.status
+           FROM standalone_documents d
+           JOIN standalone_submissions s ON s.id=d.submission_id
+           WHERE d.id=?""",
+        (document_id,),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="standalone document_id not found")
+
+    current_status = str(row[4] or "").strip()
+    if not _is_standalone_signature_active(current_status):
+        raise HTTPException(status_code=400, detail="standalone document is not actively awaiting signatures")
+
+    submission_id = str(row[5] or "").strip()
+    delete_result: dict[str, object] | None = None
+    if submission_id:
+        try:
+            delete_result = await asyncio.to_thread(docuseal.delete_submission, submission_id=submission_id)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"DocuSeal submission delete failed: {exc}") from exc
+
+    await db.exec(
+        "UPDATE standalone_documents SET status=?, docuseal_signing_link=? WHERE id=?",
+        (_OPS_CLEARED_STATUS, None, document_id),
+    )
+
+    standalone_submission_id = str(row[1])
+    updated_submission_status = await _recalculate_standalone_status_after_ops_clear(
+        db=db,
+        submission_id=standalone_submission_id,
+    )
+    await db.exec(
+        "UPDATE standalone_submissions SET status=? WHERE id=?",
+        (updated_submission_status, standalone_submission_id),
+    )
+    await db.add_standalone_event(
+        standalone_submission_id,
+        document_id,
+        "ops_document_cleared",
+        {
+            "reason": _normalize_ops_reason(reason),
+            "previous_status": current_status,
+            "updated_status": _OPS_CLEARED_STATUS,
+            "docuseal_submission_id": submission_id,
+            "remote_delete": delete_result or {"ok": True, "already_missing": False, "status_code": None},
+        },
+    )
+
+    return {
+        "submission_id": standalone_submission_id,
+        "document_id": str(row[0]),
+        "form_key": row[2],
+        "template_key": row[3],
+        "form_title": row[6],
+        "document_status": _OPS_CLEARED_STATUS,
+        "submission_status": updated_submission_status,
+        "reason": _normalize_ops_reason(reason),
+        "docuseal_submission_id": submission_id or None,
+        "remote_delete": delete_result,
+    }
+
+
+def _replace_email_in_signer_order(
+    signer_order: object,
+    *,
+    current_email: str,
+    new_email: str,
+) -> tuple[list[str], bool]:
+    parsed = signer_order if isinstance(signer_order, list) else []
+    normalized_current = _normalize_email(current_email)
+    normalized_new = str(new_email or "").strip()
+    changed = False
+    updated: list[str] = []
+    for value in parsed:
+        text = str(value or "").strip()
+        if text and _normalize_email(text) == normalized_current:
+            updated.append(normalized_new)
+            changed = True
+        else:
+            updated.append(text)
+    return updated, changed
+
+
+def _docuseal_active_submitter_candidates(submitters: list[dict[str, object]]) -> list[dict[str, object]]:
+    active: list[dict[str, object]] = []
+    for item in submitters:
+        status = str(item.get("status") or "").strip().lower()
+        if status in {"completed", "declined"}:
+            continue
+        if item.get("completed_at") or item.get("declined_at"):
+            continue
+        active.append(item)
+    return active or submitters
+
+
+def _resolve_docuseal_submitter(
+    *,
+    submitters: list[dict[str, object]],
+    current_email: str,
+) -> dict[str, object]:
+    normalized_current = _normalize_email(current_email)
+    active_submitters = _docuseal_active_submitter_candidates(submitters)
+
+    if normalized_current:
+        matches = [item for item in active_submitters if _normalize_email(item.get("email")) == normalized_current]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise HTTPException(status_code=409, detail="multiple active DocuSeal submitters match current_email")
+        fallback_matches = [item for item in submitters if _normalize_email(item.get("email")) == normalized_current]
+        if len(fallback_matches) == 1:
+            return fallback_matches[0]
+        raise HTTPException(status_code=404, detail="current_email not found on DocuSeal submission")
+
+    if len(active_submitters) == 1:
+        return active_submitters[0]
+    raise HTTPException(status_code=400, detail="current_email required when multiple active submitters exist")
+
+
+async def _update_case_document_signer_email(
+    *,
+    db: Db,
+    docuseal,  # noqa: ANN001
+    document_id: str,
+    current_email: str,
+    new_email: str,
+    resend_email: bool,
+) -> dict[str, object]:
+    normalized_new = str(new_email or "").strip()
+    if "@" not in normalized_new:
+        raise HTTPException(status_code=400, detail="new_email must be a valid email address")
+
+    row = await db.fetchone(
+        """SELECT d.id, d.case_id, d.doc_type, d.template_key, d.status, d.signer_order_json,
+                  d.docuseal_submission_id, d.docuseal_signing_link, c.intake_payload_json
+           FROM documents d
+           JOIN cases c ON c.id=d.case_id
+           WHERE d.id=?""",
+        (document_id,),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="document_id not found")
+
+    current_status = str(row[4] or "").strip()
+    if not _is_case_signature_active(current_status):
+        raise HTTPException(status_code=400, detail="document is not actively awaiting signatures")
+
+    submission_id = str(row[6] or "").strip()
+    if not submission_id:
+        raise HTTPException(status_code=400, detail="document has no DocuSeal submission_id")
+
+    submitters = await asyncio.to_thread(docuseal.list_submitters, submission_id=submission_id)
+    submitter = _resolve_docuseal_submitter(submitters=submitters, current_email=current_email)
+    previous_email = str(submitter.get("email") or "").strip()
+    if _normalize_email(previous_email) == _normalize_email(normalized_new):
+        raise HTTPException(status_code=400, detail="new_email matches the current signer email")
+
+    updated_submitter = await asyncio.to_thread(
+        docuseal.update_submitter,
+        submitter_id=submitter.get("id"),
+        email=normalized_new,
+        send_email=bool(resend_email),
+    )
+
+    parsed_signer_order = _parse_json_safely(row[5])
+    signer_order, changed = _replace_email_in_signer_order(
+        parsed_signer_order,
+        current_email=previous_email,
+        new_email=normalized_new,
+    )
+    if not changed:
+        remote_submitters = await asyncio.to_thread(docuseal.list_submitters, submission_id=submission_id)
+        signer_order = [str(item.get("email") or "").strip() for item in remote_submitters if str(item.get("email") or "").strip()]
+
+    signing_links = await asyncio.to_thread(docuseal.fetch_signing_links_by_email, submission_id=submission_id)
+    updated_signing_link = signing_links.get(_normalize_email(normalized_new)) or row[7]
+
+    await db.exec(
+        "UPDATE documents SET signer_order_json=?, docuseal_signing_link=? WHERE id=?",
+        (json.dumps(signer_order, ensure_ascii=False), updated_signing_link, document_id),
+    )
+
+    intake_payload = _parse_json_safely(row[8])
+    if isinstance(intake_payload, dict):
+        documents_payload = intake_payload.get("documents")
+        if isinstance(documents_payload, list):
+            for item in documents_payload:
+                if not isinstance(item, dict):
+                    continue
+                if not _document_matches_target(
+                    doc_type=item.get("doc_type"),
+                    template_key=item.get("template_key"),
+                    target=str(row[2] or row[3] or ""),
+                ):
+                    continue
+                signers = item.get("signers")
+                if isinstance(signers, list):
+                    updated_signers, payload_changed = _replace_email_in_signer_order(
+                        signers,
+                        current_email=previous_email,
+                        new_email=normalized_new,
+                    )
+                    if payload_changed:
+                        item["signers"] = updated_signers
+            await db.exec(
+                "UPDATE cases SET intake_payload_json=? WHERE id=?",
+                (json.dumps(intake_payload, ensure_ascii=False), row[1]),
+            )
+
+    await db.add_event(
+        str(row[1]),
+        document_id,
+        "ops_signer_email_updated",
+        {
+            "previous_email": previous_email,
+            "new_email": normalized_new,
+            "docuseal_submission_id": submission_id,
+            "resend_email": bool(resend_email),
+            "submitter_id": submitter.get("id"),
+        },
+    )
+
+    return {
+        "case_id": str(row[1]),
+        "document_id": str(row[0]),
+        "doc_type": row[2],
+        "template_key": row[3],
+        "document_status": current_status,
+        "previous_email": previous_email,
+        "new_email": normalized_new,
+        "resend_email": bool(resend_email),
+        "docuseal_submission_id": submission_id,
+        "submitter_id": submitter.get("id"),
+        "submitter_response": updated_submitter,
+        "signer_order": signer_order,
+        "docuseal_signing_link": updated_signing_link,
+    }
+
+
+async def _update_standalone_document_signer_email(
+    *,
+    db: Db,
+    docuseal,  # noqa: ANN001
+    document_id: str,
+    current_email: str,
+    new_email: str,
+    resend_email: bool,
+) -> dict[str, object]:
+    normalized_new = str(new_email or "").strip()
+    if "@" not in normalized_new:
+        raise HTTPException(status_code=400, detail="new_email must be a valid email address")
+
+    row = await db.fetchone(
+        """SELECT d.id, d.submission_id, d.form_key, d.template_key, d.status, d.signer_order_json,
+                  d.docuseal_submission_id, d.docuseal_signing_link, s.signer_email, s.status
+           FROM standalone_documents d
+           JOIN standalone_submissions s ON s.id=d.submission_id
+           WHERE d.id=?""",
+        (document_id,),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="standalone document_id not found")
+
+    current_status = str(row[4] or "").strip()
+    if not _is_standalone_signature_active(current_status):
+        raise HTTPException(status_code=400, detail="standalone document is not actively awaiting signatures")
+
+    submission_id = str(row[6] or "").strip()
+    if not submission_id:
+        raise HTTPException(status_code=400, detail="standalone document has no DocuSeal submission_id")
+
+    submitters = await asyncio.to_thread(docuseal.list_submitters, submission_id=submission_id)
+    submitter = _resolve_docuseal_submitter(submitters=submitters, current_email=current_email or str(row[8] or ""))
+    previous_email = str(submitter.get("email") or "").strip()
+    if _normalize_email(previous_email) == _normalize_email(normalized_new):
+        raise HTTPException(status_code=400, detail="new_email matches the current signer email")
+
+    updated_submitter = await asyncio.to_thread(
+        docuseal.update_submitter,
+        submitter_id=submitter.get("id"),
+        email=normalized_new,
+        send_email=bool(resend_email),
+    )
+
+    parsed_signer_order = _parse_json_safely(row[5])
+    signer_order, changed = _replace_email_in_signer_order(
+        parsed_signer_order,
+        current_email=previous_email,
+        new_email=normalized_new,
+    )
+    if not changed:
+        signer_order = [normalized_new]
+
+    signing_links = await asyncio.to_thread(docuseal.fetch_signing_links_by_email, submission_id=submission_id)
+    updated_signing_link = signing_links.get(_normalize_email(normalized_new)) or row[7]
+
+    await db.exec(
+        """UPDATE standalone_documents
+           SET signer_order_json=?, docuseal_signing_link=?
+           WHERE id=?""",
+        (json.dumps(signer_order, ensure_ascii=False), updated_signing_link, document_id),
+    )
+    await db.exec(
+        "UPDATE standalone_submissions SET signer_email=? WHERE id=?",
+        (normalized_new, row[1]),
+    )
+    await db.add_standalone_event(
+        str(row[1]),
+        document_id,
+        "ops_signer_email_updated",
+        {
+            "previous_email": previous_email,
+            "new_email": normalized_new,
+            "docuseal_submission_id": submission_id,
+            "resend_email": bool(resend_email),
+            "submitter_id": submitter.get("id"),
+        },
+    )
+
+    return {
+        "submission_id": str(row[1]),
+        "document_id": str(row[0]),
+        "form_key": row[2],
+        "template_key": row[3],
+        "document_status": current_status,
+        "submission_status": row[9],
+        "previous_email": previous_email,
+        "new_email": normalized_new,
+        "resend_email": bool(resend_email),
+        "docuseal_submission_id": submission_id,
+        "submitter_id": submitter.get("id"),
+        "submitter_response": updated_submitter,
+        "signer_order": signer_order,
+        "docuseal_signing_link": updated_signing_link,
+    }
 
 
 async def _load_case_trace(*, db: Db, case_id: str) -> dict[str, object]:
@@ -453,13 +1030,45 @@ async def ops_page(request: Request):
   <style>
     body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 24px; }
     .row { margin-bottom: 12px; }
-    input { width: 420px; padding: 8px; }
+    input, select { width: 420px; padding: 8px; }
     button { padding: 8px 12px; margin-right: 8px; }
+    table { border-collapse: collapse; width: 100%; margin: 12px 0 24px; }
+    th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; text-align: left; }
+    th { background: #f3f3f3; }
+    .section { margin-top: 24px; }
+    .summary { margin: 8px 0 12px; font-weight: 600; }
+    .muted { color: #666; font-size: 12px; }
+    .link-group a { margin-right: 8px; }
     pre { background: #111; color: #ddd; padding: 12px; overflow: auto; max-height: 70vh; }
   </style>
 </head>
 <body>
   <h2>Grievance Ops</h2>
+  <div class="section">
+    <div class="row">
+      <button onclick="loadActiveSignatures()">Load Active Signature Queue</button>
+    </div>
+    <div id="activeSummary" class="summary">Active signature requests not loaded yet.</div>
+    <div class="muted">Optional filter: fill Grievance ID / Number below before loading the queue.</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Kind</th>
+          <th>Document</th>
+          <th>Case / Submission</th>
+          <th>Grievance / Filing</th>
+          <th>Signer(s)</th>
+          <th>Status</th>
+          <th>Created</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="activeQueueBody">
+        <tr><td colspan="8">No queue loaded.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="section">
   <div class="row">
     <input id="caseId" placeholder="Case ID (example: C2026...)" />
   </div>
@@ -468,11 +1077,13 @@ async def ops_page(request: Request):
     <button onclick="resendSignature()">Resend Signature Emails</button>
     <button onclick="resubmitCase()">Resubmit Case</button>
   </div>
-  <div class="row" style="margin-top: 24px;">
+  </div>
+  <div class="section">
+  <div class="row">
     <input id="grievanceRef" placeholder="Grievance ID or Grievance Number (example: 2026015)" />
   </div>
   <div class="row">
-    <select id="docTypeSelect" style="width: 420px; padding: 8px;">
+    <select id="docTypeSelect">
       <option value="">Select doc type after loading grievance docs</option>
     </select>
   </div>
@@ -480,12 +1091,15 @@ async def ops_page(request: Request):
     <button onclick="loadGrievanceDocs()">Load Grievance Docs</button>
     <button onclick="resubmitDocType()">Resubmit Latest Matching Doc Type</button>
   </div>
-  <div class="row" style="margin-top: 24px;">
+  </div>
+  <div class="section">
+  <div class="row">
     <input id="submissionId" placeholder="Standalone Submission ID (example: S2026...)" />
   </div>
   <div class="row">
     <button onclick="loadStandaloneTrace()">Load Standalone Trace</button>
     <button onclick="resubmitStandalone()">Resubmit Standalone</button>
+  </div>
   </div>
   <pre id="out">Ready.</pre>
   <script>
@@ -494,6 +1108,8 @@ async def ops_page(request: Request):
     const grievanceRefInput = document.getElementById('grievanceRef');
     const docTypeSelect = document.getElementById('docTypeSelect');
     const submissionInput = document.getElementById('submissionId');
+    const activeSummary = document.getElementById('activeSummary');
+    const activeQueueBody = document.getElementById('activeQueueBody');
     async function call(url, opts) {
       const res = await fetch(url, opts || {});
       const text = await res.text();
@@ -506,6 +1122,73 @@ async def ops_page(request: Request):
     function cid() { return caseInput.value.trim(); }
     function gid() { return grievanceRefInput.value.trim(); }
     function sid() { return submissionInput.value.trim(); }
+    function esc(value) {
+      return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+    function signerText(value) {
+      if (Array.isArray(value)) return value.filter(Boolean).join(', ');
+      return String(value || '');
+    }
+    function traceCase(caseId) {
+      caseInput.value = caseId || '';
+      return loadTrace();
+    }
+    function traceStandalone(submissionId) {
+      submissionInput.value = submissionId || '';
+      return loadStandaloneTrace();
+    }
+    function renderActiveQueue(data) {
+      const caseDocs = Array.isArray(data && data.case_documents) ? data.case_documents : [];
+      const standaloneDocs = Array.isArray(data && data.standalone_documents) ? data.standalone_documents : [];
+      const total = Number(data && data.total_count || 0);
+      const filterLabel = data && data.grievance_ref ? ` for ${data.grievance_ref}` : '';
+      activeSummary.textContent = `Active signature requests${filterLabel}: ${total} (${caseDocs.length} grievance docs, ${standaloneDocs.length} standalone forms)`;
+      const rows = [];
+      for (const item of caseDocs) {
+        rows.push(`
+          <tr>
+            <td>Grievance</td>
+            <td>${esc(item.doc_type || item.template_key || '')}</td>
+            <td>${esc(item.case_id || '')}<br><span class="muted">${esc(item.document_id || '')}</span></td>
+            <td>${esc(item.grievance_id || item.grievance_number || '')}</td>
+            <td>${esc(signerText(item.signer_order))}</td>
+            <td>${esc(item.document_status || '')}<br><span class="muted">${esc(item.case_status || '')}</span></td>
+            <td>${esc(item.created_at_utc || '')}</td>
+            <td class="link-group">
+              <button onclick="traceCase(${JSON.stringify(item.case_id || '')})">Trace</button>
+              ${item.docuseal_signing_link ? `<a href="${esc(item.docuseal_signing_link)}" target="_blank" rel="noreferrer">Open Link</a>` : ''}
+              <button onclick="fixCaseEmail(${JSON.stringify(item.document_id || '')}, ${JSON.stringify(signerText(item.signer_order))})">Fix Email</button>
+              <button onclick="clearCaseDocument(${JSON.stringify(item.document_id || '')})">Clear</button>
+            </td>
+          </tr>
+        `);
+      }
+      for (const item of standaloneDocs) {
+        rows.push(`
+          <tr>
+            <td>Standalone</td>
+            <td>${esc(item.form_key || item.template_key || '')}</td>
+            <td>${esc(item.submission_id || '')}<br><span class="muted">${esc(item.document_id || '')}</span></td>
+            <td>${esc(item.sharepoint_folder_path || item.form_title || '')}</td>
+            <td>${esc(item.signer_email || '')}</td>
+            <td>${esc(item.document_status || '')}<br><span class="muted">${esc(item.submission_status || '')}</span></td>
+            <td>${esc(item.created_at_utc || '')}</td>
+            <td class="link-group">
+              <button onclick="traceStandalone(${JSON.stringify(item.submission_id || '')})">Trace</button>
+              ${item.docuseal_signing_link ? `<a href="${esc(item.docuseal_signing_link)}" target="_blank" rel="noreferrer">Open Link</a>` : ''}
+              <button onclick="fixStandaloneEmail(${JSON.stringify(item.document_id || '')}, ${JSON.stringify(item.signer_email || '')})">Fix Email</button>
+              <button onclick="clearStandaloneDocument(${JSON.stringify(item.document_id || '')})">Clear</button>
+            </td>
+          </tr>
+        `);
+      }
+      activeQueueBody.innerHTML = rows.length ? rows.join('') : '<tr><td colspan="8">No active signature requests found.</td></tr>';
+    }
     function updateDocTypeSelect(data) {
       const current = docTypeSelect.value;
       docTypeSelect.innerHTML = '<option value="">Select doc type after loading grievance docs</option>';
@@ -521,6 +1204,15 @@ async def ops_page(request: Request):
         docTypeSelect.appendChild(option);
       }
       if (current) docTypeSelect.value = current;
+    }
+    async function loadActiveSignatures() {
+      const grievanceRef = gid();
+      const suffix = grievanceRef ? `?grievance_ref=${encodeURIComponent(grievanceRef)}` : '';
+      try {
+        const data = await call(`/ops/active-signatures${suffix}`);
+        renderActiveQueue(data);
+        show(data);
+      } catch (e) { show(e); }
     }
     async function loadTrace() {
       const id = cid();
@@ -570,6 +1262,48 @@ async def ops_page(request: Request):
       try { show(await call(`/ops/standalone/${encodeURIComponent(id)}/resubmit`, { method: 'POST' })); }
       catch (e) { show(e); }
     }
+    async function clearCaseDocument(documentId) {
+      if (!documentId) return show({ error: 'document_id required' });
+      const reason = window.prompt('Reason for clearing this grievance document?', 'testing / false submission');
+      if (reason === null) return;
+      try {
+        show(await call(`/ops/documents/${encodeURIComponent(documentId)}/clear?reason=${encodeURIComponent(reason)}`, { method: 'POST' }));
+        await loadActiveSignatures();
+      } catch (e) { show(e); }
+    }
+    async function clearStandaloneDocument(documentId) {
+      if (!documentId) return show({ error: 'document_id required' });
+      const reason = window.prompt('Reason for clearing this standalone form?', 'testing / false submission');
+      if (reason === null) return;
+      try {
+        show(await call(`/ops/standalone-documents/${encodeURIComponent(documentId)}/clear?reason=${encodeURIComponent(reason)}`, { method: 'POST' }));
+        await loadActiveSignatures();
+      } catch (e) { show(e); }
+    }
+    async function fixCaseEmail(documentId, signerSummary) {
+      if (!documentId) return show({ error: 'document_id required' });
+      const currentEmail = window.prompt(`Current signer email to replace${signerSummary ? ` (${signerSummary})` : ''}:`, '');
+      if (currentEmail === null) return;
+      const newEmail = window.prompt('New signer email:', currentEmail || '');
+      if (newEmail === null) return;
+      const resend = window.confirm('Resend the DocuSeal signature request email to the corrected address?');
+      try {
+        show(await call(`/ops/documents/${encodeURIComponent(documentId)}/update-email?current_email=${encodeURIComponent(currentEmail)}&new_email=${encodeURIComponent(newEmail)}&resend_email=${resend ? 'true' : 'false'}`, { method: 'POST' }));
+        await loadActiveSignatures();
+      } catch (e) { show(e); }
+    }
+    async function fixStandaloneEmail(documentId, currentEmailValue) {
+      if (!documentId) return show({ error: 'document_id required' });
+      const currentEmail = window.prompt('Current signer email to replace:', currentEmailValue || '');
+      if (currentEmail === null) return;
+      const newEmail = window.prompt('New signer email:', currentEmail || '');
+      if (newEmail === null) return;
+      const resend = window.confirm('Resend the DocuSeal signature request email to the corrected address?');
+      try {
+        show(await call(`/ops/standalone-documents/${encodeURIComponent(documentId)}/update-email?current_email=${encodeURIComponent(currentEmail)}&new_email=${encodeURIComponent(newEmail)}&resend_email=${resend ? 'true' : 'false'}`, { method: 'POST' }));
+        await loadActiveSignatures();
+      } catch (e) { show(e); }
+    }
   </script>
 </body>
 </html>
@@ -588,6 +1322,81 @@ async def ops_grievance_documents(grievance_ref: str, request: Request):
     _require_local_access(request)
     db: Db = request.app.state.db
     return await _load_grievance_doc_catalog(db=db, grievance_ref=grievance_ref)
+
+
+@router.get("/ops/active-signatures")
+async def ops_active_signatures(request: Request, grievance_ref: str | None = None):
+    _require_local_access(request)
+    db: Db = request.app.state.db
+    return await _load_active_signature_queue(db=db, grievance_ref=grievance_ref)
+
+
+@router.post("/ops/documents/{document_id}/clear")
+async def ops_clear_document(document_id: str, request: Request, reason: str = ""):
+    _require_local_access(request)
+    db: Db = request.app.state.db
+    docuseal = request.app.state.docuseal
+    return await _clear_case_document(
+        db=db,
+        docuseal=docuseal,
+        document_id=document_id,
+        reason=_normalize_ops_reason(reason),
+    )
+
+
+@router.post("/ops/standalone-documents/{document_id}/clear")
+async def ops_clear_standalone_document(document_id: str, request: Request, reason: str = ""):
+    _require_local_access(request)
+    db: Db = request.app.state.db
+    docuseal = request.app.state.docuseal
+    return await _clear_standalone_document(
+        db=db,
+        docuseal=docuseal,
+        document_id=document_id,
+        reason=_normalize_ops_reason(reason),
+    )
+
+
+@router.post("/ops/documents/{document_id}/update-email")
+async def ops_update_document_email(
+    document_id: str,
+    request: Request,
+    current_email: str = "",
+    new_email: str = "",
+    resend_email: bool = True,
+):
+    _require_local_access(request)
+    db: Db = request.app.state.db
+    docuseal = request.app.state.docuseal
+    return await _update_case_document_signer_email(
+        db=db,
+        docuseal=docuseal,
+        document_id=document_id,
+        current_email=current_email,
+        new_email=new_email,
+        resend_email=bool(resend_email),
+    )
+
+
+@router.post("/ops/standalone-documents/{document_id}/update-email")
+async def ops_update_standalone_document_email(
+    document_id: str,
+    request: Request,
+    current_email: str = "",
+    new_email: str = "",
+    resend_email: bool = True,
+):
+    _require_local_access(request)
+    db: Db = request.app.state.db
+    docuseal = request.app.state.docuseal
+    return await _update_standalone_document_signer_email(
+        db=db,
+        docuseal=docuseal,
+        document_id=document_id,
+        current_email=current_email,
+        new_email=new_email,
+        resend_email=bool(resend_email),
+    )
 
 
 @router.get("/ops/standalone/{submission_id}/trace")

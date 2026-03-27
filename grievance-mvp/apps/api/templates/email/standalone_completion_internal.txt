@@ -5,6 +5,8 @@ Document ID: $document_id
 Form: $form_title
 Status: $status
 
+The signed PDF is attached when available.
+
 DocuSeal record:
 $docuseal_signing_url
 
