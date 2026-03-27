@@ -34,10 +34,16 @@ _TEXT_FIELD_DIMENSION_HINTS: dict[str, dict[str, float]] = {
     "q7_proposed_disposition_second_level": {"min_w": 430.0, "min_h": 46.0, "max_h": 56.0},
     "q7_company_rep_name_attuid": {"min_w": 220.0, "min_h": 20.0, "max_h": 24.0, "y_lift": 6.0},
     "q8_union_disposition": {"min_w": 240.0, "min_h": 30.0, "max_h": 42.0},
+    "article_affected": {"min_w": 176.0, "min_h": 18.0, "max_h": 20.0, "y_lift": 4.0},
 }
 _DATE_FIELD_DIMENSION_HINTS: dict[str, dict[str, float]] = {
     "q5_l2_date": {"min_w": 140.0, "min_h": 20.0, "max_h": 28.0, "y_lift": 6.0},
     "date_true_intent": {"min_w": 112.0, "min_h": 12.0, "max_h": 16.0, "y_lift": 2.0},
+}
+_FORM_SIGNATURE_FIELD_DIMENSION_HINTS: dict[str, dict[str, dict[str, float]]] = {
+    "att_mobility_bargaining_suggestion": {
+        "signer1_signature": {"min_h": 14.0, "max_h": 16.0, "y_lift": 16.0},
+    },
 }
 _STATEMENT_SIGNER_DATE_HINTS: dict[str, dict[str, float]] = {
     # Statement form date placeholders sit close to baseline; keep lift/padding tight.
@@ -793,6 +799,15 @@ class DocuSealClient:
         if field_type == "signature":
             min_w, min_h, pad_w, pad_h = 140.0, 28.0, 8.0, 4.0
             y_lift = 14.0
+            normalized_field_name = field_name.lower()
+            form_hints = _FORM_SIGNATURE_FIELD_DIMENSION_HINTS.get(str(form_key or "").strip().lower())
+            hint = form_hints.get(normalized_field_name) if form_hints else None
+            if hint:
+                min_w = float(hint.get("min_w", min_w))
+                min_h = float(hint.get("min_h", min_h))
+                y_lift = float(hint.get("y_lift", y_lift))
+                if "max_h" in hint:
+                    max_h = float(hint.get("max_h", 0.0))
         elif field_type == "text":
             min_w, min_h, pad_w, pad_h = 220.0, 24.0, 4.0, 2.0
             y_lift = 2.0

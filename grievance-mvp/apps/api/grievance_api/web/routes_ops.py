@@ -146,6 +146,121 @@ async def _load_case_trace(*, db: Db, case_id: str) -> dict[str, object]:
     }
 
 
+async def _load_standalone_trace(*, db: Db, submission_id: str) -> dict[str, object]:
+    submission_row = await db.fetchone(
+        """SELECT id, request_id, form_key, form_title, signer_email, status, created_at_utc,
+                  filing_year, filing_sequence, filing_label, sharepoint_folder_path, sharepoint_folder_web_url
+           FROM standalone_submissions WHERE id=?""",
+        (submission_id,),
+    )
+    if not submission_row:
+        raise HTTPException(status_code=404, detail="submission_id not found")
+
+    docs_rows = await db.fetchall(
+        """SELECT id, template_key, status, requires_signature, signer_order_json,
+                  docuseal_submission_id, docuseal_signing_link,
+                  sharepoint_generated_url, sharepoint_signed_url, sharepoint_audit_url,
+                  created_at_utc, completed_at_utc
+           FROM standalone_documents
+           WHERE submission_id=?
+           ORDER BY created_at_utc""",
+        (submission_id,),
+    )
+    events_rows = await db.fetchall(
+        """SELECT ts_utc, event_type, document_id, details_json
+           FROM standalone_events
+           WHERE submission_id=?
+           ORDER BY ts_utc DESC
+           LIMIT 200""",
+        (submission_id,),
+    )
+    email_rows = await db.fetchall(
+        """SELECT recipient_email, template_key, status, resend_count, last_sent_at_utc,
+                  document_scope_id, graph_message_id
+           FROM standalone_outbound_emails
+           WHERE submission_id=?
+           ORDER BY updated_at_utc DESC
+           LIMIT 200""",
+        (submission_id,),
+    )
+
+    return {
+        "submission": {
+            "submission_id": submission_row[0],
+            "request_id": submission_row[1],
+            "form_key": submission_row[2],
+            "form_title": submission_row[3],
+            "signer_email": submission_row[4],
+            "status": submission_row[5],
+            "created_at_utc": submission_row[6],
+            "filing_year": submission_row[7],
+            "filing_sequence": submission_row[8],
+            "filing_label": submission_row[9],
+            "sharepoint_folder_path": submission_row[10],
+            "sharepoint_folder_web_url": submission_row[11],
+        },
+        "documents": [
+            {
+                "document_id": row[0],
+                "template_key": row[1],
+                "status": row[2],
+                "requires_signature": bool(row[3]),
+                "signer_order": _parse_json_safely(row[4]),
+                "docuseal_submission_id": row[5],
+                "docuseal_signing_link": row[6],
+                "sharepoint_generated_url": row[7],
+                "sharepoint_signed_url": row[8],
+                "sharepoint_audit_url": row[9],
+                "created_at_utc": row[10],
+                "completed_at_utc": row[11],
+            }
+            for row in docs_rows
+        ],
+        "events": [
+            {
+                "ts_utc": row[0],
+                "event_type": row[1],
+                "document_id": row[2],
+                "details": _parse_json_safely(row[3]),
+            }
+            for row in events_rows
+        ],
+        "outbound_emails": [
+            {
+                "recipient_email": row[0],
+                "template_key": row[1],
+                "status": row[2],
+                "resend_count": row[3],
+                "last_sent_at_utc": row[4],
+                "document_scope_id": row[5],
+                "graph_message_id": row[6],
+            }
+            for row in email_rows
+        ],
+    }
+
+
+def _new_resubmit_request_id(base_request_id: str) -> str:
+    return f"{base_request_id}-resubmit-{time.time_ns()}"
+
+
+async def _post_internal_json(*, cfg, url: str, payload: dict[str, object]) -> object:  # noqa: ANN001
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = _build_intake_headers(cfg=cfg, body=body)
+    resp = await asyncio.to_thread(
+        requests.post,
+        url,
+        data=body,
+        headers=headers,
+        timeout=180,
+    )
+
+    parsed_response = _parse_json_safely(resp.text)
+    if not (200 <= resp.status_code < 300):
+        raise HTTPException(status_code=resp.status_code, detail=parsed_response)
+    return parsed_response
+
+
 @router.get("/ops", response_class=HTMLResponse)
 async def ops_page(request: Request):
     _require_local_access(request)
@@ -173,10 +288,18 @@ async def ops_page(request: Request):
     <button onclick="resendSignature()">Resend Signature Emails</button>
     <button onclick="resubmitCase()">Resubmit Case</button>
   </div>
+  <div class="row" style="margin-top: 24px;">
+    <input id="submissionId" placeholder="Standalone Submission ID (example: S2026...)" />
+  </div>
+  <div class="row">
+    <button onclick="loadStandaloneTrace()">Load Standalone Trace</button>
+    <button onclick="resubmitStandalone()">Resubmit Standalone</button>
+  </div>
   <pre id="out">Ready.</pre>
   <script>
     const out = document.getElementById('out');
-    const input = document.getElementById('caseId');
+    const caseInput = document.getElementById('caseId');
+    const submissionInput = document.getElementById('submissionId');
     async function call(url, opts) {
       const res = await fetch(url, opts || {});
       const text = await res.text();
@@ -186,7 +309,8 @@ async def ops_page(request: Request):
       return data;
     }
     function show(data) { out.textContent = JSON.stringify(data, null, 2); }
-    function cid() { return input.value.trim(); }
+    function cid() { return caseInput.value.trim(); }
+    function sid() { return submissionInput.value.trim(); }
     async function loadTrace() {
       const id = cid();
       if (!id) return show({ error: 'case_id required' });
@@ -205,6 +329,18 @@ async def ops_page(request: Request):
       try { show(await call(`/ops/cases/${encodeURIComponent(id)}/resubmit`, { method: 'POST' })); }
       catch (e) { show(e); }
     }
+    async function loadStandaloneTrace() {
+      const id = sid();
+      if (!id) return show({ error: 'submission_id required' });
+      try { show(await call(`/ops/standalone/${encodeURIComponent(id)}/trace`)); }
+      catch (e) { show(e); }
+    }
+    async function resubmitStandalone() {
+      const id = sid();
+      if (!id) return show({ error: 'submission_id required' });
+      try { show(await call(`/ops/standalone/${encodeURIComponent(id)}/resubmit`, { method: 'POST' })); }
+      catch (e) { show(e); }
+    }
   </script>
 </body>
 </html>
@@ -216,6 +352,13 @@ async def ops_case_trace(case_id: str, request: Request):
     _require_local_access(request)
     db: Db = request.app.state.db
     return await _load_case_trace(db=db, case_id=case_id)
+
+
+@router.get("/ops/standalone/{submission_id}/trace")
+async def ops_standalone_trace(submission_id: str, request: Request):
+    _require_local_access(request)
+    db: Db = request.app.state.db
+    return await _load_standalone_trace(db=db, submission_id=submission_id)
 
 
 @router.post("/ops/cases/{case_id}/resend-signature")
@@ -274,25 +417,61 @@ async def ops_resubmit(case_id: str, request: Request):
         raise HTTPException(status_code=500, detail="stored intake payload is not a JSON object")
 
     base_request_id = str(payload.get("request_id", case_id)).strip() or case_id
-    new_request_id = f"{base_request_id}-resubmit-{int(time.time())}"
+    new_request_id = _new_resubmit_request_id(base_request_id)
     payload["request_id"] = new_request_id
 
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    headers = _build_intake_headers(cfg=cfg, body=body)
-    resp = await asyncio.to_thread(
-        requests.post,
-        "http://127.0.0.1:8080/intake",
-        data=body,
-        headers=headers,
-        timeout=180,
+    parsed_response = await _post_internal_json(
+        cfg=cfg,
+        url="http://127.0.0.1:8080/intake",
+        payload=payload,
     )
-
-    parsed_response = _parse_json_safely(resp.text)
-    if not (200 <= resp.status_code < 300):
-        raise HTTPException(status_code=resp.status_code, detail=parsed_response)
 
     return {
         "case_id": case_id,
         "new_request_id": new_request_id,
         "intake_response": parsed_response,
+    }
+
+
+@router.post("/ops/standalone/{submission_id}/resubmit")
+async def ops_resubmit_standalone(submission_id: str, request: Request):
+    _require_local_access(request)
+    db: Db = request.app.state.db
+    cfg = request.app.state.cfg
+
+    row = await db.fetchone(
+        """SELECT request_id, form_key, signer_email, template_data_json
+           FROM standalone_submissions
+           WHERE id=?""",
+        (submission_id,),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="submission_id not found")
+
+    base_request_id = str(row[0] or submission_id).strip() or submission_id
+    new_request_id = _new_resubmit_request_id(base_request_id)
+    form_key = str(row[1] or "").strip()
+    signer_email = str(row[2] or "").strip()
+    template_data = _parse_json_safely(row[3])
+    if not isinstance(template_data, dict):
+        raise HTTPException(status_code=500, detail="stored standalone template data is not a JSON object")
+
+    payload: dict[str, object] = {
+        "request_id": new_request_id,
+        "form_key": form_key,
+        "template_data": template_data,
+    }
+    if signer_email:
+        payload["local_president_signer_email"] = signer_email
+
+    parsed_response = await _post_internal_json(
+        cfg=cfg,
+        url=f"http://127.0.0.1:8080/standalone/forms/{form_key}/submissions",
+        payload=payload,
+    )
+
+    return {
+        "submission_id": submission_id,
+        "new_request_id": new_request_id,
+        "standalone_response": parsed_response,
     }

@@ -245,6 +245,32 @@ class DocuSealPlaceholderAlignmentTests(unittest.TestCase):
         self.assertLess(tuned_area["y"], default_area["y"])
         self.assertLessEqual(tuned_area["h"], default_area["h"])
 
+    def test_normalize_area_article_affected_field_uses_tighter_hint(self) -> None:
+        raw = {
+            "x_min": 303.65,
+            "y_min": 121.7975,
+            "x_max": 472.1855,
+            "y_max": 133.5155,
+            "page": 0,
+            "page_w": 612.0,
+            "page_h": 792.0,
+        }
+        generic_area = self.client._normalize_area(
+            raw=raw,
+            field_type="text",
+            attachment_uuid="att",
+            field_name="generic_text_field",
+        )
+        article_area = self.client._normalize_area(
+            raw=raw,
+            field_type="text",
+            attachment_uuid="att",
+            field_name="article_affected",
+        )
+        self.assertLess(article_area["h"], generic_area["h"])
+        self.assertLess(article_area["w"], generic_area["w"])
+        self.assertLess(article_area["y"], generic_area["y"])
+
     def test_normalize_exact_area_preserves_table_cell_box(self) -> None:
         raw = {
             "x_min": 200.0,
@@ -869,6 +895,33 @@ class DocuSealPlaceholderAlignmentTests(unittest.TestCase):
         self.assertEqual(strategy, "generic_fallback")
         self.assertIn("trace_reason=trace_no_page_segments", reason)
         self.assertIn("trace_rejected", metrics)
+
+    def test_normalize_area_att_mobility_signature_uses_tighter_form_hint(self) -> None:
+        raw = {
+            "x_min": 238.35,
+            "y_min": 444.5475,
+            "x_max": 379.5015,
+            "y_max": 456.2655,
+            "page": 0,
+            "page_w": 612.0,
+            "page_h": 792.0,
+        }
+        generic_area = self.client._normalize_area(
+            raw=raw,
+            field_type="signature",
+            attachment_uuid="att",
+            field_name="signer1_signature",
+            form_key="generic_form",
+        )
+        tuned_area = self.client._normalize_area(
+            raw=raw,
+            field_type="signature",
+            attachment_uuid="att",
+            field_name="signer1_signature",
+            form_key="att_mobility_bargaining_suggestion",
+        )
+        self.assertLess(tuned_area["h"], generic_area["h"])
+        self.assertLess(tuned_area["y"], generic_area["y"])
 
     def test_guard_fails_overlap_and_uses_map_fallback(self) -> None:
         mapped_client = DocuSealClient(

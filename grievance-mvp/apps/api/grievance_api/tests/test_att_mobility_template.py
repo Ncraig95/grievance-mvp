@@ -21,13 +21,32 @@ class AttMobilityTemplateTests(unittest.TestCase):
             "demand_from_local": "CWA 3106",
             "submitting_member_title": "Steward",
             "submitting_member_name": "Jane Doe",
-            "demand_rows": [{"text": "Increase staffing for mobility teams.", "line_no": 1}],
-            "reason_rows": [{"text": "Current staffing levels delay customer support.", "line_no": 1}],
-            "specific_examples_rows": [{"text": "Three shifts ran short this week.", "line_no": 1}],
+            "demand_rows": [
+                {"text": "Increase staffing for mobility teams.", "line_no": 1},
+                {"text": "Backfill every uncovered shift.", "line_no": 2},
+            ],
+            "reason_rows": [
+                {"text": "Current staffing levels delay customer support.", "line_no": 1},
+                {"text": "Technicians are covering too many zones.", "line_no": 2},
+            ],
+            "specific_examples_rows": [
+                {"text": "Three shifts ran short this week.", "line_no": 1},
+                {"text": "Weekend dispatch fell behind twice.", "line_no": 2},
+            ],
             "work_phone": "555-1111",
             "home_phone": "555-2222",
             "non_work_email": "jane@example.org",
         }
+
+        with zipfile.ZipFile(template_path) as zf:
+            template_xml = zf.read("word/document.xml").decode("utf-8", "ignore")
+            footer_xml = zf.read("word/footer1.xml").decode("utf-8", "ignore")
+
+        self.assertIn("{%tr for line in demand_rows %}", template_xml)
+        self.assertIn("{%tr for line in reason_rows %}", template_xml)
+        self.assertIn("{%tr for line in specific_examples_rows %}", template_xml)
+        self.assertNotIn("{%p for line in demand_rows %}", template_xml)
+        self.assertIn('PAGE', footer_xml)
 
         with tempfile.TemporaryDirectory() as tmp:
             anchor_path = Path(tmp) / "anchor.docx"
@@ -56,6 +75,10 @@ class AttMobilityTemplateTests(unittest.TestCase):
             self.assertIn("Txt_es_:signer1:article_affected", anchor_xml)
             self.assertNotIn("Dte_es_:", anchor_xml)
             self.assertNotIn("{{", rendered_xml)
+            self.assertNotIn("{%tr", rendered_xml)
+            self.assertIn("Backfill every uncovered shift.", rendered_xml)
+            self.assertIn("Technicians are covering too many zones.", rendered_xml)
+            self.assertIn("Weekend dispatch fell behind twice.", rendered_xml)
 
             anchor_pdf = docx_to_pdf(
                 str(anchor_path),
