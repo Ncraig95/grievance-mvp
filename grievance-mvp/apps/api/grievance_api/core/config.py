@@ -149,6 +149,11 @@ class StandaloneFormConfig:
     sharepoint_storage: StandaloneSharepointStorageConfig = field(default_factory=StandaloneSharepointStorageConfig)
 
 
+@dataclass(frozen=True)
+class OfficerTrackingConfig:
+    roster: tuple[str, ...] = ()
+
+
 def _default_intake_auth() -> IntakeAuthConfig:
     return IntakeAuthConfig(
         shared_header_name="X-Intake-Key",
@@ -165,6 +170,10 @@ def _default_rendering() -> RenderingConfig:
     )
 
 
+def _default_officer_tracking() -> OfficerTrackingConfig:
+    return OfficerTrackingConfig()
+
+
 @dataclass(frozen=True)
 class AppConfig:
     hmac_shared_secret: str
@@ -179,6 +188,7 @@ class AppConfig:
     grievance_id: GrievanceIdConfig
     intake_auth: IntakeAuthConfig = field(default_factory=_default_intake_auth)
     rendering: RenderingConfig = field(default_factory=_default_rendering)
+    officer_tracking: OfficerTrackingConfig = field(default_factory=_default_officer_tracking)
     document_policies: dict[str, DocumentPolicyConfig] = field(default_factory=dict)
     standalone_forms: dict[str, StandaloneFormConfig] = field(default_factory=dict)
     docx_pdf_engine: str = "libreoffice"
@@ -524,6 +534,7 @@ def load_config(path: str) -> AppConfig:
     grievance_raw = raw.get("grievance_id", {}) or {}
     intake_auth_raw = raw.get("intake_auth", {}) or {}
     rendering_raw = raw.get("rendering", {}) or {}
+    officer_tracking_raw = raw.get("officer_tracking", {}) or {}
     document_policies_raw = raw.get("document_policies", {}) or {}
     standalone_forms_raw = raw.get("standalone_forms", {}) or {}
 
@@ -689,6 +700,9 @@ def load_config(path: str) -> AppConfig:
         rendering=RenderingConfig(
             normalize_split_placeholders=bool(rendering_raw.get("normalize_split_placeholders", True)),
             layout_policies=parsed_layout_policies,
+        ),
+        officer_tracking=OfficerTrackingConfig(
+            roster=_as_str_tuple(officer_tracking_raw.get("roster")),
         ),
         document_policies=parsed_document_policies,
         standalone_forms=_as_standalone_forms(standalone_forms_raw),

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import ipaddress
 import json
 import time
 
@@ -12,32 +11,11 @@ from fastapi.responses import HTMLResponse
 
 from ..core.hmac_auth import compute_signature
 from ..db.db import Db, utcnow
+from .admin_common import parse_json_safely, require_local_access
 
 router = APIRouter()
 
 _OPS_CLEARED_STATUS = "ops_cleared"
-
-
-def _require_local_access(request: Request) -> None:
-    client_host = (request.client.host if request.client else "").strip()
-    if client_host.lower() == "localhost":
-        return
-    try:
-        ip = ipaddress.ip_address(client_host)
-    except Exception as exc:
-        raise HTTPException(status_code=403, detail="ops endpoints require local/private network access") from exc
-    if not (ip.is_loopback or ip.is_private):
-        raise HTTPException(status_code=403, detail="ops endpoints require local/private network access")
-
-
-def _parse_json_safely(raw: object) -> object:
-    text = str(raw or "").strip()
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except Exception:
-        return text
 
 
 def _build_intake_headers(*, cfg, body: bytes) -> dict[str, str]:  # noqa: ANN001
@@ -135,7 +113,7 @@ async def _load_active_signature_queue(*, db: Db, grievance_ref: str | None = No
             "doc_type": row[7],
             "template_key": row[8],
             "document_status": row[9],
-            "signer_order": _parse_json_safely(row[10]),
+            "signer_order": parse_json_safely(row[10]),
             "docuseal_submission_id": row[11],
             "docuseal_signing_link": row[12],
             "created_at_utc": row[13],
@@ -464,7 +442,7 @@ async def _update_case_document_signer_email(
         send_email=bool(resend_email),
     )
 
-    parsed_signer_order = _parse_json_safely(row[5])
+    parsed_signer_order = parse_json_safely(row[5])
     signer_order, changed = _replace_email_in_signer_order(
         parsed_signer_order,
         current_email=previous_email,
@@ -482,7 +460,7 @@ async def _update_case_document_signer_email(
         (json.dumps(signer_order, ensure_ascii=False), updated_signing_link, document_id),
     )
 
-    intake_payload = _parse_json_safely(row[8])
+    intake_payload = parse_json_safely(row[8])
     if isinstance(intake_payload, dict):
         documents_payload = intake_payload.get("documents")
         if isinstance(documents_payload, list):
@@ -584,7 +562,7 @@ async def _update_standalone_document_signer_email(
         send_email=bool(resend_email),
     )
 
-    parsed_signer_order = _parse_json_safely(row[5])
+    parsed_signer_order = parse_json_safely(row[5])
     signer_order, changed = _replace_email_in_signer_order(
         parsed_signer_order,
         current_email=previous_email,
@@ -692,7 +670,7 @@ async def _load_case_trace(*, db: Db, case_id: str) -> dict[str, object]:
                 "template_key": row[2],
                 "status": row[3],
                 "requires_signature": bool(row[4]),
-                "signer_order": _parse_json_safely(row[5]),
+                "signer_order": parse_json_safely(row[5]),
                 "docuseal_submission_id": row[6],
                 "docuseal_signing_link": row[7],
                 "created_at_utc": row[8],
@@ -705,7 +683,7 @@ async def _load_case_trace(*, db: Db, case_id: str) -> dict[str, object]:
                 "ts_utc": row[0],
                 "event_type": row[1],
                 "document_id": row[2],
-                "details": _parse_json_safely(row[3]),
+                "details": parse_json_safely(row[3]),
             }
             for row in events_rows
         ],
@@ -783,7 +761,7 @@ async def _load_standalone_trace(*, db: Db, submission_id: str) -> dict[str, obj
                 "template_key": row[1],
                 "status": row[2],
                 "requires_signature": bool(row[3]),
-                "signer_order": _parse_json_safely(row[4]),
+                "signer_order": parse_json_safely(row[4]),
                 "docuseal_submission_id": row[5],
                 "docuseal_signing_link": row[6],
                 "sharepoint_generated_url": row[7],
@@ -799,7 +777,7 @@ async def _load_standalone_trace(*, db: Db, submission_id: str) -> dict[str, obj
                 "ts_utc": row[0],
                 "event_type": row[1],
                 "document_id": row[2],
-                "details": _parse_json_safely(row[3]),
+                "details": parse_json_safely(row[3]),
             }
             for row in events_rows
         ],
@@ -927,7 +905,7 @@ async def _load_grievance_doc_catalog(*, db: Db, grievance_ref: str) -> dict[str
         if not document_id:
             continue
 
-        signer_order = _parse_json_safely(row[14])
+        signer_order = parse_json_safely(row[14])
         doc_entry = {
             "document_id": document_id,
             "doc_type": row[10],
@@ -1012,7 +990,7 @@ async def _post_internal_json(*, cfg, url: str, payload: dict[str, object]) -> o
         timeout=180,
     )
 
-    parsed_response = _parse_json_safely(resp.text)
+    parsed_response = parse_json_safely(resp.text)
     if not (200 <= resp.status_code < 300):
         raise HTTPException(status_code=resp.status_code, detail=parsed_response)
     return parsed_response
@@ -1020,7 +998,7 @@ async def _post_internal_json(*, cfg, url: str, payload: dict[str, object]) -> o
 
 @router.get("/ops", response_class=HTMLResponse)
 async def ops_page(request: Request):
-    _require_local_access(request)
+    require_local_access(request)
     return """
 <!doctype html>
 <html>
@@ -1350,28 +1328,28 @@ async def ops_page(request: Request):
 
 @router.get("/ops/cases/{case_id}/trace")
 async def ops_case_trace(case_id: str, request: Request):
-    _require_local_access(request)
+    require_local_access(request)
     db: Db = request.app.state.db
     return await _load_case_trace(db=db, case_id=case_id)
 
 
 @router.get("/ops/grievances/{grievance_ref}/documents")
 async def ops_grievance_documents(grievance_ref: str, request: Request):
-    _require_local_access(request)
+    require_local_access(request)
     db: Db = request.app.state.db
     return await _load_grievance_doc_catalog(db=db, grievance_ref=grievance_ref)
 
 
 @router.get("/ops/active-signatures")
 async def ops_active_signatures(request: Request, grievance_ref: str | None = None):
-    _require_local_access(request)
+    require_local_access(request)
     db: Db = request.app.state.db
     return await _load_active_signature_queue(db=db, grievance_ref=grievance_ref)
 
 
 @router.post("/ops/documents/{document_id}/clear")
 async def ops_clear_document(document_id: str, request: Request, reason: str = ""):
-    _require_local_access(request)
+    require_local_access(request)
     db: Db = request.app.state.db
     docuseal = request.app.state.docuseal
     return await _clear_case_document(
@@ -1384,7 +1362,7 @@ async def ops_clear_document(document_id: str, request: Request, reason: str = "
 
 @router.post("/ops/standalone-documents/{document_id}/clear")
 async def ops_clear_standalone_document(document_id: str, request: Request, reason: str = ""):
-    _require_local_access(request)
+    require_local_access(request)
     db: Db = request.app.state.db
     docuseal = request.app.state.docuseal
     return await _clear_standalone_document(
@@ -1403,7 +1381,7 @@ async def ops_update_document_email(
     new_email: str = "",
     resend_email: bool = True,
 ):
-    _require_local_access(request)
+    require_local_access(request)
     db: Db = request.app.state.db
     docuseal = request.app.state.docuseal
     return await _update_case_document_signer_email(
@@ -1424,7 +1402,7 @@ async def ops_update_standalone_document_email(
     new_email: str = "",
     resend_email: bool = True,
 ):
-    _require_local_access(request)
+    require_local_access(request)
     db: Db = request.app.state.db
     docuseal = request.app.state.docuseal
     return await _update_standalone_document_signer_email(
@@ -1439,14 +1417,14 @@ async def ops_update_standalone_document_email(
 
 @router.get("/ops/standalone/{submission_id}/trace")
 async def ops_standalone_trace(submission_id: str, request: Request):
-    _require_local_access(request)
+    require_local_access(request)
     db: Db = request.app.state.db
     return await _load_standalone_trace(db=db, submission_id=submission_id)
 
 
 @router.post("/ops/cases/{case_id}/resend-signature")
 async def ops_resend_signature(case_id: str, request: Request):
-    _require_local_access(request)
+    require_local_access(request)
     db: Db = request.app.state.db
 
     docs = await db.fetchall(
@@ -1473,7 +1451,7 @@ async def ops_resend_signature(case_id: str, request: Request):
             json=body,
             timeout=120,
         )
-        payload = _parse_json_safely(resp.text)
+        payload = parse_json_safely(resp.text)
         results.append(
             {
                 "document_id": doc_id,
@@ -1487,7 +1465,7 @@ async def ops_resend_signature(case_id: str, request: Request):
 
 @router.post("/ops/cases/{case_id}/resubmit")
 async def ops_resubmit(case_id: str, request: Request):
-    _require_local_access(request)
+    require_local_access(request)
     db: Db = request.app.state.db
     cfg = request.app.state.cfg
 
@@ -1495,7 +1473,7 @@ async def ops_resubmit(case_id: str, request: Request):
     if not row:
         raise HTTPException(status_code=404, detail="case_id not found")
 
-    payload = _parse_json_safely(row[0])
+    payload = parse_json_safely(row[0])
     if not isinstance(payload, dict):
         raise HTTPException(status_code=500, detail="stored intake payload is not a JSON object")
 
@@ -1518,7 +1496,7 @@ async def ops_resubmit(case_id: str, request: Request):
 
 @router.post("/ops/grievances/{grievance_ref}/resubmit")
 async def ops_resubmit_by_grievance(grievance_ref: str, doc_type: str, request: Request):
-    _require_local_access(request)
+    require_local_access(request)
     db: Db = request.app.state.db
     cfg = request.app.state.cfg
 
@@ -1540,7 +1518,7 @@ async def ops_resubmit_by_grievance(grievance_ref: str, doc_type: str, request: 
     if not row:
         raise HTTPException(status_code=404, detail="no matching grievance/doc_type found")
 
-    payload = _parse_json_safely(row[1])
+    payload = parse_json_safely(row[1])
     if not isinstance(payload, dict):
         raise HTTPException(status_code=500, detail="stored intake payload is not a JSON object")
 
@@ -1549,7 +1527,7 @@ async def ops_resubmit_by_grievance(grievance_ref: str, doc_type: str, request: 
         "doc_type": row[4],
         "template_key": row[5],
         "requires_signature": bool(row[6]),
-        "signer_order": _parse_json_safely(row[7]),
+        "signer_order": parse_json_safely(row[7]),
     }
     filtered_payload = _filter_payload_documents_for_target(
         payload=payload,
@@ -1583,7 +1561,7 @@ async def ops_resubmit_by_grievance(grievance_ref: str, doc_type: str, request: 
 
 @router.post("/ops/standalone/{submission_id}/resubmit")
 async def ops_resubmit_standalone(submission_id: str, request: Request):
-    _require_local_access(request)
+    require_local_access(request)
     db: Db = request.app.state.db
     cfg = request.app.state.cfg
 
@@ -1600,7 +1578,7 @@ async def ops_resubmit_standalone(submission_id: str, request: Request):
     new_request_id = _new_resubmit_request_id(base_request_id)
     form_key = str(row[1] or "").strip()
     signer_email = str(row[2] or "").strip()
-    template_data = _parse_json_safely(row[3])
+    template_data = parse_json_safely(row[3])
     if not isinstance(template_data, dict):
         raise HTTPException(status_code=500, detail="stored standalone template data is not a JSON object")
 

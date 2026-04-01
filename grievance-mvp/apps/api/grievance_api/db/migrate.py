@@ -195,6 +195,18 @@ def migrate(db_path: str) -> None:
         _ensure_column(con, "cases", "member_email", "TEXT")
         _ensure_column(con, "cases", "sharepoint_case_folder", "TEXT")
         _ensure_column(con, "cases", "sharepoint_case_web_url", "TEXT")
+        _ensure_column(con, "cases", "officer_status", "TEXT")
+        _ensure_column(con, "cases", "officer_assignee", "TEXT")
+        _ensure_column(con, "cases", "officer_notes", "TEXT")
+        _ensure_column(con, "cases", "officer_source", "TEXT")
+        _ensure_column(con, "cases", "officer_closed_at_utc", "TEXT")
+        _ensure_column(con, "cases", "officer_closed_by", "TEXT")
+        _ensure_column(con, "cases", "tracking_department", "TEXT")
+        _ensure_column(con, "cases", "tracking_steward", "TEXT")
+        _ensure_column(con, "cases", "tracking_occurrence_date", "TEXT")
+        _ensure_column(con, "cases", "tracking_issue_summary", "TEXT")
+        _ensure_column(con, "cases", "tracking_first_level_request_sent_date", "TEXT")
+        _ensure_column(con, "cases", "tracking_second_level_request_sent_date", "TEXT")
 
         _ensure_column(con, "documents", "template_key", "TEXT")
         _ensure_column(con, "documents", "signed_pdf_path", "TEXT")
@@ -271,6 +283,7 @@ def migrate(db_path: str) -> None:
         index_sql = [
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_cases_intake_request_id ON cases(intake_request_id)",
             "CREATE INDEX IF NOT EXISTS idx_cases_grievance_id ON cases(grievance_id)",
+            "CREATE INDEX IF NOT EXISTS idx_cases_officer_status ON cases(officer_status)",
             "CREATE INDEX IF NOT EXISTS idx_documents_case_id ON documents(case_id)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_docuseal_submission ON documents(docuseal_submission_id)",
             "DROP INDEX IF EXISTS idx_documents_case_doc_type",

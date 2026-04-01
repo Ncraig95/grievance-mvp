@@ -16,7 +16,19 @@ CREATE TABLE IF NOT EXISTS cases (
   intake_request_id TEXT NOT NULL,
   intake_payload_json TEXT NOT NULL,
   sharepoint_case_folder TEXT,
-  sharepoint_case_web_url TEXT
+  sharepoint_case_web_url TEXT,
+  officer_status TEXT,
+  officer_assignee TEXT,
+  officer_notes TEXT,
+  officer_source TEXT,
+  officer_closed_at_utc TEXT,
+  officer_closed_by TEXT,
+  tracking_department TEXT,
+  tracking_steward TEXT,
+  tracking_occurrence_date TEXT,
+  tracking_issue_summary TEXT,
+  tracking_first_level_request_sent_date TEXT,
+  tracking_second_level_request_sent_date TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cases_intake_request_id
@@ -24,6 +36,9 @@ ON cases(intake_request_id);
 
 CREATE INDEX IF NOT EXISTS idx_cases_grievance_id
 ON cases(grievance_id);
+
+CREATE INDEX IF NOT EXISTS idx_cases_officer_status
+ON cases(officer_status);
 
 CREATE TABLE IF NOT EXISTS grievance_id_sequences (
   year INTEGER PRIMARY KEY,

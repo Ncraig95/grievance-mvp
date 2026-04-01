@@ -86,6 +86,8 @@ grievance_id:
   timezone: America/New_York
   min_width: 3
   separator: ""
+officer_tracking:
+  roster: []
 docuseal:
   base_url: http://docuseal:3000
   api_token: REPLACE

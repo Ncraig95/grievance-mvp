@@ -135,3 +135,108 @@ class ApprovalDecisionResponse(BaseModel):
 class AssignGrievanceNumberRequest(BaseModel):
     grievance_number: str
     assigned_by: str | None = None
+
+
+class OfficerCaseCreateRequest(BaseModel):
+    grievance_id: str | None = None
+    grievance_number: str | None = None
+    member_name: str
+    member_email: str | None = None
+    department: str | None = None
+    steward: str | None = None
+    occurrence_date: str | None = None
+    issue_summary: str | None = None
+    first_level_request_sent_date: str | None = None
+    second_level_request_sent_date: str | None = None
+    officer_assignee: str | None = None
+    officer_notes: str | None = None
+    officer_status: str | None = None
+    contract: str | None = None
+    updated_by: str | None = None
+
+
+class OfficerCaseUpdateRequest(BaseModel):
+    grievance_number: str | None = None
+    member_name: str | None = None
+    member_email: str | None = None
+    department: str | None = None
+    steward: str | None = None
+    occurrence_date: str | None = None
+    issue_summary: str | None = None
+    first_level_request_sent_date: str | None = None
+    second_level_request_sent_date: str | None = None
+    officer_assignee: str | None = None
+    officer_notes: str | None = None
+    officer_status: str | None = None
+    updated_by: str | None = None
+
+
+class OfficerCaseBulkUpdateRequest(OfficerCaseUpdateRequest):
+    case_ids: list[str]
+
+
+class OfficerCaseBulkDeleteRequest(BaseModel):
+    case_ids: list[str]
+
+
+class OfficerCaseRow(BaseModel):
+    case_id: str
+    grievance_id: str
+    grievance_number: str | None = None
+    display_grievance: str
+    member_name: str
+    member_email: str | None = None
+    department: str | None = None
+    steward: str | None = None
+    occurrence_date: str | None = None
+    issue_summary: str | None = None
+    first_level_request_sent_date: str | None = None
+    second_level_request_sent_date: str | None = None
+    officer_assignee: str | None = None
+    officer_notes: str | None = None
+    officer_status: str
+    workflow_status: str
+    approval_status: str
+    officer_source: str
+    officer_closed_at_utc: str | None = None
+    officer_closed_by: str | None = None
+    created_at_utc: str
+
+
+class OfficerCaseListResponse(BaseModel):
+    rows: list[OfficerCaseRow]
+    roster: list[str] = Field(default_factory=list)
+    count: int
+
+
+class OfficerCaseDeleteResponse(BaseModel):
+    case_id: str
+    grievance_id: str
+    grievance_number: str | None = None
+    display_grievance: str
+    deleted_case_count: int
+    deleted_document_count: int
+    deleted_document_stage_count: int
+    deleted_stage_artifact_count: int
+    deleted_stage_field_value_count: int
+    deleted_event_count: int
+    deleted_outbound_email_count: int
+
+
+class OfficerCaseBulkUpdateResponse(BaseModel):
+    selected_case_count: int
+    updated_case_count: int
+    case_ids: list[str] = Field(default_factory=list)
+    changed_fields: list[str] = Field(default_factory=list)
+
+
+class OfficerCaseBulkDeleteResponse(BaseModel):
+    selected_case_count: int
+    deleted_case_count: int
+    deleted_case_ids: list[str] = Field(default_factory=list)
+    deleted_document_count: int
+    deleted_document_stage_count: int
+    deleted_stage_artifact_count: int
+    deleted_stage_field_value_count: int
+    deleted_event_count: int
+    deleted_outbound_email_count: int
