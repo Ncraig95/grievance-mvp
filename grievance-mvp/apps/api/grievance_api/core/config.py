@@ -171,6 +171,7 @@ class OfficerAuthConfig:
     session_secret: str = ""
     officer_group_ids: tuple[str, ...] = ()
     admin_group_ids: tuple[str, ...] = ()
+    chief_steward_group_ids: tuple[str, ...] = ()
     chief_steward_contract_scopes: dict[str, ChiefStewardContractScopeConfig] = field(default_factory=dict)
 
 
@@ -775,6 +776,7 @@ def load_config(path: str) -> AppConfig:
             session_secret=str(officer_auth_raw.get("session_secret", "")).strip(),
             officer_group_ids=_as_str_tuple(officer_auth_raw.get("officer_group_ids")),
             admin_group_ids=_as_str_tuple(officer_auth_raw.get("admin_group_ids")),
+            chief_steward_group_ids=_as_str_tuple(officer_auth_raw.get("chief_steward_group_ids")),
             chief_steward_contract_scopes=_as_chief_steward_contract_scopes(
                 officer_auth_raw.get("chief_steward_contract_scopes")
             ),

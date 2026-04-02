@@ -15,6 +15,8 @@ from .models import (
     ChiefStewardAssignmentCreateRequest,
     ChiefStewardAssignmentListResponse,
     ChiefStewardAssignmentRow,
+    DirectoryUserRow,
+    DirectoryUserSearchResponse,
     OfficerCaseBulkDeleteRequest,
     OfficerCaseBulkDeleteResponse,
     OfficerCaseBulkUpdateRequest,
@@ -591,6 +593,33 @@ async def _load_chief_steward_assignments(db: Db) -> list[ChiefStewardAssignment
     ]
 
 
+def _directory_user_row(result: object) -> DirectoryUserRow:
+    if isinstance(result, dict):
+        principal_id = str(result.get("id") or result.get("principal_id") or "").strip()
+        display_name = _normalize_optional_text(result.get("display_name") or result.get("displayName"))
+        email = _normalize_optional_text(result.get("email") or result.get("mail"))
+        user_principal_name = _normalize_optional_text(
+            result.get("user_principal_name") or result.get("userPrincipalName")
+        )
+    else:
+        principal_id = str(getattr(result, "id", "") or getattr(result, "principal_id", "") or "").strip()
+        display_name = _normalize_optional_text(
+            getattr(result, "display_name", None) or getattr(result, "displayName", None)
+        )
+        email = _normalize_optional_text(getattr(result, "email", None) or getattr(result, "mail", None))
+        user_principal_name = _normalize_optional_text(
+            getattr(result, "user_principal_name", None) or getattr(result, "userPrincipalName", None)
+        )
+    if not principal_id:
+        raise HTTPException(status_code=502, detail="directory lookup returned a user without an id")
+    return DirectoryUserRow(
+        principal_id=principal_id,
+        display_name=display_name,
+        email=email,
+        user_principal_name=user_principal_name,
+    )
+
+
 async def _upsert_chief_steward_assignment(
     db: Db,
     *,
@@ -705,7 +734,32 @@ def _render_officers_page(user: OfficerUserContext) -> str:
   <div class="panel" id="chiefAssignmentPanel">
     <h2>Chief Steward Contract Assignments</h2>
     <div class="summary">Admins can map chief stewards to contract scopes here without editing config.</div>
+    <div class="summary">Search Microsoft Entra to autofill the steward, or type an email manually if needed.</div>
     <div class="grid" style="margin-top:12px;">
+      <label>Directory Search
+        <input id="directorySearchInput" placeholder="Search by name or email" />
+      </label>
+      <label>&nbsp;
+        <button id="searchDirectoryBtn" type="button">Search Directory</button>
+      </label>
+    </div>
+    <div class="table-wrap" style="margin-top:12px;">
+      <table style="min-width: 900px;">
+        <thead>
+          <tr>
+            <th class="main">Directory User</th>
+            <th class="main">Email</th>
+            <th class="main">Sign-In</th>
+            <th class="main actions-col">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="directoryResultsBody">
+          <tr><td colspan="4">Search the directory to pick a steward.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="grid" style="margin-top:12px;">
+      <input id="chiefAssignmentPrincipalId" type="hidden" />
       <label>Chief Steward Email
         <input id="chiefAssignmentEmail" placeholder="chief@example.org" />
       </label>
@@ -1263,6 +1317,7 @@ def _render_officers_page(user: OfficerUserContext) -> str:
     const selectAllRows = document.getElementById('selectAllRows');
     const chiefAssignmentsBody = document.getElementById('chiefAssignmentsBody');
     const chiefAssignmentScope = document.getElementById('chiefAssignmentScope');
+    const directoryResultsBody = document.getElementById('directoryResultsBody');
     const currentRows = new Map();
     const selectedCaseIds = new Set();
     let currentRoster = [];
@@ -1386,6 +1441,41 @@ def _render_officers_page(user: OfficerUserContext) -> str:
         .map((value) => `<option value="${{esc(value)}}">${{esc(scopeLabel(value))}}</option>`)
         .join('');
       if (selectedValue) chiefAssignmentScope.value = selectedValue;
+    }}
+
+    function renderDirectoryResults(rows, search) {{
+      if (!directoryResultsBody) return;
+      if (!rows.length) {{
+        const message = search ? `No directory matches found for "${{esc(search)}}".` : 'Search the directory to pick a steward.';
+        directoryResultsBody.innerHTML = `<tr><td colspan="4">${{message}}</td></tr>`;
+        return;
+      }}
+      directoryResultsBody.innerHTML = rows.map((row) => `
+        <tr>
+          <td>${{esc(row.display_name || 'Unnamed User')}}</td>
+          <td>${{esc(row.email || '')}}</td>
+          <td>${{esc(row.user_principal_name || '')}}</td>
+          <td class="actions-col">
+            <div class="row-actions">
+              <button
+                type="button"
+                data-directory-principal-id="${{esc(row.principal_id)}}"
+                data-directory-email="${{esc(row.email || row.user_principal_name || '')}}"
+                data-directory-name="${{esc(row.display_name || '')}}"
+              >Use</button>
+            </div>
+          </td>
+        </tr>
+      `).join('');
+    }}
+
+    function applyDirectoryUserSelection(principalId, email, displayName) {{
+      const principalIdInput = document.getElementById('chiefAssignmentPrincipalId');
+      const emailInput = document.getElementById('chiefAssignmentEmail');
+      const nameInput = document.getElementById('chiefAssignmentName');
+      if (principalIdInput) principalIdInput.value = principalId || '';
+      if (emailInput) emailInput.value = email || '';
+      if (nameInput) nameInput.value = displayName || '';
     }}
 
     function refreshRosterOptions(rows, selectedFilter) {{
@@ -1789,8 +1879,25 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       }}
     }}
 
+    async function searchDirectoryUsers() {{
+      const search = valueOf('directorySearchInput');
+      if (search.length < 2) {{
+        renderDirectoryResults([], '');
+        return show({{ error: 'Enter at least 2 characters to search the directory.' }});
+      }}
+      try {{
+        const data = await call(`/officers/directory/users?search=${{encodeURIComponent(search)}}`);
+        renderDirectoryResults(Array.isArray(data.rows) ? data.rows : [], data.search || search);
+        show(data);
+      }} catch (e) {{
+        renderDirectoryResults([], search);
+        show(e);
+      }}
+    }}
+
     async function saveChiefAssignment() {{
       const payload = {{
+        principal_id: nullableValue('chiefAssignmentPrincipalId'),
         principal_email: valueOf('chiefAssignmentEmail'),
         principal_display_name: nullableValue('chiefAssignmentName'),
         contract_scope: valueOf('chiefAssignmentScope'),
@@ -1804,6 +1911,7 @@ def _render_officers_page(user: OfficerUserContext) -> str:
           headers: {{ 'Content-Type': 'application/json' }},
           body: JSON.stringify(payload)
         }});
+        document.getElementById('chiefAssignmentPrincipalId').value = '';
         document.getElementById('chiefAssignmentEmail').value = '';
         document.getElementById('chiefAssignmentName').value = '';
         show(data);
@@ -1847,6 +1955,15 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       if (!button) return;
       void deleteChiefAssignment(button.dataset.chiefAssignmentId || '');
     }});
+    directoryResultsBody && directoryResultsBody.addEventListener('click', (event) => {{
+      const button = event.target.closest('button[data-directory-principal-id]');
+      if (!button) return;
+      applyDirectoryUserSelection(
+        button.dataset.directoryPrincipalId || '',
+        button.dataset.directoryEmail || '',
+        button.dataset.directoryName || '',
+      );
+    }});
     tableBody.addEventListener('change', (event) => {{
       const checkbox = event.target.closest('input[data-select-case-id]');
       if (!checkbox) return;
@@ -1872,8 +1989,18 @@ def _render_officers_page(user: OfficerUserContext) -> str:
     document.getElementById('createBtn') && document.getElementById('createBtn').addEventListener('click', () => {{ void createCase(); }});
     document.getElementById('saveEditBtn') && document.getElementById('saveEditBtn').addEventListener('click', () => {{ void saveEdit(); }});
     document.getElementById('clearEditBtn') && document.getElementById('clearEditBtn').addEventListener('click', clearEditSelection);
+    document.getElementById('searchDirectoryBtn') && document.getElementById('searchDirectoryBtn').addEventListener('click', () => {{ void searchDirectoryUsers(); }});
     document.getElementById('saveChiefAssignmentBtn')
       && document.getElementById('saveChiefAssignmentBtn').addEventListener('click', () => {{ void saveChiefAssignment(); }});
+    document.getElementById('directorySearchInput') && document.getElementById('directorySearchInput').addEventListener('keydown', (event) => {{
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      void searchDirectoryUsers();
+    }});
+    document.getElementById('chiefAssignmentEmail') && document.getElementById('chiefAssignmentEmail').addEventListener('input', () => {{
+      const principalIdInput = document.getElementById('chiefAssignmentPrincipalId');
+      if (principalIdInput) principalIdInput.value = '';
+    }});
     selectAllRows && selectAllRows.addEventListener('change', () => {{
       if (selectAllRows.checked) {{
         for (const caseId of currentRows.keys()) selectedCaseIds.add(caseId);
@@ -1981,6 +2108,26 @@ async def chief_steward_assignments(request: Request):
     )
 
 
+@router.get("/officers/directory/users", response_model=DirectoryUserSearchResponse)
+async def officer_directory_users(request: Request, search: str = "", limit: int = 10):
+    await require_admin_user(request)
+    query = str(search or "").strip()
+    if len(query) < 2:
+        return DirectoryUserSearchResponse(search=query, count=0, rows=[])
+
+    graph = getattr(request.app.state, "graph", None)
+    if graph is None or not hasattr(graph, "search_directory_users"):
+        raise HTTPException(status_code=503, detail="directory lookup is unavailable")
+
+    try:
+        matches = graph.search_directory_users(query, limit=max(1, min(int(limit or 10), 25)))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=f"directory lookup failed: {exc}") from exc
+
+    rows = [_directory_user_row(item) for item in matches]
+    return DirectoryUserSearchResponse(search=query, count=len(rows), rows=rows)
+
+
 @router.post("/officers/chief-assignments", response_model=ChiefStewardAssignmentRow)
 async def create_chief_steward_assignment(body: ChiefStewardAssignmentCreateRequest, request: Request):
     user = await require_admin_user(request)
@@ -1989,7 +2136,7 @@ async def create_chief_steward_assignment(body: ChiefStewardAssignmentCreateRequ
     return await _upsert_chief_steward_assignment(
         db,
         cfg=cfg,
-        principal_id=None,
+        principal_id=body.principal_id,
         principal_email=body.principal_email,
         principal_display_name=body.principal_display_name,
         contract_scope=body.contract_scope,

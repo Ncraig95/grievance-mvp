@@ -107,12 +107,33 @@ officer_auth:
   session_secret: REPLACE_WITH_LONG_RANDOM_SECRET
   officer_group_ids: []
   admin_group_ids: []
+  chief_steward_group_ids: []
   chief_steward_contract_scopes:
+    wire_tech:
+      group_ids: []
+      contract_aliases:
+      - Wire Tech
+      - WT
+    coj:
+      group_ids: []
+      contract_aliases:
+      - COJ
+      - City of Jacksonville
     mobility:
       group_ids: []
       contract_aliases:
-      - mobility
-      - at&t mobility
+      - Mobility
+      - AT&T Mobility
+      - ATT Mobility
+    ihx:
+      group_ids: []
+      contract_aliases:
+      - IHX
+    utilities:
+      group_ids: []
+      contract_aliases:
+      - Utilities
+      - Utility
 docuseal:
   base_url: http://docuseal:3000
   api_token: REPLACE

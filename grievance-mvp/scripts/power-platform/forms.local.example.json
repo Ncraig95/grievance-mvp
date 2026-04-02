@@ -1,0 +1,60 @@
+{
+  "apiBaseUrl": "https://api.cwa3106.org",
+  "powerPlatform": {
+    "environmentUrl": "",
+    "solutionZipPath": "",
+    "deploymentSettingsPath": ""
+  },
+  "forms": {
+    "statement_of_occurrence": {
+      "microsoftFormId": "",
+      "publishedFormUrl": "",
+      "flowDisplayName": "CWA 3106 - Statement of Occurrence Intake"
+    },
+    "bellsouth_meeting_request": {
+      "microsoftFormId": "",
+      "publishedFormUrl": "",
+      "flowDisplayName": "CWA 3106 - BellSouth Meeting Request Intake"
+    },
+    "mobility_meeting_request": {
+      "microsoftFormId": "",
+      "publishedFormUrl": "",
+      "flowDisplayName": "CWA 3106 - Mobility Meeting Request Intake"
+    },
+    "grievance_data_request": {
+      "microsoftFormId": "",
+      "publishedFormUrl": "",
+      "flowDisplayName": "CWA 3106 - Grievance Data Request Intake"
+    },
+    "true_intent_brief": {
+      "microsoftFormId": "",
+      "publishedFormUrl": "",
+      "flowDisplayName": "CWA 3106 - True Intent Brief Intake"
+    },
+    "disciplinary_brief": {
+      "microsoftFormId": "",
+      "publishedFormUrl": "",
+      "flowDisplayName": "CWA 3106 - Disciplinary Brief Intake"
+    },
+    "settlement_form": {
+      "microsoftFormId": "",
+      "publishedFormUrl": "",
+      "flowDisplayName": "CWA 3106 - Settlement Form 3106 Intake"
+    },
+    "mobility_record_of_grievance": {
+      "microsoftFormId": "",
+      "publishedFormUrl": "",
+      "flowDisplayName": "CWA 3106 - Mobility Record of Grievance Intake"
+    },
+    "bst_grievance_form_3g3a": {
+      "microsoftFormId": "",
+      "publishedFormUrl": "",
+      "flowDisplayName": "CWA 3106 - BST 3G3A Intake"
+    },
+    "att_mobility_bargaining_suggestion": {
+      "microsoftFormId": "",
+      "publishedFormUrl": "",
+      "flowDisplayName": "AT&T Mobility Bargaining Suggestion Submission"
+    }
+  }
+}

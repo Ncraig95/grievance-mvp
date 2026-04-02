@@ -28,6 +28,14 @@ class UploadedFileRef:
     path: str
 
 
+@dataclass(frozen=True)
+class DirectoryUserRef:
+    id: str
+    display_name: str | None
+    email: str | None
+    user_principal_name: str | None
+
+
 class CaseFolderLookupError(RuntimeError):
     pass
 
@@ -85,21 +93,34 @@ class GraphUploader:
             raise RuntimeError(f"Graph token failure: {err} {desc}")
         return str(result["access_token"])
 
-    def _request(self, method: str, endpoint: str, *, payload: dict | None = None, data: bytes | None = None) -> dict:
+    def _request(
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        payload: dict | None = None,
+        data: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        params: dict[str, object] | None = None,
+    ) -> dict:
         if self.dry_run:
             return {}
         url = endpoint
         if not endpoint.startswith("http://") and not endpoint.startswith("https://"):
             url = f"https://graph.microsoft.com/v1.0{endpoint}"
+        request_headers = {
+            "Authorization": f"Bearer {self.token()}",
+            "Content-Type": "application/json" if data is None else "application/octet-stream",
+        }
+        if headers:
+            request_headers.update(headers)
         r = requests.request(
             method=method,
             url=url,
-            headers={
-                "Authorization": f"Bearer {self.token()}",
-                "Content-Type": "application/json" if data is None else "application/octet-stream",
-            },
+            headers=request_headers,
             json=payload if data is None else None,
             data=data,
+            params=params,
             timeout=self.timeout_seconds,
         )
         if 200 <= r.status_code < 300:
@@ -107,6 +128,73 @@ class GraphUploader:
                 return r.json()
             return {}
         raise RuntimeError(f"Graph request failed ({method} {endpoint}): {r.status_code} {r.text[:500]}")
+
+    @staticmethod
+    def _directory_user_refs(payload: dict, *, limit: int) -> list[DirectoryUserRef]:
+        rows: list[DirectoryUserRef] = []
+        seen_ids: set[str] = set()
+        for item in payload.get("value", []):
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id") or "").strip()
+            if not item_id or item_id in seen_ids:
+                continue
+            seen_ids.add(item_id)
+            rows.append(
+                DirectoryUserRef(
+                    id=item_id,
+                    display_name=str(item.get("displayName") or "").strip() or None,
+                    email=str(item.get("mail") or "").strip() or None,
+                    user_principal_name=str(item.get("userPrincipalName") or "").strip() or None,
+                )
+            )
+            if len(rows) >= limit:
+                break
+        return rows
+
+    def search_directory_users(self, search_text: str, *, limit: int = 10) -> list[DirectoryUserRef]:
+        query = str(search_text or "").strip()
+        if self.dry_run or len(query) < 2:
+            return []
+
+        capped_limit = max(1, min(int(limit), 25))
+        select_fields = "id,displayName,mail,userPrincipalName,accountEnabled"
+
+        advanced_params = {
+            "$search": f'"displayName:{query}" OR "mail:{query}" OR "userPrincipalName:{query}"',
+            "$select": select_fields,
+            "$top": str(capped_limit),
+        }
+        try:
+            payload = self._request(
+                "GET",
+                "/users",
+                headers={"ConsistencyLevel": "eventual"},
+                params=advanced_params,
+            )
+            rows = self._directory_user_refs(payload, limit=capped_limit)
+            if rows:
+                return rows
+        except RuntimeError:
+            pass
+
+        escaped = query.replace("'", "''")
+        filter_expr = (
+            "accountEnabled eq true and ("
+            f"startswith(displayName,'{escaped}') or "
+            f"startswith(mail,'{escaped}') or "
+            f"startswith(userPrincipalName,'{escaped}'))"
+        )
+        payload = self._request(
+            "GET",
+            "/users",
+            params={
+                "$filter": filter_expr,
+                "$select": select_fields,
+                "$top": str(capped_limit),
+            },
+        )
+        return self._directory_user_refs(payload, limit=capped_limit)
 
     def _upload_with_session(self, *, upload_url: str, local_path: str) -> dict:
         size = os.path.getsize(local_path)

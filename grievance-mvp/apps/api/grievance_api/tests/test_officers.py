@@ -17,9 +17,11 @@ from grievance_api.core.config import (
     OfficerAuthConfig,
     OfficerTrackingConfig,
 )
+from grievance_api.core.officer_auth import validate_officer_auth_config
 from grievance_api.db.db import Db
 from grievance_api.db.migrate import migrate
-from grievance_api.web.officer_auth import officer_callback
+from grievance_api.services.sharepoint_graph import DirectoryUserRef
+from grievance_api.web.officer_auth import officer_callback, officer_login
 from grievance_api.web.models import (
     ChiefStewardAssignmentCreateRequest,
     OfficerCaseBulkDeleteRequest,
@@ -35,6 +37,7 @@ from grievance_api.web.routes_officers import (
     create_chief_steward_assignment,
     delete_officer_case,
     delete_chief_steward_assignment,
+    officer_directory_users,
     officer_case_events,
     officer_cases,
     officers_page,
@@ -49,11 +52,18 @@ class _Request:
         *,
         state,
         host: str = "127.0.0.1",
+        scheme: str = "https",
         session: dict | None = None,
         query_params: dict | None = None,
     ) -> None:  # noqa: ANN001
         self.app = SimpleNamespace(state=state)
         self.client = SimpleNamespace(host=host)
+        self.url = SimpleNamespace(
+            scheme=scheme,
+            netloc=host,
+            hostname=host.split(":", 1)[0],
+        )
+        self.headers = {"host": host}
         self.session = session if session is not None else {}
         self.query_params = query_params if query_params is not None else {}
 
@@ -61,11 +71,30 @@ class _Request:
 class _MsalClientStub:
     def __init__(self, claims: dict[str, object]) -> None:
         self.claims = claims
+        self.last_scopes: list[str] | None = None
+        self.last_redirect_uri: str | None = None
 
     def acquire_token_by_auth_code_flow(self, flow: dict[str, object], query_params: dict[str, object]) -> dict[str, object]:
         _ = flow
         _ = query_params
         return {"id_token_claims": self.claims}
+
+    def initiate_auth_code_flow(self, scopes: list[str], redirect_uri: str) -> dict[str, object]:
+        self.last_scopes = list(scopes)
+        self.last_redirect_uri = redirect_uri
+        return {"state": "abc123", "auth_uri": "https://login.microsoftonline.com/example/oauth2/v2.0/authorize"}
+
+
+class _DirectoryGraphStub:
+    def __init__(self, rows: list[DirectoryUserRef]) -> None:
+        self.rows = rows
+        self.last_search: str | None = None
+        self.last_limit: int | None = None
+
+    def search_directory_users(self, search_text: str, *, limit: int = 10) -> list[DirectoryUserRef]:
+        self.last_search = search_text
+        self.last_limit = limit
+        return list(self.rows)
 
 
 class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
@@ -91,6 +120,7 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
             session_secret="session-secret",
             officer_group_ids=("group-officers",),
             admin_group_ids=("group-admins",),
+            chief_steward_group_ids=("group-chief-stewards",),
             chief_steward_contract_scopes={
                 "mobility": ChiefStewardContractScopeConfig(
                     group_ids=("group-chief-mobility",),
@@ -342,6 +372,51 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.session["officer_user"]["role"], "officer")
         self.assertEqual(request.session["officer_user"]["email"], "officer@example.org")
 
+    async def test_officer_login_uses_non_reserved_scopes(self) -> None:
+        cfg = self._cfg(auth_enabled=True)
+        request = _Request(
+            state=SimpleNamespace(cfg=cfg, db=self.db),
+            host="grievance.example.org",
+        )
+        client = _MsalClientStub({})
+
+        with patch("grievance_api.web.officer_auth._build_msal_client", return_value=client):
+            response = await officer_login(request, next="/officers")
+
+        self.assertIsInstance(response, RedirectResponse)
+        self.assertEqual(response.headers["location"], "https://login.microsoftonline.com/example/oauth2/v2.0/authorize")
+        self.assertEqual(client.last_scopes, [])
+        self.assertEqual(client.last_redirect_uri, "https://grievance.example.org/auth/callback")
+        self.assertIn("officer_auth_flow", request.session)
+
+    async def test_officer_login_on_canonical_host_does_not_redirect_loop_when_internal_scheme_differs(self) -> None:
+        cfg = self._cfg(auth_enabled=True)
+        request = _Request(
+            state=SimpleNamespace(cfg=cfg, db=self.db),
+            host="grievance.example.org",
+            scheme="http",
+        )
+        client = _MsalClientStub({})
+
+        with patch("grievance_api.web.officer_auth._build_msal_client", return_value=client):
+            response = await officer_login(request, next="/officers")
+
+        self.assertIsInstance(response, RedirectResponse)
+        self.assertEqual(response.headers["location"], "https://login.microsoftonline.com/example/oauth2/v2.0/authorize")
+
+    async def test_officer_login_redirects_to_configured_auth_host(self) -> None:
+        cfg = self._cfg(auth_enabled=True)
+        request = _Request(
+            state=SimpleNamespace(cfg=cfg, db=self.db),
+            host="api.example.org",
+        )
+
+        response = await officer_login(request, next="/officers")
+
+        self.assertIsInstance(response, RedirectResponse)
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "https://grievance.example.org/auth/login?next=/officers")
+
     async def test_missing_group_claims_are_denied_cleanly(self) -> None:
         cfg = self._cfg(auth_enabled=True)
         request = _Request(
@@ -361,6 +436,28 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(exc.exception.status_code, 403)
         self.assertIn("group claims", exc.exception.detail)
+
+    async def test_auth_validation_allows_ui_only_chief_scope_mappings(self) -> None:
+        cfg = OfficerAuthConfig(
+            enabled=True,
+            tenant_id="tenant-id",
+            client_id="client-id",
+            client_secret="client-secret",
+            redirect_uri="https://grievance.example.org/auth/callback",
+            post_logout_redirect_uri="https://grievance.example.org/",
+            session_secret="session-secret",
+            officer_group_ids=("officers-group",),
+            admin_group_ids=("admins-group",),
+            chief_steward_group_ids=("chiefs-group",),
+            chief_steward_contract_scopes={
+                "wire_tech": ChiefStewardContractScopeConfig(
+                    group_ids=(),
+                    contract_aliases=("Wire Tech", "WT"),
+                )
+            },
+        )
+
+        validate_officer_auth_config(cfg)
 
     async def test_officer_can_view_all_cases_but_cannot_edit(self) -> None:
         await self._insert_case(
@@ -478,7 +575,7 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
             session=self._session_user(
                 "officer",
                 email="chief.ui@example.org",
-                group_ids=("group-officers",),
+                group_ids=("group-chief-stewards",),
                 user_id="chief-ui-oid",
             ),
             host="8.8.8.8",
@@ -490,6 +587,79 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
 
         deleted = await delete_chief_steward_assignment(saved.assignment_id, admin_request)
         self.assertEqual(deleted.assignment_id, saved.assignment_id)
+
+    async def test_admin_can_search_directory_users_for_assignment_ui(self) -> None:
+        graph = _DirectoryGraphStub(
+            [
+                DirectoryUserRef(
+                    id="oid-chief-1",
+                    display_name="Jamie McKinney",
+                    email="jmckinney@cwa3106.com",
+                    user_principal_name="jmckinney@cwa3106.com",
+                )
+            ]
+        )
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db, graph=graph),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        response = await officer_directory_users(request, search="jmck", limit=8)
+
+        self.assertEqual(response.search, "jmck")
+        self.assertEqual(response.count, 1)
+        self.assertEqual(response.rows[0].principal_id, "oid-chief-1")
+        self.assertEqual(response.rows[0].email, "jmckinney@cwa3106.com")
+        self.assertEqual(graph.last_search, "jmck")
+        self.assertEqual(graph.last_limit, 8)
+
+    async def test_chief_steward_assignment_can_match_directory_principal_id(self) -> None:
+        await self._insert_case(
+            case_id="C1",
+            grievance_id="2026261",
+            intake_request_id="forms-chief-id-1",
+            contract="Mobility",
+        )
+        await self._insert_case(
+            case_id="C2",
+            grievance_id="2026262",
+            intake_request_id="forms-chief-id-2",
+            contract="Utilities",
+        )
+        admin_request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        saved = await create_chief_steward_assignment(
+            ChiefStewardAssignmentCreateRequest(
+                principal_id="chief-user-oid",
+                principal_email="old-chief-email@example.org",
+                principal_display_name="Chief By Id",
+                contract_scope="mobility",
+            ),
+            admin_request,
+        )
+        self.assertEqual(saved.principal_id, "chief-user-oid")
+
+        chief_request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user(
+                "officer",
+                email="new-chief-email@example.org",
+                group_ids=("group-chief-stewards",),
+                user_id="chief-user-oid",
+            ),
+            host="8.8.8.8",
+        )
+
+        cases = await officer_cases(chief_request)
+
+        self.assertEqual(cases.viewer.role, "chief_steward")
+        self.assertEqual(cases.viewer.contract_scopes, ["mobility"])
+        self.assertEqual([row.case_id for row in cases.rows], ["C1"])
 
     async def test_chief_steward_can_bulk_edit_only_in_scope(self) -> None:
         await self._insert_case(

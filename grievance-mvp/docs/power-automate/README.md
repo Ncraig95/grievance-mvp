@@ -16,6 +16,12 @@ Supported guides:
 - `bst_grievance_form_3g3a.md` (Q1-Q10 staging guide)
 - `att_mobility_bargaining_suggestion.md` (combined Forms + Power Automate handoff for the standalone workflow)
 
+Automation toolkit:
+
+- `scripts/power-platform/README.md`
+- `scripts/power-platform/FORM_SETUP_GUIDE.md`
+- `scripts/power-platform/forms.catalog.json`
+
 ## Common flow pattern (all docs)
 
 1. Microsoft Forms trigger: `When a new response is submitted`

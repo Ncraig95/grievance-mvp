@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 import msal
 from fastapi import APIRouter, HTTPException, Request
@@ -14,7 +14,8 @@ from .admin_common import require_local_access
 
 router = APIRouter()
 
-_OIDC_SCOPES = ["openid", "profile", "email"]
+# MSAL adds the required OIDC scopes automatically for the auth-code flow.
+_OIDC_SCOPES: list[str] = []
 _SESSION_USER_KEY = "officer_user"
 _SESSION_FLOW_KEY = "officer_auth_flow"
 _SESSION_NEXT_KEY = "officer_auth_next"
@@ -78,6 +79,33 @@ def _sanitize_next_path(value: object, *, default: str = "/officers") -> str:
 
 def _login_redirect(next_path: str) -> RedirectResponse:
     return RedirectResponse(url=f"/auth/login?next={quote(next_path, safe='/?=&')}", status_code=303)
+
+
+def _auth_origin_from_redirect_uri(redirect_uri: str) -> str | None:
+    parsed = urlsplit(str(redirect_uri or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _auth_host_from_redirect_uri(redirect_uri: str) -> str | None:
+    parsed = urlsplit(str(redirect_uri or "").strip())
+    host = str(parsed.hostname or "").strip().lower()
+    return host or None
+
+
+def _request_host(request: Request) -> str | None:
+    headers = getattr(request, "headers", None)
+    if headers is not None:
+        forwarded_host = str(headers.get("x-forwarded-host") or "").strip()
+        if forwarded_host:
+            return forwarded_host.split(",", 1)[0].strip().split(":", 1)[0].lower() or None
+        host = str(headers.get("host") or "").strip()
+        if host:
+            return host.split(":", 1)[0].lower() or None
+    request_url = getattr(request, "url", None)
+    host = str(getattr(request_url, "hostname", "") or "").strip().lower()
+    return host or None
 
 
 def _local_read_only_user() -> OfficerUserContext:
@@ -200,15 +228,22 @@ def _resolve_user_context(
     officer_group_ids = {
         _normalize_group_id(value) for value in cfg.officer_auth.officer_group_ids if _normalize_group_id(value)
     }
+    chief_steward_group_ids = {
+        _normalize_group_id(value)
+        for value in cfg.officer_auth.chief_steward_group_ids
+        if _normalize_group_id(value)
+    }
+    has_officer_group = bool(officer_group_ids.intersection(group_ids))
+    has_chief_steward_group = bool(chief_steward_group_ids.intersection(group_ids))
     chief_scope_set = set(_chief_scopes_from_groups(cfg, group_ids=group_ids)).union(assigned_chief_scopes)
 
     if admin_group_ids.intersection(group_ids):
         role = _ROLE_ADMIN
         contract_scopes = tuple(sorted(cfg.officer_auth.chief_steward_contract_scopes))
-    elif chief_scope_set:
+    elif chief_scope_set and (has_chief_steward_group or has_officer_group or not chief_steward_group_ids):
         role = _ROLE_CHIEF_STEWARD
         contract_scopes = tuple(sorted(chief_scope_set))
-    elif officer_group_ids.intersection(group_ids):
+    elif has_officer_group:
         role = _ROLE_OFFICER
         contract_scopes = ()
     else:
@@ -459,6 +494,15 @@ async def officer_login(request: Request, next: str | None = None):
     next_path = _sanitize_next_path(next, default="/officers")
     if user:
         return RedirectResponse(url=next_path, status_code=303)
+
+    auth_origin = _auth_origin_from_redirect_uri(cfg.officer_auth.redirect_uri)
+    auth_host = _auth_host_from_redirect_uri(cfg.officer_auth.redirect_uri)
+    request_host = _request_host(request)
+    if auth_origin and auth_host and request_host and auth_host != request_host:
+        return RedirectResponse(
+            url=f"{auth_origin}/auth/login?next={quote(next_path, safe='/?=&')}",
+            status_code=303,
+        )
 
     flow = _build_msal_client(cfg).initiate_auth_code_flow(
         scopes=_OIDC_SCOPES,

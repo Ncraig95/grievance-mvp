@@ -283,6 +283,7 @@ class OfficerCaseEventsResponse(BaseModel):
 
 
 class ChiefStewardAssignmentCreateRequest(BaseModel):
+    principal_id: str | None = None
     principal_email: str
     principal_display_name: str | None = None
     contract_scope: str
@@ -302,3 +303,16 @@ class ChiefStewardAssignmentRow(BaseModel):
 class ChiefStewardAssignmentListResponse(BaseModel):
     rows: list[ChiefStewardAssignmentRow] = Field(default_factory=list)
     available_contract_scopes: list[str] = Field(default_factory=list)
+
+
+class DirectoryUserRow(BaseModel):
+    principal_id: str
+    display_name: str | None = None
+    email: str | None = None
+    user_principal_name: str | None = None
+
+
+class DirectoryUserSearchResponse(BaseModel):
+    search: str
+    count: int
+    rows: list[DirectoryUserRow] = Field(default_factory=list)
