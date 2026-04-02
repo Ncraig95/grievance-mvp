@@ -185,6 +185,43 @@ ON chief_steward_assignments(principal_email, contract_scope);
 CREATE INDEX IF NOT EXISTS idx_chief_steward_assignments_principal_id
 ON chief_steward_assignments(principal_id);
 
+CREATE TABLE IF NOT EXISTS external_steward_users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL,
+  display_name TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  auth_source TEXT,
+  auth_issuer TEXT,
+  auth_subject TEXT,
+  invited_by TEXT NOT NULL,
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL,
+  last_login_at_utc TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_external_steward_users_email
+ON external_steward_users(email);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_external_steward_users_subject
+ON external_steward_users(auth_issuer, auth_subject);
+
+CREATE TABLE IF NOT EXISTS external_steward_case_assignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  external_steward_user_id INTEGER NOT NULL,
+  case_id TEXT NOT NULL,
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL,
+  assigned_by TEXT NOT NULL,
+  FOREIGN KEY (external_steward_user_id) REFERENCES external_steward_users (id),
+  FOREIGN KEY (case_id) REFERENCES cases (id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_external_steward_case_assignments_user_case
+ON external_steward_case_assignments(external_steward_user_id, case_id);
+
+CREATE INDEX IF NOT EXISTS idx_external_steward_case_assignments_case
+ON external_steward_case_assignments(case_id);
+
 CREATE TABLE IF NOT EXISTS webhook_receipts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   provider TEXT NOT NULL,

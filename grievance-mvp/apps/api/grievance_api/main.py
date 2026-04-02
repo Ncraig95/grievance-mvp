@@ -8,7 +8,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from .core.config import load_config
 from .core.intake_auth import validate_intake_auth_config
 from .core.logging import setup_logging
-from .core.officer_auth import validate_officer_auth_config
+from .core.officer_auth import validate_external_steward_auth_config, validate_officer_auth_config
 from .db.db import Db
 from .db.migrate import migrate
 from .services.docuseal_client import DocuSealClient
@@ -23,6 +23,7 @@ from .web.routes_notifications import router as notifications_router
 from .web.officer_auth import router as officer_auth_router
 from .web.routes_officers import router as officers_router
 from .web.routes_ops import router as ops_router
+from .web.routes_steward import router as steward_router
 from .web.routes_standalone import router as standalone_router
 from .web.routes_webhook import router as webhook_router
 
@@ -32,16 +33,24 @@ def create_app() -> FastAPI:
     setup_logging(cfg.log_level)
     validate_intake_auth_config(cfg.intake_auth)
     validate_officer_auth_config(cfg.officer_auth)
+    validate_external_steward_auth_config(cfg.external_steward_auth)
 
     migrate(cfg.db_path)
 
     app = FastAPI(title="Grievance MVP API", version="0.2.0")
-    if cfg.officer_auth.enabled:
+    any_auth_enabled = cfg.officer_auth.enabled or cfg.external_steward_auth.enabled
+    if any_auth_enabled:
+        session_secret = str(cfg.officer_auth.session_secret or cfg.hmac_shared_secret or "").strip()
+        if not session_secret:
+            raise RuntimeError("session secret required when officer or external steward auth is enabled")
         app.add_middleware(
             SessionMiddleware,
-            secret_key=cfg.officer_auth.session_secret,
+            secret_key=session_secret,
             same_site="lax",
-            https_only=cfg.officer_auth.redirect_uri.startswith("https://"),
+            https_only=(
+                cfg.officer_auth.redirect_uri.startswith("https://")
+                or cfg.external_steward_auth.redirect_uri.startswith("https://")
+            ),
         )
 
     app.state.cfg = cfg
@@ -120,6 +129,7 @@ def create_app() -> FastAPI:
     app.include_router(approval_router)
     app.include_router(ops_router)
     app.include_router(officers_router)
+    app.include_router(steward_router)
     app.include_router(standalone_router)
 
     return app

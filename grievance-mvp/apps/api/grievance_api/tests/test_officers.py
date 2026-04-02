@@ -97,6 +97,18 @@ class _DirectoryGraphStub:
         return list(self.rows)
 
 
+class _FailingDirectoryGraphStub:
+    def __init__(self, message: str) -> None:
+        self.message = message
+        self.last_search: str | None = None
+        self.last_limit: int | None = None
+
+    def search_directory_users(self, search_text: str, *, limit: int = 10) -> list[DirectoryUserRef]:
+        self.last_search = search_text
+        self.last_limit = limit
+        raise RuntimeError(self.message)
+
+
 class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -611,7 +623,40 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.count, 1)
         self.assertEqual(response.rows[0].principal_id, "oid-chief-1")
         self.assertEqual(response.rows[0].email, "jmckinney@cwa3106.com")
+        self.assertEqual(response.rows[0].match_source, "directory")
+        self.assertIsNone(response.warning)
         self.assertEqual(graph.last_search, "jmck")
+        self.assertEqual(graph.last_limit, 8)
+
+    async def test_directory_search_falls_back_to_local_known_people_when_graph_is_denied(self) -> None:
+        graph = _FailingDirectoryGraphStub(
+            'Graph request failed (GET /users): 403 {"error":{"code":"Authorization_RequestDenied","message":"Insufficient privileges to complete the operation."}}'
+        )
+        admin_request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db, graph=graph),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        await create_chief_steward_assignment(
+            ChiefStewardAssignmentCreateRequest(
+                principal_email="chief.ui@example.org",
+                principal_display_name="Chief UI",
+                contract_scope="mobility",
+            ),
+            admin_request,
+        )
+
+        response = await officer_directory_users(admin_request, search="chief", limit=8)
+
+        self.assertEqual(response.search, "chief")
+        self.assertEqual(response.count, 1)
+        self.assertEqual(response.rows[0].email, "chief.ui@example.org")
+        self.assertEqual(response.rows[0].display_name, "Chief UI")
+        self.assertIsNone(response.rows[0].principal_id)
+        self.assertEqual(response.rows[0].match_source, "local")
+        self.assertIn("User.Read.All", str(response.warning or ""))
+        self.assertEqual(graph.last_search, "chief")
         self.assertEqual(graph.last_limit, 8)
 
     async def test_chief_steward_assignment_can_match_directory_principal_id(self) -> None:

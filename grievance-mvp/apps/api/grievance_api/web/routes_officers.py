@@ -601,6 +601,7 @@ def _directory_user_row(result: object) -> DirectoryUserRow:
         user_principal_name = _normalize_optional_text(
             result.get("user_principal_name") or result.get("userPrincipalName")
         )
+        match_source = _normalize_optional_text(result.get("match_source")) or "directory"
     else:
         principal_id = str(getattr(result, "id", "") or getattr(result, "principal_id", "") or "").strip()
         display_name = _normalize_optional_text(
@@ -610,14 +611,171 @@ def _directory_user_row(result: object) -> DirectoryUserRow:
         user_principal_name = _normalize_optional_text(
             getattr(result, "user_principal_name", None) or getattr(result, "userPrincipalName", None)
         )
-    if not principal_id:
-        raise HTTPException(status_code=502, detail="directory lookup returned a user without an id")
+        match_source = _normalize_optional_text(getattr(result, "match_source", None)) or "directory"
     return DirectoryUserRow(
-        principal_id=principal_id,
+        principal_id=principal_id or None,
         display_name=display_name,
         email=email,
         user_principal_name=user_principal_name,
+        match_source=match_source,
     )
+
+
+def _directory_match_score(row: DirectoryUserRow, *, query: str) -> int:
+    normalized_query = str(query or "").strip().lower()
+    if not normalized_query:
+        return 0
+    values = [
+        str(row.display_name or "").strip().lower(),
+        str(row.email or "").strip().lower(),
+        str(row.user_principal_name or "").strip().lower(),
+    ]
+    if normalized_query in {value for value in values if value}:
+        return 300
+    if any(value.startswith(normalized_query) for value in values if value):
+        return 200
+    if any(normalized_query in value for value in values if value):
+        return 100
+    tokens = [token for token in normalized_query.split() if token]
+    haystack = " ".join(value for value in values if value)
+    if tokens and all(token in haystack for token in tokens):
+        return 50
+    return 0
+
+
+def _merge_directory_user_rows(
+    primary_rows: list[DirectoryUserRow],
+    secondary_rows: list[DirectoryUserRow],
+    *,
+    query: str,
+    limit: int,
+) -> list[DirectoryUserRow]:
+    merged: dict[str, DirectoryUserRow] = {}
+
+    def _merge_row(row: DirectoryUserRow) -> None:
+        key = (
+            str(row.principal_id or "").strip().lower()
+            or str(row.email or "").strip().lower()
+            or str(row.user_principal_name or "").strip().lower()
+        )
+        if not key:
+            return
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = row
+            return
+        merged[key] = DirectoryUserRow(
+            principal_id=existing.principal_id or row.principal_id,
+            display_name=existing.display_name or row.display_name,
+            email=existing.email or row.email,
+            user_principal_name=existing.user_principal_name or row.user_principal_name,
+            match_source=existing.match_source if existing.match_source == "directory" else row.match_source,
+        )
+
+    for row in primary_rows:
+        _merge_row(row)
+    for row in secondary_rows:
+        _merge_row(row)
+
+    ranked = sorted(
+        merged.values(),
+        key=lambda row: (
+            -_directory_match_score(row, query=query),
+            0 if row.match_source == "directory" else 1,
+            str(row.display_name or "").lower(),
+            str(row.email or row.user_principal_name or "").lower(),
+        ),
+    )
+    return ranked[:limit]
+
+
+async def _local_directory_user_rows(db: Db, *, cfg, query: str, limit: int) -> list[DirectoryUserRow]:  # noqa: ANN001
+    normalized_query = str(query or "").strip().lower()
+    if len(normalized_query) < 2:
+        return []
+
+    merged: dict[str, DirectoryUserRow] = {}
+
+    def _add_row(
+        *,
+        principal_id: str | None,
+        display_name: str | None,
+        email: str | None,
+        user_principal_name: str | None,
+    ) -> None:
+        normalized_email = str(email or "").strip().lower() or None
+        normalized_upn = str(user_principal_name or "").strip().lower() or None
+        normalized_principal_id = str(principal_id or "").strip() or None
+        key = normalized_principal_id or normalized_email or normalized_upn
+        if not key:
+            return
+        row = DirectoryUserRow(
+            principal_id=normalized_principal_id,
+            display_name=_normalize_optional_text(display_name),
+            email=normalized_email,
+            user_principal_name=normalized_upn,
+            match_source="local",
+        )
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = row
+            return
+        merged[key] = DirectoryUserRow(
+            principal_id=existing.principal_id or row.principal_id,
+            display_name=existing.display_name or row.display_name,
+            email=existing.email or row.email,
+            user_principal_name=existing.user_principal_name or row.user_principal_name,
+            match_source="local",
+        )
+
+    for value in getattr(cfg.officer_tracking, "roster", ()) or ():
+        email = _normalize_optional_text(value)
+        if email and "@" in email:
+            _add_row(principal_id=None, display_name=None, email=email, user_principal_name=email)
+
+    chief_rows = await db.fetchall(
+        """
+        SELECT principal_id, principal_email, principal_display_name
+        FROM chief_steward_assignments
+        ORDER BY updated_at_utc DESC, id DESC
+        """
+    )
+    for row in chief_rows:
+        _add_row(
+            principal_id=_normalize_optional_text(row[0]),
+            email=_normalize_optional_text(row[1]),
+            display_name=_normalize_optional_text(row[2]),
+            user_principal_name=_normalize_optional_text(row[1]),
+        )
+
+    external_rows = await db.fetchall(
+        """
+        SELECT auth_subject, email, display_name
+        FROM external_steward_users
+        ORDER BY updated_at_utc DESC, id DESC
+        """
+    )
+    for row in external_rows:
+        _add_row(
+            principal_id=None,
+            email=_normalize_optional_text(row[1]),
+            display_name=_normalize_optional_text(row[2]),
+            user_principal_name=_normalize_optional_text(row[1]),
+        )
+
+    ranked = [
+        row
+        for row in sorted(
+            merged.values(),
+            key=lambda row: (
+                -_directory_match_score(row, query=normalized_query),
+                str(row.display_name or "").lower(),
+                str(row.email or row.user_principal_name or "").lower(),
+            ),
+        )
+        if _directory_match_score(row, query=normalized_query) > 0
+    ]
+    return ranked[:limit]
 
 
 async def _upsert_chief_steward_assignment(
@@ -735,6 +893,7 @@ def _render_officers_page(user: OfficerUserContext) -> str:
     <h2>Chief Steward Contract Assignments</h2>
     <div class="summary">Admins can map chief stewards to contract scopes here without editing config.</div>
     <div class="summary">Search Microsoft Entra to autofill the steward, or type an email manually if needed.</div>
+    <div class="summary" id="directorySearchStatus" style="margin-top:8px;"></div>
     <div class="grid" style="margin-top:12px;">
       <label>Directory Search
         <input id="directorySearchInput" placeholder="Search by name or email" />
@@ -786,6 +945,79 @@ def _render_officers_page(user: OfficerUserContext) -> str:
         </thead>
         <tbody id="chiefAssignmentsBody">
           <tr><td colspan="5">No chief steward assignments loaded.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+"""
+        if user.can_manage_chief_assignments
+        else ""
+    )
+    external_steward_panel = (
+        """
+  <div class="panel" id="externalStewardPanel">
+    <h2>External Steward Access</h2>
+    <div class="summary">Allowlist outside stewards here. They can only sign in through the steward portal after they are invited.</div>
+    <div class="grid" style="margin-top:12px;">
+      <label>External Steward Email
+        <input id="externalStewardEmail" placeholder="outside@example.org" />
+      </label>
+      <label>Display Name
+        <input id="externalStewardName" placeholder="Outside Steward Name" />
+      </label>
+    </div>
+    <div class="actions">
+      <button id="saveExternalStewardBtn" type="button">Allowlist External Steward</button>
+    </div>
+    <div class="table-wrap" style="margin-top:12px;">
+      <table style="min-width: 1100px;">
+        <thead>
+          <tr>
+            <th class="main">Steward</th>
+            <th class="main">Email</th>
+            <th class="main">Status</th>
+            <th class="main">Provider Binding</th>
+            <th class="main">Last Login</th>
+            <th class="main">Assignments</th>
+            <th class="main actions-col">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="externalStewardUsersBody">
+          <tr><td colspan="7">No external stewards loaded.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+"""
+        if user.can_manage_chief_assignments
+        else ""
+    )
+    case_external_assignment_panel = (
+        """
+  <div class="panel" id="caseExternalAssignmentPanel">
+    <h2>External Steward Access For Selected Case</h2>
+    <div id="caseExternalAssignmentHint" class="summary">Select a grievance row first, then assign outside steward access for that case.</div>
+    <div class="grid" style="margin-top:12px;">
+      <label>Allowlisted External Steward
+        <select id="caseExternalStewardSelect"></select>
+      </label>
+    </div>
+    <div class="actions">
+      <button id="assignCaseExternalStewardBtn" type="button">Assign To Selected Case</button>
+    </div>
+    <div class="table-wrap" style="margin-top:12px;">
+      <table style="min-width: 900px;">
+        <thead>
+          <tr>
+            <th class="main">Steward</th>
+            <th class="main">Email</th>
+            <th class="main">Status</th>
+            <th class="main">Assigned</th>
+            <th class="main actions-col">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="caseExternalAssignmentsBody">
+          <tr><td colspan="5">Select a case to load external steward assignments.</td></tr>
         </tbody>
       </table>
     </div>
@@ -1219,6 +1451,8 @@ def _render_officers_page(user: OfficerUserContext) -> str:
   <h1>Officer Grievance Tracker</h1>
   {auth_panel}
   {chief_assignment_panel}
+  {external_steward_panel}
+  {case_external_assignment_panel}
 
   <div class="panel">
     <h2>Filters</h2>
@@ -1318,9 +1552,15 @@ def _render_officers_page(user: OfficerUserContext) -> str:
     const chiefAssignmentsBody = document.getElementById('chiefAssignmentsBody');
     const chiefAssignmentScope = document.getElementById('chiefAssignmentScope');
     const directoryResultsBody = document.getElementById('directoryResultsBody');
+    const directorySearchStatus = document.getElementById('directorySearchStatus');
+    const externalStewardUsersBody = document.getElementById('externalStewardUsersBody');
+    const caseExternalAssignmentsBody = document.getElementById('caseExternalAssignmentsBody');
+    const caseExternalStewardSelect = document.getElementById('caseExternalStewardSelect');
+    const caseExternalAssignmentHint = document.getElementById('caseExternalAssignmentHint');
     const currentRows = new Map();
     const selectedCaseIds = new Set();
     let currentRoster = [];
+    let currentExternalStewardUsers = [];
 
     function esc(value) {{
       return String(value == null ? '' : value)
@@ -1452,14 +1692,14 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       }}
       directoryResultsBody.innerHTML = rows.map((row) => `
         <tr>
-          <td>${{esc(row.display_name || 'Unnamed User')}}</td>
+          <td>${{esc(row.display_name || 'Unnamed User')}}${{row.match_source === 'local' ? '<div class="muted">Known app user</div>' : ''}}</td>
           <td>${{esc(row.email || '')}}</td>
           <td>${{esc(row.user_principal_name || '')}}</td>
           <td class="actions-col">
             <div class="row-actions">
               <button
                 type="button"
-                data-directory-principal-id="${{esc(row.principal_id)}}"
+                data-directory-principal-id="${{esc(row.principal_id || '')}}"
                 data-directory-email="${{esc(row.email || row.user_principal_name || '')}}"
                 data-directory-name="${{esc(row.display_name || '')}}"
               >Use</button>
@@ -1777,6 +2017,8 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       if (document.getElementById('editAssigneeSelect')) document.getElementById('editAssigneeSelect').value = '';
       if (document.getElementById('editHint')) document.getElementById('editHint').textContent = 'Select a table row to edit.';
       if (document.getElementById('editMeta')) document.getElementById('editMeta').textContent = '';
+      if (document.getElementById('caseExternalStewardSelect')) document.getElementById('caseExternalStewardSelect').value = '';
+      renderCaseExternalAssignments(null);
     }}
 
     function startEdit(caseId) {{
@@ -1806,6 +2048,7 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       document.getElementById('editMeta').textContent = row.officer_closed_at_utc
         ? `Closed ${{row.officer_closed_at_utc}}${{row.officer_closed_by ? ` by ${{row.officer_closed_by}}` : ''}}`
         : '';
+      if (VIEWER.can_manage_chief_assignments) void loadCaseExternalStewardAssignments(caseId);
     }}
 
     async function saveEdit() {{
@@ -1867,6 +2110,83 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       `).join('');
     }}
 
+    function providerBindingLabel(row) {{
+      if (!row || !row.auth_subject || !row.auth_issuer) return 'Not yet bound';
+      return `${{row.auth_source || 'external_oidc'}} · ${{row.auth_issuer}} · ${{row.auth_subject}}`;
+    }}
+
+    function populateExternalStewardSelect(selectedUserId) {{
+      if (!caseExternalStewardSelect) return;
+      const activeUsers = (currentExternalStewardUsers || []).filter((row) => row.status === 'active');
+      caseExternalStewardSelect.innerHTML = '<option value="">Select external steward</option>' + activeUsers
+        .map((row) => `<option value="${{esc(row.user_id)}}">${{esc(row.display_name || row.email)}}${{row.email ? ` · ${{esc(row.email)}}` : ''}}</option>`)
+        .join('');
+      if (selectedUserId) caseExternalStewardSelect.value = String(selectedUserId);
+    }}
+
+    function renderExternalStewardUsers(rows) {{
+      currentExternalStewardUsers = Array.isArray(rows) ? rows : [];
+      populateExternalStewardSelect('');
+      if (!externalStewardUsersBody) return;
+      if (!currentExternalStewardUsers.length) {{
+        externalStewardUsersBody.innerHTML = '<tr><td colspan="7">No external stewards allowlisted yet.</td></tr>';
+        return;
+      }}
+      externalStewardUsersBody.innerHTML = currentExternalStewardUsers.map((row) => `
+        <tr>
+          <td>${{esc(row.display_name || 'Unspecified')}}</td>
+          <td>${{esc(row.email || '')}}</td>
+          <td>${{esc(row.status || '')}}</td>
+          <td>${{esc(providerBindingLabel(row))}}</td>
+          <td>${{esc(row.last_login_at_utc || '')}}</td>
+          <td>${{esc(row.assignment_count || 0)}}</td>
+          <td class="actions-col">
+            <div class="row-actions">
+              <button
+                type="button"
+                class="${{row.status === 'active' ? 'danger' : 'secondary'}}"
+                data-external-steward-user-id="${{esc(row.user_id)}}"
+                data-external-steward-next-status="${{esc(row.status === 'active' ? 'disabled' : 'active')}}"
+              >${{esc(row.status === 'active' ? 'Disable' : 'Enable')}}</button>
+            </div>
+          </td>
+        </tr>
+      `).join('');
+    }}
+
+    function renderCaseExternalAssignments(data) {{
+      if (!caseExternalAssignmentsBody) return;
+      const rows = Array.isArray(data && data.rows) ? data.rows : [];
+      if (caseExternalAssignmentHint) {{
+        const grievance = data && data.display_grievance ? data.display_grievance : '';
+        caseExternalAssignmentHint.textContent = grievance
+          ? `External steward access for ${{grievance}}`
+          : 'Select a grievance row first, then assign outside steward access for that case.';
+      }}
+      if (!rows.length) {{
+        caseExternalAssignmentsBody.innerHTML = '<tr><td colspan="5">No external stewards assigned to this case.</td></tr>';
+        return;
+      }}
+      caseExternalAssignmentsBody.innerHTML = rows.map((row) => `
+        <tr>
+          <td>${{esc(row.display_name || 'Unspecified')}}</td>
+          <td>${{esc(row.email || '')}}</td>
+          <td>${{esc(row.status || '')}}</td>
+          <td>${{esc(row.updated_at_utc || row.created_at_utc || '')}}<div class="muted">${{esc(row.assigned_by || '')}}</div></td>
+          <td class="actions-col">
+            <div class="row-actions">
+              <button
+                type="button"
+                class="danger"
+                data-case-external-assignment-id="${{esc(row.assignment_id)}}"
+                data-case-external-case-id="${{esc(row.case_id)}}"
+              >Remove</button>
+            </div>
+          </td>
+        </tr>
+      `).join('');
+    }}
+
     async function loadChiefAssignments() {{
       if (!VIEWER.can_manage_chief_assignments) return;
       try {{
@@ -1879,17 +2199,124 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       }}
     }}
 
+    async function loadExternalStewards() {{
+      if (!VIEWER.can_manage_chief_assignments) return;
+      try {{
+        const data = await call('/officers/external-stewards');
+        renderExternalStewardUsers(Array.isArray(data.rows) ? data.rows : []);
+        show(data);
+      }} catch (e) {{
+        show(e);
+      }}
+    }}
+
+    async function saveExternalSteward() {{
+      const payload = {{
+        email: valueOf('externalStewardEmail'),
+        display_name: nullableValue('externalStewardName'),
+      }};
+      if (!payload.email) {{
+        return show({{ error: 'External steward email is required.' }});
+      }}
+      try {{
+        const data = await call('/officers/external-stewards', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify(payload)
+        }});
+        document.getElementById('externalStewardEmail').value = '';
+        document.getElementById('externalStewardName').value = '';
+        show(data);
+        await loadExternalStewards();
+      }} catch (e) {{
+        show(e);
+      }}
+    }}
+
+    async function toggleExternalStewardStatus(userId, nextStatus) {{
+      if (!userId || !nextStatus) return;
+      try {{
+        const data = await call(`/officers/external-stewards/${{encodeURIComponent(userId)}}`, {{
+          method: 'PATCH',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ status: nextStatus }})
+        }});
+        show(data);
+        await loadExternalStewards();
+        const caseId = valueOf('editCaseId');
+        if (caseId) await loadCaseExternalStewardAssignments(caseId);
+      }} catch (e) {{
+        show(e);
+      }}
+    }}
+
+    async function loadCaseExternalStewardAssignments(caseId) {{
+      if (!VIEWER.can_manage_chief_assignments || !caseId) {{
+        renderCaseExternalAssignments(null);
+        return;
+      }}
+      try {{
+        const data = await call(`/officers/cases/${{encodeURIComponent(caseId)}}/external-stewards`);
+        renderCaseExternalAssignments(data);
+        show(data);
+      }} catch (e) {{
+        renderCaseExternalAssignments(null);
+        show(e);
+      }}
+    }}
+
+    async function assignExternalStewardToCase() {{
+      const caseId = valueOf('editCaseId');
+      const externalStewardUserId = valueOf('caseExternalStewardSelect');
+      if (!caseId) {{
+        return show({{ error: 'Select a case first.' }});
+      }}
+      if (!externalStewardUserId) {{
+        return show({{ error: 'Select an external steward first.' }});
+      }}
+      try {{
+        const data = await call(`/officers/cases/${{encodeURIComponent(caseId)}}/external-stewards`, {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ external_steward_user_id: Number(externalStewardUserId) }})
+        }});
+        document.getElementById('caseExternalStewardSelect').value = '';
+        show(data);
+        await loadExternalStewards();
+        await loadCaseExternalStewardAssignments(caseId);
+      }} catch (e) {{
+        show(e);
+      }}
+    }}
+
+    async function removeExternalStewardFromCase(caseId, assignmentId) {{
+      if (!caseId || !assignmentId) return;
+      try {{
+        const data = await call(`/officers/cases/${{encodeURIComponent(caseId)}}/external-stewards/${{encodeURIComponent(assignmentId)}}`, {{
+          method: 'DELETE'
+        }});
+        show(data);
+        await loadExternalStewards();
+        await loadCaseExternalStewardAssignments(caseId);
+      }} catch (e) {{
+        show(e);
+      }}
+    }}
+
     async function searchDirectoryUsers() {{
       const search = valueOf('directorySearchInput');
       if (search.length < 2) {{
+        if (directorySearchStatus) directorySearchStatus.textContent = '';
         renderDirectoryResults([], '');
         return show({{ error: 'Enter at least 2 characters to search the directory.' }});
       }}
       try {{
         const data = await call(`/officers/directory/users?search=${{encodeURIComponent(search)}}`);
+        if (directorySearchStatus) directorySearchStatus.textContent = data.warning || '';
         renderDirectoryResults(Array.isArray(data.rows) ? data.rows : [], data.search || search);
         show(data);
       }} catch (e) {{
+        if (directorySearchStatus) directorySearchStatus.textContent = '';
         renderDirectoryResults([], search);
         show(e);
       }}
@@ -1955,6 +2382,22 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       if (!button) return;
       void deleteChiefAssignment(button.dataset.chiefAssignmentId || '');
     }});
+    externalStewardUsersBody && externalStewardUsersBody.addEventListener('click', (event) => {{
+      const button = event.target.closest('button[data-external-steward-user-id][data-external-steward-next-status]');
+      if (!button) return;
+      void toggleExternalStewardStatus(
+        button.dataset.externalStewardUserId || '',
+        button.dataset.externalStewardNextStatus || '',
+      );
+    }});
+    caseExternalAssignmentsBody && caseExternalAssignmentsBody.addEventListener('click', (event) => {{
+      const button = event.target.closest('button[data-case-external-assignment-id][data-case-external-case-id]');
+      if (!button) return;
+      void removeExternalStewardFromCase(
+        button.dataset.caseExternalCaseId || '',
+        button.dataset.caseExternalAssignmentId || '',
+      );
+    }});
     directoryResultsBody && directoryResultsBody.addEventListener('click', (event) => {{
       const button = event.target.closest('button[data-directory-principal-id]');
       if (!button) return;
@@ -1990,6 +2433,8 @@ def _render_officers_page(user: OfficerUserContext) -> str:
     document.getElementById('saveEditBtn') && document.getElementById('saveEditBtn').addEventListener('click', () => {{ void saveEdit(); }});
     document.getElementById('clearEditBtn') && document.getElementById('clearEditBtn').addEventListener('click', clearEditSelection);
     document.getElementById('searchDirectoryBtn') && document.getElementById('searchDirectoryBtn').addEventListener('click', () => {{ void searchDirectoryUsers(); }});
+    document.getElementById('saveExternalStewardBtn') && document.getElementById('saveExternalStewardBtn').addEventListener('click', () => {{ void saveExternalSteward(); }});
+    document.getElementById('assignCaseExternalStewardBtn') && document.getElementById('assignCaseExternalStewardBtn').addEventListener('click', () => {{ void assignExternalStewardToCase(); }});
     document.getElementById('saveChiefAssignmentBtn')
       && document.getElementById('saveChiefAssignmentBtn').addEventListener('click', () => {{ void saveChiefAssignment(); }});
     document.getElementById('directorySearchInput') && document.getElementById('directorySearchInput').addEventListener('keydown', (event) => {{
@@ -2020,9 +2465,13 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       populateAssigneeOptions(editAssigneeSelect, [], '', 'Roster assignee');
       populateAssigneeOptions(bulkAssigneeSelect, [], '', 'Keep current assignee');
       populateChiefAssignmentScopeOptions([], '');
+      populateExternalStewardSelect('');
       updateSelectionUi();
       void loadCases();
-      if (VIEWER.can_manage_chief_assignments) void loadChiefAssignments();
+      if (VIEWER.can_manage_chief_assignments) {{
+        void loadChiefAssignments();
+        void loadExternalStewards();
+      }}
     }});
   </script>
 </body>
@@ -2113,19 +2562,33 @@ async def officer_directory_users(request: Request, search: str = "", limit: int
     await require_admin_user(request)
     query = str(search or "").strip()
     if len(query) < 2:
-        return DirectoryUserSearchResponse(search=query, count=0, rows=[])
+        return DirectoryUserSearchResponse(search=query, count=0, rows=[], warning=None)
+
+    capped_limit = max(1, min(int(limit or 10), 25))
+    local_rows = await _local_directory_user_rows(request.app.state.db, cfg=request.app.state.cfg, query=query, limit=capped_limit)
 
     graph = getattr(request.app.state, "graph", None)
+    warning: str | None = None
+    graph_rows: list[DirectoryUserRow] = []
     if graph is None or not hasattr(graph, "search_directory_users"):
-        raise HTTPException(status_code=503, detail="directory lookup is unavailable")
+        warning = "Directory lookup is unavailable; showing locally known people only."
+    else:
+        try:
+            matches = graph.search_directory_users(query, limit=capped_limit)
+            graph_rows = [_directory_user_row(item) for item in matches]
+        except RuntimeError as exc:
+            detail = str(exc)
+            if "Authorization_RequestDenied" in detail or "Insufficient privileges" in detail:
+                warning = (
+                    "Microsoft Graph directory lookup is unavailable until the app has User.Read.All "
+                    "or Directory.Read.All application permission with admin consent. "
+                    "Showing locally known people only."
+                )
+            else:
+                warning = f"Microsoft Graph directory lookup failed. Showing locally known people only. {detail}"
 
-    try:
-        matches = graph.search_directory_users(query, limit=max(1, min(int(limit or 10), 25)))
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=f"directory lookup failed: {exc}") from exc
-
-    rows = [_directory_user_row(item) for item in matches]
-    return DirectoryUserSearchResponse(search=query, count=len(rows), rows=rows)
+    rows = _merge_directory_user_rows(graph_rows, local_rows, query=query, limit=capped_limit)
+    return DirectoryUserSearchResponse(search=query, count=len(rows), rows=rows, warning=warning)
 
 
 @router.post("/officers/chief-assignments", response_model=ChiefStewardAssignmentRow)

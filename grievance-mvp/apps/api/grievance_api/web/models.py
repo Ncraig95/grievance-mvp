@@ -306,13 +306,109 @@ class ChiefStewardAssignmentListResponse(BaseModel):
 
 
 class DirectoryUserRow(BaseModel):
-    principal_id: str
+    principal_id: str | None = None
     display_name: str | None = None
     email: str | None = None
     user_principal_name: str | None = None
+    match_source: str = "directory"
 
 
 class DirectoryUserSearchResponse(BaseModel):
     search: str
     count: int
     rows: list[DirectoryUserRow] = Field(default_factory=list)
+    warning: str | None = None
+
+
+class ExternalStewardUserCreateRequest(BaseModel):
+    email: str
+    display_name: str | None = None
+
+
+class ExternalStewardUserUpdateRequest(BaseModel):
+    status: str
+
+
+class ExternalStewardUserRow(BaseModel):
+    user_id: int
+    email: str
+    display_name: str | None = None
+    status: str
+    auth_source: str | None = None
+    auth_issuer: str | None = None
+    auth_subject: str | None = None
+    invited_by: str
+    created_at_utc: str
+    updated_at_utc: str
+    last_login_at_utc: str | None = None
+    assignment_count: int = 0
+
+
+class ExternalStewardUserListResponse(BaseModel):
+    rows: list[ExternalStewardUserRow] = Field(default_factory=list)
+
+
+class ExternalStewardCaseAssignmentCreateRequest(BaseModel):
+    external_steward_user_id: int
+
+
+class ExternalStewardCaseAssignmentRow(BaseModel):
+    assignment_id: int
+    case_id: str
+    external_steward_user_id: int
+    email: str
+    display_name: str | None = None
+    status: str
+    assigned_by: str
+    created_at_utc: str
+    updated_at_utc: str
+
+
+class ExternalStewardCaseAssignmentListResponse(BaseModel):
+    case_id: str
+    display_grievance: str
+    rows: list[ExternalStewardCaseAssignmentRow] = Field(default_factory=list)
+
+
+class ExternalStewardViewerContext(BaseModel):
+    email: str
+    display_name: str | None = None
+    auth_source: str
+
+
+class ExternalStewardCaseRow(BaseModel):
+    case_id: str
+    display_grievance: str
+    contract: str | None = None
+    member_name: str
+    issue_summary: str | None = None
+    first_level_request_sent_date: str | None = None
+    second_level_request_sent_date: str | None = None
+    third_level_request_sent_date: str | None = None
+    fourth_level_request_sent_date: str | None = None
+    officer_status: str
+    workflow_status: str
+    available_actions: list[str] = Field(default_factory=list)
+
+
+class ExternalStewardCaseListResponse(BaseModel):
+    rows: list[ExternalStewardCaseRow] = Field(default_factory=list)
+    viewer: ExternalStewardViewerContext
+    count: int
+
+
+class ExternalStewardActionRequest(BaseModel):
+    action_date: str | None = None
+
+
+class ExternalStewardActionResponse(BaseModel):
+    case_id: str
+    display_grievance: str
+    action: str
+    action_date: str
+    officer_status: str
+    second_level_request_sent_date: str | None = None
+    third_level_request_sent_date: str | None = None
+    fourth_level_request_sent_date: str | None = None
+    officer_closed_at_utc: str | None = None
+    officer_closed_by: str | None = None

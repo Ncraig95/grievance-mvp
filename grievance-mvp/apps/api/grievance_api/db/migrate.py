@@ -219,6 +219,23 @@ def migrate(db_path: str) -> None:
         _ensure_column(con, "chief_steward_assignments", "updated_at_utc", "TEXT")
         _ensure_column(con, "chief_steward_assignments", "assigned_by", "TEXT")
 
+        _ensure_column(con, "external_steward_users", "email", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "external_steward_users", "display_name", "TEXT")
+        _ensure_column(con, "external_steward_users", "status", "TEXT NOT NULL DEFAULT 'active'")
+        _ensure_column(con, "external_steward_users", "auth_source", "TEXT")
+        _ensure_column(con, "external_steward_users", "auth_issuer", "TEXT")
+        _ensure_column(con, "external_steward_users", "auth_subject", "TEXT")
+        _ensure_column(con, "external_steward_users", "invited_by", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "external_steward_users", "created_at_utc", "TEXT")
+        _ensure_column(con, "external_steward_users", "updated_at_utc", "TEXT")
+        _ensure_column(con, "external_steward_users", "last_login_at_utc", "TEXT")
+
+        _ensure_column(con, "external_steward_case_assignments", "external_steward_user_id", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(con, "external_steward_case_assignments", "case_id", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "external_steward_case_assignments", "created_at_utc", "TEXT")
+        _ensure_column(con, "external_steward_case_assignments", "updated_at_utc", "TEXT")
+        _ensure_column(con, "external_steward_case_assignments", "assigned_by", "TEXT NOT NULL DEFAULT ''")
+
         _ensure_column(con, "documents", "template_key", "TEXT")
         _ensure_column(con, "documents", "signed_pdf_path", "TEXT")
         _ensure_column(con, "documents", "audit_zip_path", "TEXT")
@@ -325,6 +342,19 @@ def migrate(db_path: str) -> None:
             "CREATE INDEX IF NOT EXISTS idx_document_stages_document_id ON document_stages(document_id)",
             "CREATE INDEX IF NOT EXISTS idx_document_stage_artifacts_stage_type ON document_stage_artifacts(document_stage_id, artifact_type)",
             "CREATE INDEX IF NOT EXISTS idx_document_stage_field_values_stage ON document_stage_field_values(document_stage_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_external_steward_users_email ON external_steward_users(email)",
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_external_steward_users_subject "
+                "ON external_steward_users(auth_issuer, auth_subject)"
+            ),
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_external_steward_case_assignments_user_case "
+                "ON external_steward_case_assignments(external_steward_user_id, case_id)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_external_steward_case_assignments_case "
+                "ON external_steward_case_assignments(case_id)"
+            ),
         ]
         for stmt in index_sql:
             try:

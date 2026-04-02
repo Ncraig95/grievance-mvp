@@ -175,6 +175,17 @@ class OfficerAuthConfig:
     chief_steward_contract_scopes: dict[str, ChiefStewardContractScopeConfig] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ExternalStewardAuthConfig:
+    enabled: bool = False
+    authority: str = ""
+    discovery_url: str = ""
+    client_id: str = ""
+    client_secret: str = ""
+    redirect_uri: str = ""
+    post_logout_redirect_uri: str = ""
+
+
 def _default_intake_auth() -> IntakeAuthConfig:
     return IntakeAuthConfig(
         shared_header_name="X-Intake-Key",
@@ -199,6 +210,10 @@ def _default_officer_auth() -> OfficerAuthConfig:
     return OfficerAuthConfig()
 
 
+def _default_external_steward_auth() -> ExternalStewardAuthConfig:
+    return ExternalStewardAuthConfig()
+
+
 @dataclass(frozen=True)
 class AppConfig:
     hmac_shared_secret: str
@@ -215,6 +230,7 @@ class AppConfig:
     rendering: RenderingConfig = field(default_factory=_default_rendering)
     officer_tracking: OfficerTrackingConfig = field(default_factory=_default_officer_tracking)
     officer_auth: OfficerAuthConfig = field(default_factory=_default_officer_auth)
+    external_steward_auth: ExternalStewardAuthConfig = field(default_factory=_default_external_steward_auth)
     document_policies: dict[str, DocumentPolicyConfig] = field(default_factory=dict)
     standalone_forms: dict[str, StandaloneFormConfig] = field(default_factory=dict)
     docx_pdf_engine: str = "libreoffice"
@@ -597,6 +613,7 @@ def load_config(path: str) -> AppConfig:
     rendering_raw = raw.get("rendering", {}) or {}
     officer_tracking_raw = raw.get("officer_tracking", {}) or {}
     officer_auth_raw = raw.get("officer_auth", {}) or {}
+    external_steward_auth_raw = raw.get("external_steward_auth", {}) or {}
     document_policies_raw = raw.get("document_policies", {}) or {}
     standalone_forms_raw = raw.get("standalone_forms", {}) or {}
 
@@ -780,6 +797,17 @@ def load_config(path: str) -> AppConfig:
             chief_steward_contract_scopes=_as_chief_steward_contract_scopes(
                 officer_auth_raw.get("chief_steward_contract_scopes")
             ),
+        ),
+        external_steward_auth=ExternalStewardAuthConfig(
+            enabled=_as_bool(external_steward_auth_raw.get("enabled"), False),
+            authority=str(external_steward_auth_raw.get("authority", "")).strip(),
+            discovery_url=str(external_steward_auth_raw.get("discovery_url", "")).strip(),
+            client_id=str(external_steward_auth_raw.get("client_id", "")).strip(),
+            client_secret=str(external_steward_auth_raw.get("client_secret", "")).strip(),
+            redirect_uri=str(external_steward_auth_raw.get("redirect_uri", "")).strip(),
+            post_logout_redirect_uri=str(
+                external_steward_auth_raw.get("post_logout_redirect_uri", "")
+            ).strip(),
         ),
         document_policies=parsed_document_policies,
         standalone_forms=_as_standalone_forms(standalone_forms_raw),
