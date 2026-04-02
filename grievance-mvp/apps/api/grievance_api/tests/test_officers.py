@@ -3,15 +3,25 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from fastapi import HTTPException
+from fastapi.responses import RedirectResponse
 
+from grievance_api.core.config import (
+    ChiefStewardContractScopeConfig,
+    OfficerAuthConfig,
+    OfficerTrackingConfig,
+)
 from grievance_api.db.db import Db
 from grievance_api.db.migrate import migrate
+from grievance_api.web.officer_auth import officer_callback
 from grievance_api.web.models import (
+    ChiefStewardAssignmentCreateRequest,
     OfficerCaseBulkDeleteRequest,
     OfficerCaseBulkUpdateRequest,
     OfficerCaseCreateRequest,
@@ -20,18 +30,42 @@ from grievance_api.web.models import (
 from grievance_api.web.routes_officers import (
     bulk_delete_officer_cases,
     bulk_update_officer_cases,
+    chief_steward_assignments,
     create_officer_case,
+    create_chief_steward_assignment,
     delete_officer_case,
+    delete_chief_steward_assignment,
+    officer_case_events,
     officer_cases,
     officers_page,
     update_officer_case,
 )
+from grievance_api.web.routes_ops import ops_page
 
 
 class _Request:
-    def __init__(self, *, state, host: str = "127.0.0.1") -> None:  # noqa: ANN001
+    def __init__(
+        self,
+        *,
+        state,
+        host: str = "127.0.0.1",
+        session: dict | None = None,
+        query_params: dict | None = None,
+    ) -> None:  # noqa: ANN001
         self.app = SimpleNamespace(state=state)
         self.client = SimpleNamespace(host=host)
+        self.session = session if session is not None else {}
+        self.query_params = query_params if query_params is not None else {}
+
+
+class _MsalClientStub:
+    def __init__(self, claims: dict[str, object]) -> None:
+        self.claims = claims
+
+    def acquire_token_by_auth_code_flow(self, flow: dict[str, object], query_params: dict[str, object]) -> dict[str, object]:
+        _ = flow
+        _ = query_params
+        return {"id_token_claims": self.claims}
 
 
 class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
@@ -46,11 +80,97 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.tmpdir.cleanup()
 
     @staticmethod
-    def _cfg():
+    def _officer_auth(enabled: bool) -> OfficerAuthConfig:
+        return OfficerAuthConfig(
+            enabled=enabled,
+            tenant_id="tenant-id",
+            client_id="client-id",
+            client_secret="client-secret",
+            redirect_uri="https://grievance.example.org/auth/callback",
+            post_logout_redirect_uri="https://grievance.example.org/",
+            session_secret="session-secret",
+            officer_group_ids=("group-officers",),
+            admin_group_ids=("group-admins",),
+            chief_steward_contract_scopes={
+                "mobility": ChiefStewardContractScopeConfig(
+                    group_ids=("group-chief-mobility",),
+                    contract_aliases=("mobility", "at&t mobility"),
+                ),
+                "utilities": ChiefStewardContractScopeConfig(
+                    group_ids=("group-chief-utilities",),
+                    contract_aliases=("utilities",),
+                ),
+            },
+        )
+
+    @classmethod
+    def _cfg(cls, *, auth_enabled: bool) -> SimpleNamespace:
         return SimpleNamespace(
-            officer_tracking=SimpleNamespace(
+            officer_tracking=OfficerTrackingConfig(
                 roster=("Officer A", "Officer B", "grievance@cwa3106.com"),
-            )
+            ),
+            officer_auth=cls._officer_auth(auth_enabled),
+        )
+
+    @staticmethod
+    def _session_user(
+        role: str,
+        *,
+        email: str = "user@example.org",
+        scopes: tuple[str, ...] = (),
+        group_ids: tuple[str, ...] = (),
+        user_id: str | None = None,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "email": email,
+            "display_name": email,
+            "role": role,
+            "contract_scopes": list(scopes),
+            "exp": int(time.time()) + 3600,
+        }
+        if group_ids:
+            payload["group_ids"] = list(group_ids)
+        if user_id:
+            payload["user_id"] = user_id
+        return {"officer_user": payload}
+
+    async def _insert_case(
+        self,
+        *,
+        case_id: str,
+        grievance_id: str,
+        intake_request_id: str,
+        contract: str | None = None,
+        member_name: str = "Member Name",
+        tracking_department: str | None = None,
+    ) -> None:
+        payload = {
+            "request_id": intake_request_id,
+            "contract": contract or "",
+            "grievant_firstname": member_name.split()[0],
+            "grievant_lastname": " ".join(member_name.split()[1:]),
+            "documents": [],
+        }
+        await self.db.exec(
+            """INSERT INTO cases(
+                 id, grievance_id, created_at_utc, status, approval_status, grievance_number,
+                 member_name, member_email, intake_request_id, intake_payload_json,
+                 tracking_contract, tracking_department
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                case_id,
+                grievance_id,
+                "2026-03-27T15:00:00+00:00",
+                "awaiting_signatures",
+                "pending",
+                None,
+                member_name,
+                f"{case_id.lower()}@example.org",
+                intake_request_id,
+                json.dumps(payload),
+                contract,
+                tracking_department,
+            ),
         )
 
     async def test_migrate_adds_officer_columns_to_legacy_cases_table(self) -> None:
@@ -79,15 +199,21 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         con = sqlite3.connect(legacy_path)
         try:
             cols = {str(row[1]) for row in con.execute("PRAGMA table_info(cases)").fetchall()}
+            chief_cols = {str(row[1]) for row in con.execute("PRAGMA table_info(chief_steward_assignments)").fetchall()}
         finally:
             con.close()
 
         self.assertIn("officer_status", cols)
-        self.assertIn("officer_assignee", cols)
+        self.assertIn("tracking_contract", cols)
         self.assertIn("tracking_department", cols)
         self.assertIn("tracking_second_level_request_sent_date", cols)
+        self.assertIn("tracking_third_level_request_sent_date", cols)
+        self.assertIn("tracking_fourth_level_request_sent_date", cols)
 
-    async def test_officer_cases_uses_existing_payload_fallbacks_when_tracking_fields_are_blank(self) -> None:
+        self.assertIn("principal_email", chief_cols)
+        self.assertIn("contract_scope", chief_cols)
+
+    async def test_officer_cases_uses_existing_payload_fallbacks_and_contract_scope(self) -> None:
         await self.db.exec(
             """INSERT INTO cases(
                  id, grievance_id, created_at_utc, status, approval_status, grievance_number,
@@ -106,6 +232,7 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
                 json.dumps(
                     {
                         "request_id": "forms-1",
+                        "contract": "AT&T Mobility",
                         "grievant_email": "nick@example.org",
                         "incident_date": "2026-03-20",
                         "narrative": "Basic summary",
@@ -118,7 +245,7 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
         )
-        request = _Request(state=SimpleNamespace(cfg=self._cfg(), db=self.db))
+        request = _Request(state=SimpleNamespace(cfg=self._cfg(auth_enabled=False), db=self.db))
 
         result = await officer_cases(request)
 
@@ -128,473 +255,375 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row.steward, "Steward Smith")
         self.assertEqual(row.occurrence_date, "2026-03-20")
         self.assertEqual(row.issue_summary, "Contract issue details")
-        self.assertEqual(row.display_grievance, "2026015")
-        self.assertEqual(row.officer_source, "digital_intake")
-        self.assertEqual(row.officer_status, "open")
+        self.assertEqual(row.contract, "AT&T Mobility")
+        self.assertEqual(row.contract_scope, "mobility")
+        self.assertEqual(result.viewer.role, "read_only")
 
-    async def test_manual_paper_create_builds_case_without_documents_and_audits_event(self) -> None:
-        request = _Request(state=SimpleNamespace(cfg=self._cfg(), db=self.db))
+    async def test_officers_page_hides_mutation_controls_when_auth_disabled(self) -> None:
+        request = _Request(state=SimpleNamespace(cfg=self._cfg(auth_enabled=False), db=self.db))
+
+        response = await officers_page(request)
+        html = response.body.decode("utf-8")
+
+        self.assertIn("Local Read-Only Mode", html)
+        self.assertNotIn("Create Paper Grievance", html)
+        self.assertNotIn("Delete Checked Rows", html)
+        self.assertNotIn("Save Edits", html)
+
+    async def test_officer_mutation_routes_block_when_auth_disabled(self) -> None:
+        request = _Request(state=SimpleNamespace(cfg=self._cfg(auth_enabled=False), db=self.db))
+        await self._insert_case(
+            case_id="C1",
+            grievance_id="2026101",
+            intake_request_id="forms-C1",
+            contract="Mobility",
+        )
+
+        with self.assertRaises(HTTPException) as create_exc:
+            await create_officer_case(
+                OfficerCaseCreateRequest(member_name="Pat Member", contract="Mobility"),
+                request,
+            )
+        with self.assertRaises(HTTPException) as update_exc:
+            await update_officer_case(
+                "C1",
+                OfficerCaseUpdateRequest(officer_status="closed"),
+                request,
+            )
+        with self.assertRaises(HTTPException) as bulk_exc:
+            await bulk_update_officer_cases(
+                OfficerCaseBulkUpdateRequest(case_ids=["C1"], officer_status="closed"),
+                request,
+            )
+        with self.assertRaises(HTTPException) as delete_exc:
+            await delete_officer_case("C1", request)
+        with self.assertRaises(HTTPException) as bulk_delete_exc:
+            await bulk_delete_officer_cases(
+                OfficerCaseBulkDeleteRequest(case_ids=["C1"]),
+                request,
+            )
+
+        self.assertEqual(create_exc.exception.status_code, 423)
+        self.assertEqual(update_exc.exception.status_code, 423)
+        self.assertEqual(bulk_exc.exception.status_code, 423)
+        self.assertEqual(delete_exc.exception.status_code, 423)
+        self.assertEqual(bulk_delete_exc.exception.status_code, 423)
+
+    async def test_unauthenticated_pages_redirect_to_login_when_auth_enabled(self) -> None:
+        state = SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db)
+
+        officers_response = await officers_page(_Request(state=state, host="8.8.8.8"))
+        ops_response = await ops_page(_Request(state=state, host="8.8.8.8"))
+
+        self.assertIsInstance(officers_response, RedirectResponse)
+        self.assertIsInstance(ops_response, RedirectResponse)
+        self.assertIn("/auth/login?next=/officers", officers_response.headers["location"])
+        self.assertIn("/auth/login?next=/ops", ops_response.headers["location"])
+
+    async def test_officer_login_callback_stores_session(self) -> None:
+        cfg = self._cfg(auth_enabled=True)
+        request = _Request(
+            state=SimpleNamespace(cfg=cfg, db=self.db),
+            session={"officer_auth_flow": {"state": "abc"}, "officer_auth_next": "/officers"},
+            query_params={"code": "test-code", "state": "abc"},
+        )
+        claims = {
+            "exp": int(time.time()) + 3600,
+            "name": "Officer User",
+            "preferred_username": "officer@example.org",
+            "groups": ["group-officers"],
+        }
+
+        with patch("grievance_api.web.officer_auth._build_msal_client", return_value=_MsalClientStub(claims)):
+            response = await officer_callback(request)
+
+        self.assertIsInstance(response, RedirectResponse)
+        self.assertEqual(response.headers["location"], "/officers")
+        self.assertEqual(request.session["officer_user"]["role"], "officer")
+        self.assertEqual(request.session["officer_user"]["email"], "officer@example.org")
+
+    async def test_missing_group_claims_are_denied_cleanly(self) -> None:
+        cfg = self._cfg(auth_enabled=True)
+        request = _Request(
+            state=SimpleNamespace(cfg=cfg, db=self.db),
+            session={"officer_auth_flow": {"state": "abc"}, "officer_auth_next": "/officers"},
+            query_params={"code": "test-code", "state": "abc"},
+        )
+        claims = {
+            "exp": int(time.time()) + 3600,
+            "name": "Officer User",
+            "preferred_username": "officer@example.org",
+        }
+
+        with patch("grievance_api.web.officer_auth._build_msal_client", return_value=_MsalClientStub(claims)):
+            with self.assertRaises(HTTPException) as exc:
+                await officer_callback(request)
+
+        self.assertEqual(exc.exception.status_code, 403)
+        self.assertIn("group claims", exc.exception.detail)
+
+    async def test_officer_can_view_all_cases_but_cannot_edit(self) -> None:
+        await self._insert_case(
+            case_id="C1",
+            grievance_id="2026101",
+            intake_request_id="forms-C1",
+            contract="Mobility",
+        )
+        await self._insert_case(
+            case_id="C2",
+            grievance_id="2026102",
+            intake_request_id="forms-C2",
+            contract="Utilities",
+        )
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("officer", email="officer@example.org"),
+            host="8.8.8.8",
+        )
+
+        result = await officer_cases(request)
+
+        self.assertEqual(result.count, 2)
+        self.assertEqual(result.viewer.role, "officer")
+        with self.assertRaises(HTTPException) as exc:
+            await update_officer_case(
+                "C1",
+                OfficerCaseUpdateRequest(officer_status="closed"),
+                request,
+            )
+        self.assertEqual(exc.exception.status_code, 403)
+
+    async def test_chief_steward_only_sees_in_scope_cases_and_can_edit_in_scope(self) -> None:
+        await self._insert_case(
+            case_id="C1",
+            grievance_id="2026201",
+            intake_request_id="forms-chief-1",
+            contract="Mobility",
+        )
+        await self._insert_case(
+            case_id="C2",
+            grievance_id="2026202",
+            intake_request_id="forms-chief-2",
+            contract="Utilities",
+        )
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("chief_steward", email="chief@example.org", scopes=("mobility",)),
+            host="8.8.8.8",
+        )
+
+        result = await officer_cases(request)
+        self.assertEqual(result.count, 1)
+        self.assertEqual(result.rows[0].case_id, "C1")
+
+        updated = await update_officer_case(
+            "C1",
+            OfficerCaseUpdateRequest(officer_status="closed", officer_notes="Handled"),
+            request,
+        )
+        self.assertEqual(updated.officer_status, "closed")
+        event_row = await self.db.fetchone(
+            "SELECT details_json FROM events WHERE case_id=? ORDER BY id DESC LIMIT 1",
+            ("C1",),
+        )
+        details = json.loads(event_row[0])
+        self.assertEqual(details["actor_role"], "chief_steward")
+        self.assertEqual(details["actor_email"], "chief@example.org")
+        self.assertEqual(details["changes"]["officer_status"], "closed")
+
+        with self.assertRaises(HTTPException) as exc:
+            await update_officer_case(
+                "C2",
+                OfficerCaseUpdateRequest(officer_status="closed"),
+                request,
+            )
+        self.assertEqual(exc.exception.status_code, 403)
+
+    async def test_admin_can_assign_chief_steward_scope_in_ui_and_session_picks_it_up(self) -> None:
+        await self._insert_case(
+            case_id="C1",
+            grievance_id="2026251",
+            intake_request_id="forms-chief-ui-1",
+            contract="Mobility",
+        )
+        await self._insert_case(
+            case_id="C2",
+            grievance_id="2026252",
+            intake_request_id="forms-chief-ui-2",
+            contract="Utilities",
+        )
+        admin_request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        saved = await create_chief_steward_assignment(
+            ChiefStewardAssignmentCreateRequest(
+                principal_email="chief.ui@example.org",
+                principal_display_name="Chief UI",
+                contract_scope="mobility",
+            ),
+            admin_request,
+        )
+        self.assertEqual(saved.principal_email, "chief.ui@example.org")
+        self.assertEqual(saved.contract_scope, "mobility")
+
+        listing = await chief_steward_assignments(admin_request)
+        self.assertEqual(len(listing.rows), 1)
+        self.assertEqual(listing.rows[0].principal_display_name, "Chief UI")
+
+        chief_request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user(
+                "officer",
+                email="chief.ui@example.org",
+                group_ids=("group-officers",),
+                user_id="chief-ui-oid",
+            ),
+            host="8.8.8.8",
+        )
+        cases = await officer_cases(chief_request)
+        self.assertEqual(cases.viewer.role, "chief_steward")
+        self.assertEqual(cases.viewer.contract_scopes, ["mobility"])
+        self.assertEqual([row.case_id for row in cases.rows], ["C1"])
+
+        deleted = await delete_chief_steward_assignment(saved.assignment_id, admin_request)
+        self.assertEqual(deleted.assignment_id, saved.assignment_id)
+
+    async def test_chief_steward_can_bulk_edit_only_in_scope(self) -> None:
+        await self._insert_case(
+            case_id="C1",
+            grievance_id="2026301",
+            intake_request_id="forms-bulk-1",
+            contract="Mobility",
+        )
+        await self._insert_case(
+            case_id="C2",
+            grievance_id="2026302",
+            intake_request_id="forms-bulk-2",
+            contract="Utilities",
+        )
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("chief_steward", email="chief@example.org", scopes=("mobility",)),
+            host="8.8.8.8",
+        )
+
+        with self.assertRaises(HTTPException) as exc:
+            await bulk_update_officer_cases(
+                OfficerCaseBulkUpdateRequest(
+                    case_ids=["C1", "C2"],
+                    officer_status="closed",
+                    officer_notes="Bulk close",
+                ),
+                request,
+            )
+        self.assertEqual(exc.exception.status_code, 403)
+
+        result = await bulk_update_officer_cases(
+            OfficerCaseBulkUpdateRequest(
+                case_ids=["C1"],
+                officer_status="open_at_national",
+                officer_notes="Bulk close",
+                third_level_request_sent_date="2026-03-29",
+                fourth_level_request_sent_date="2026-03-31",
+            ),
+            request,
+        )
+        self.assertEqual(result.updated_case_count, 1)
+        row = await self.db.fetchone(
+            """
+            SELECT officer_status, tracking_third_level_request_sent_date, tracking_fourth_level_request_sent_date
+            FROM cases
+            WHERE id=?
+            """,
+            ("C1",),
+        )
+        self.assertEqual(row[0], "open_at_national")
+        self.assertEqual(row[1], "2026-03-29")
+        self.assertEqual(row[2], "2026-03-31")
+        event_row = await self.db.fetchone(
+            "SELECT details_json FROM events WHERE case_id=? ORDER BY id DESC LIMIT 1",
+            ("C1",),
+        )
+        details = json.loads(event_row[0])
+        self.assertTrue(details["bulk_update"])
+        self.assertEqual(details["actor_role"], "chief_steward")
+
+    async def test_admin_can_create_delete_bulk_delete_and_access_ops(self) -> None:
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
 
         created = await create_officer_case(
             OfficerCaseCreateRequest(
                 grievance_number="2026-100",
+                contract="Mobility",
                 member_name="Pat Member",
                 member_email="pat@example.org",
-                department="Mobility",
-                steward="Steward Jones",
-                occurrence_date="2026-03-28",
-                issue_summary="Paper grievance summary",
-                first_level_request_sent_date="2026-03-29",
                 officer_assignee="Officer A",
-                updated_by="Officer A",
+                officer_status="open_at_state",
+                third_level_request_sent_date="2026-03-28",
+                fourth_level_request_sent_date="2026-03-30",
             ),
             request,
         )
-
-        case_row = await self.db.fetchone(
-            "SELECT status, officer_source, intake_payload_json FROM cases WHERE id=?",
-            (created.case_id,),
-        )
-        documents = await self.db.fetchall("SELECT id FROM documents WHERE case_id=?", (created.case_id,))
-        event_row = await self.db.fetchone(
-            "SELECT event_type, details_json FROM events WHERE case_id=? ORDER BY id DESC LIMIT 1",
-            (created.case_id,),
-        )
-
         self.assertEqual(created.workflow_status, "manual_tracking")
-        self.assertEqual(created.officer_source, "paper_manual")
-        self.assertTrue(created.grievance_id.startswith("G"))
-        self.assertEqual(case_row[0], "manual_tracking")
-        self.assertEqual(case_row[1], "paper_manual")
-        self.assertEqual(documents, [])
-        self.assertEqual(event_row[0], "officer_case_created")
-        self.assertEqual(json.loads(event_row[1])["updated_by"], "Officer A")
-        self.assertEqual(json.loads(case_row[2])["documents"], [])
+        self.assertEqual(created.contract_scope, "mobility")
+        self.assertEqual(created.officer_status, "open_at_state")
+        self.assertEqual(created.third_level_request_sent_date, "2026-03-28")
+        self.assertEqual(created.fourth_level_request_sent_date, "2026-03-30")
 
-    async def test_update_officer_case_updates_fields_and_manages_close_reopen_stamps(self) -> None:
-        await self.db.exec(
-            """INSERT INTO cases(
-                 id, grievance_id, created_at_utc, status, approval_status, grievance_number,
-                 member_name, member_email, intake_request_id, intake_payload_json,
-                 officer_status, officer_assignee, officer_notes
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                "C1",
-                "2026015",
-                "2026-03-27T15:00:00+00:00",
-                "manual_tracking",
-                "pending",
-                "2026-015",
-                "Nick Craig",
-                "nick@example.org",
-                "officer-manual-1",
-                json.dumps({"request_id": "officer-manual-1", "documents": []}),
-                "open",
-                "Officer A",
-                "Starting note",
-            ),
+        page = await ops_page(request)
+        self.assertIn("Grievance Ops", page)
+
+        await self._insert_case(
+            case_id="C2",
+            grievance_id="2026402",
+            intake_request_id="forms-admin-2",
+            contract="Utilities",
         )
-        request = _Request(state=SimpleNamespace(cfg=self._cfg(), db=self.db))
+        delete_result = await bulk_delete_officer_cases(
+            OfficerCaseBulkDeleteRequest(case_ids=[created.case_id, "C2"]),
+            request,
+        )
+        self.assertEqual(delete_result.deleted_case_count, 2)
+        remaining = await self.db.fetchall("SELECT id FROM cases ORDER BY id")
+        self.assertEqual(remaining, [])
 
-        updated = await update_officer_case(
+    async def test_admin_audit_endpoint_returns_case_events(self) -> None:
+        await self._insert_case(
+            case_id="C1",
+            grievance_id="2026501",
+            intake_request_id="forms-audit-1",
+            contract="Mobility",
+        )
+        chief_request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("chief_steward", email="chief@example.org", scopes=("mobility",)),
+            host="8.8.8.8",
+        )
+        admin_request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        await update_officer_case(
             "C1",
-            OfficerCaseUpdateRequest(
-                department="Core",
-                steward="Steward Updated",
-                issue_summary="Updated notes",
-                officer_assignee="Officer B",
-                officer_notes="Closed out",
-                officer_status="closed",
-                updated_by="Officer B",
-            ),
-            request,
+            OfficerCaseUpdateRequest(officer_notes="Audit me"),
+            chief_request,
         )
 
-        db_row = await self.db.fetchone(
-            """SELECT tracking_department, tracking_steward, tracking_issue_summary,
-                      officer_assignee, officer_notes, officer_status,
-                      officer_closed_at_utc, officer_closed_by
-               FROM cases WHERE id=?""",
-            ("C1",),
-        )
-        event_row = await self.db.fetchone(
-            "SELECT event_type, details_json FROM events WHERE case_id=? ORDER BY id DESC LIMIT 1",
-            ("C1",),
-        )
+        response = await officer_case_events("C1", admin_request)
 
-        self.assertEqual(updated.officer_status, "closed")
-        self.assertEqual(db_row[0], "Core")
-        self.assertEqual(db_row[1], "Steward Updated")
-        self.assertEqual(db_row[2], "Updated notes")
-        self.assertEqual(db_row[3], "Officer B")
-        self.assertEqual(db_row[4], "Closed out")
-        self.assertEqual(db_row[5], "closed")
-        self.assertIsNotNone(db_row[6])
-        self.assertEqual(db_row[7], "Officer B")
-        self.assertEqual(event_row[0], "officer_case_updated")
-        self.assertEqual(json.loads(event_row[1])["changes"]["officer_status"], "closed")
-
-        reopened = await update_officer_case(
-            "C1",
-            OfficerCaseUpdateRequest(
-                officer_status="open",
-                updated_by="Officer B",
-            ),
-            request,
-        )
-        reopened_row = await self.db.fetchone(
-            "SELECT officer_status, officer_closed_at_utc, officer_closed_by FROM cases WHERE id=?",
-            ("C1",),
-        )
-
-        self.assertEqual(reopened.officer_status, "open")
-        self.assertEqual(reopened_row[0], "open")
-        self.assertIsNone(reopened_row[1])
-        self.assertIsNone(reopened_row[2])
-
-    async def test_officer_routes_require_local_or_private_network_access(self) -> None:
-        request = _Request(state=SimpleNamespace(cfg=self._cfg(), db=self.db), host="8.8.8.8")
-
-        with self.assertRaises(HTTPException) as page_exc:
-            await officers_page(request)
-        with self.assertRaises(HTTPException) as cases_exc:
-            await officer_cases(request)
-        with self.assertRaises(HTTPException) as bulk_delete_exc:
-            await bulk_delete_officer_cases(OfficerCaseBulkDeleteRequest(case_ids=["missing"]), request)
-        with self.assertRaises(HTTPException) as bulk_exc:
-            await bulk_update_officer_cases(OfficerCaseBulkUpdateRequest(case_ids=["missing"], officer_status="closed"), request)
-        with self.assertRaises(HTTPException) as delete_exc:
-            await delete_officer_case("missing", request)
-
-        self.assertEqual(page_exc.exception.status_code, 403)
-        self.assertEqual(cases_exc.exception.status_code, 403)
-        self.assertEqual(bulk_delete_exc.exception.status_code, 403)
-        self.assertEqual(bulk_exc.exception.status_code, 403)
-        self.assertEqual(delete_exc.exception.status_code, 403)
-
-    async def test_bulk_update_officer_cases_updates_selected_rows_only(self) -> None:
-        for case_id, grievance_id, member_name, officer_status in (
-            ("C1", "2026101", "Member One", "open"),
-            ("C2", "2026102", "Member Two", "waiting"),
-            ("C3", "2026103", "Member Three", "open"),
-        ):
-            await self.db.exec(
-                """INSERT INTO cases(
-                     id, grievance_id, created_at_utc, status, approval_status, grievance_number,
-                     member_name, member_email, intake_request_id, intake_payload_json,
-                     officer_status, officer_assignee, officer_notes
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    case_id,
-                    grievance_id,
-                    "2026-03-27T15:00:00+00:00",
-                    "manual_tracking",
-                    "pending",
-                    None,
-                    member_name,
-                    f"{case_id.lower()}@example.org",
-                    f"officer-manual-{case_id}",
-                    json.dumps({"request_id": f"officer-manual-{case_id}", "documents": []}),
-                    officer_status,
-                    None,
-                    None,
-                ),
-            )
-
-        request = _Request(state=SimpleNamespace(cfg=self._cfg(), db=self.db))
-
-        result = await bulk_update_officer_cases(
-            OfficerCaseBulkUpdateRequest(
-                case_ids=["C1", "C2"],
-                officer_status="closed",
-                officer_assignee="Officer B",
-                first_level_request_sent_date="2026-03-30",
-                officer_notes="Bulk closed",
-                updated_by="Officer B",
-            ),
-            request,
-        )
-
-        rows = await self.db.fetchall(
-            """SELECT id, officer_status, officer_assignee, officer_notes,
-                      tracking_first_level_request_sent_date, officer_closed_at_utc, officer_closed_by
-               FROM cases ORDER BY id""",
-        )
-        event_rows = await self.db.fetchall(
-            "SELECT case_id, event_type, details_json FROM events ORDER BY id",
-        )
-
-        self.assertEqual(result.selected_case_count, 2)
-        self.assertEqual(result.updated_case_count, 2)
-        self.assertEqual(result.case_ids, ["C1", "C2"])
-        self.assertEqual(
-            result.changed_fields,
-            ["first_level_request_sent_date", "officer_assignee", "officer_notes", "officer_status"],
-        )
-        self.assertEqual(rows[0][0], "C1")
-        self.assertEqual(rows[0][1], "closed")
-        self.assertEqual(rows[0][2], "Officer B")
-        self.assertEqual(rows[0][3], "Bulk closed")
-        self.assertEqual(rows[0][4], "2026-03-30")
-        self.assertIsNotNone(rows[0][5])
-        self.assertEqual(rows[0][6], "Officer B")
-        self.assertEqual(rows[1][0], "C2")
-        self.assertEqual(rows[1][1], "closed")
-        self.assertEqual(rows[1][2], "Officer B")
-        self.assertEqual(rows[1][3], "Bulk closed")
-        self.assertEqual(rows[1][4], "2026-03-30")
-        self.assertIsNotNone(rows[1][5])
-        self.assertEqual(rows[1][6], "Officer B")
-        self.assertEqual(rows[2][0], "C3")
-        self.assertEqual(rows[2][1], "open")
-        self.assertIsNone(rows[2][2])
-        self.assertIsNone(rows[2][3])
-        self.assertIsNone(rows[2][4])
-        self.assertIsNone(rows[2][5])
-        self.assertIsNone(rows[2][6])
-        self.assertEqual(len(event_rows), 2)
-        self.assertEqual(event_rows[0][0], "C1")
-        self.assertEqual(event_rows[1][0], "C2")
-        self.assertTrue(json.loads(event_rows[0][2])["bulk_update"])
-
-    async def test_bulk_delete_officer_cases_removes_only_selected_rows(self) -> None:
-        for case_id, grievance_id in (("C1", "2026201"), ("C2", "2026202"), ("C3", "2026203")):
-            await self.db.exec(
-                """INSERT INTO cases(
-                     id, grievance_id, created_at_utc, status, approval_status, grievance_number,
-                     member_name, member_email, intake_request_id, intake_payload_json
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    case_id,
-                    grievance_id,
-                    "2026-03-27T15:00:00+00:00",
-                    "awaiting_signatures",
-                    "pending",
-                    None,
-                    f"Member {case_id}",
-                    f"{case_id.lower()}@example.org",
-                    f"forms-{case_id}",
-                    json.dumps({"request_id": f"forms-{case_id}", "documents": []}),
-                ),
-            )
-            await self.db.exec(
-                """INSERT INTO documents(
-                     id, case_id, created_at_utc, doc_type, template_key, status,
-                     requires_signature, signer_order_json
-                   ) VALUES(?,?,?,?,?,?,?,?)""",
-                (
-                    f"DOC_{case_id}",
-                    case_id,
-                    "2026-03-27T15:00:01+00:00",
-                    "statement_of_occurrence",
-                    "statement_of_occurrence",
-                    "sent_for_signature",
-                    1,
-                    json.dumps([f"{case_id.lower()}@example.org"]),
-                ),
-            )
-            await self.db.exec(
-                """INSERT INTO events(case_id, document_id, ts_utc, event_type, details_json)
-                   VALUES(?,?,?,?,?)""",
-                (
-                    case_id,
-                    f"DOC_{case_id}",
-                    "2026-03-27T15:00:06+00:00",
-                    "test_event",
-                    "{}",
-                ),
-            )
-
-        request = _Request(state=SimpleNamespace(cfg=self._cfg(), db=self.db))
-
-        result = await bulk_delete_officer_cases(
-            OfficerCaseBulkDeleteRequest(case_ids=["C1", "C2"]),
-            request,
-        )
-
-        remaining_cases = await self.db.fetchall("SELECT id FROM cases ORDER BY id")
-        remaining_docs = await self.db.fetchall("SELECT id FROM documents ORDER BY id")
-        remaining_events = await self.db.fetchall("SELECT case_id FROM events ORDER BY case_id")
-
-        self.assertEqual(result.selected_case_count, 2)
-        self.assertEqual(result.deleted_case_count, 2)
-        self.assertEqual(result.deleted_case_ids, ["C1", "C2"])
-        self.assertEqual(result.deleted_document_count, 2)
-        self.assertEqual(result.deleted_event_count, 2)
-        self.assertEqual(remaining_cases, [("C3",)])
-        self.assertEqual(remaining_docs, [("DOC_C3",)])
-        self.assertEqual(remaining_events, [("C3",)])
-
-    async def test_delete_officer_case_removes_only_selected_case_and_related_rows(self) -> None:
-        await self.db.exec(
-            """INSERT INTO cases(
-                 id, grievance_id, created_at_utc, status, approval_status, grievance_number,
-               member_name, member_email, intake_request_id, intake_payload_json
-               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-            (
-                "TEST_BY_NAME",
-                "2026998",
-                "2026-03-27T15:00:00+00:00",
-                "awaiting_signatures",
-                "pending",
-                None,
-                "Test User",
-                "test@example.org",
-                "forms-plain",
-                json.dumps({"request_id": "forms-plain", "documents": []}),
-            ),
-        )
-        await self.db.exec(
-            """INSERT INTO cases(
-                 id, grievance_id, created_at_utc, status, approval_status, grievance_number,
-                 member_name, member_email, intake_request_id, intake_payload_json
-               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-            (
-                "REAL1",
-                "2026999",
-                "2026-03-27T16:00:00+00:00",
-                "awaiting_signatures",
-                "pending",
-                None,
-                "Real Member",
-                "real@example.org",
-                "forms-prod-1",
-                json.dumps({"request_id": "forms-prod-1", "documents": []}),
-            ),
-        )
-        await self.db.exec(
-            """INSERT INTO documents(
-                 id, case_id, created_at_utc, doc_type, template_key, status,
-                 requires_signature, signer_order_json
-               ) VALUES(?,?,?,?,?,?,?,?)""",
-            (
-                "DOC_TEST",
-                "TEST_BY_NAME",
-                "2026-03-27T15:00:01+00:00",
-                "statement_of_occurrence",
-                "statement_of_occurrence",
-                "sent_for_signature",
-                1,
-                json.dumps(["test@example.org"]),
-            ),
-        )
-        await self.db.exec(
-            """INSERT INTO documents(
-                 id, case_id, created_at_utc, doc_type, template_key, status,
-                 requires_signature, signer_order_json
-               ) VALUES(?,?,?,?,?,?,?,?)""",
-            (
-                "DOC_REAL",
-                "REAL1",
-                "2026-03-27T16:00:01+00:00",
-                "statement_of_occurrence",
-                "statement_of_occurrence",
-                "sent_for_signature",
-                1,
-                json.dumps(["real@example.org"]),
-            ),
-        )
-        await self.db.exec(
-            """INSERT INTO document_stages(
-                 case_id, document_id, stage_no, stage_key, status, signer_email, started_at_utc
-               ) VALUES(?,?,?,?,?,?,?)""",
-            (
-                "TEST_BY_NAME",
-                "DOC_TEST",
-                1,
-                "member_signature",
-                "sent_for_signature",
-                "test@example.org",
-                "2026-03-27T15:00:02+00:00",
-            ),
-        )
-        stage_row = await self.db.fetchone(
-            "SELECT id FROM document_stages WHERE case_id=? AND document_id=?",
-            ("TEST_BY_NAME", "DOC_TEST"),
-        )
-        stage_id = int(stage_row[0])
-        await self.db.exec(
-            """INSERT INTO document_stage_artifacts(
-                 document_stage_id, artifact_type, storage_backend, storage_path, sha256, size_bytes, created_at_utc
-               ) VALUES(?,?,?,?,?,?,?)""",
-            (
-                stage_id,
-                "pdf",
-                "disk",
-                "/tmp/test.pdf",
-                "abc123",
-                42,
-                "2026-03-27T15:00:03+00:00",
-            ),
-        )
-        await self.db.exec(
-            """INSERT INTO document_stage_field_values(
-                 document_stage_id, field_key, field_value, created_at_utc
-               ) VALUES(?,?,?,?)""",
-            (
-                stage_id,
-                "member_name",
-                "Test User",
-                "2026-03-27T15:00:04+00:00",
-            ),
-        )
-        await self.db.exec(
-            """INSERT INTO outbound_emails(
-                 case_id, document_scope_id, template_key, recipient_email, idempotency_key,
-                 status, created_at_utc, updated_at_utc, metadata_json
-               ) VALUES(?,?,?,?,?,?,?,?,?)""",
-            (
-                "TEST_BY_NAME",
-                "DOC_TEST",
-                "reminder_signature",
-                "test@example.org",
-                "cleanup-test",
-                "sent",
-                "2026-03-27T15:00:05+00:00",
-                "2026-03-27T15:00:05+00:00",
-                "{}",
-            ),
-        )
-        await self.db.exec(
-            """INSERT INTO events(case_id, document_id, ts_utc, event_type, details_json)
-               VALUES(?,?,?,?,?)""",
-            (
-                "TEST_BY_NAME",
-                "DOC_TEST",
-                "2026-03-27T15:00:06+00:00",
-                "test_event",
-                "{}",
-            ),
-        )
-        request = _Request(state=SimpleNamespace(cfg=self._cfg(), db=self.db))
-
-        result = await delete_officer_case("TEST_BY_NAME", request)
-
-        remaining_cases = await self.db.fetchall("SELECT id FROM cases ORDER BY id")
-        remaining_docs = await self.db.fetchall("SELECT id FROM documents ORDER BY id")
-        remaining_stages = await self.db.fetchall("SELECT id FROM document_stages")
-        remaining_stage_artifacts = await self.db.fetchall("SELECT id FROM document_stage_artifacts")
-        remaining_stage_fields = await self.db.fetchall("SELECT id FROM document_stage_field_values")
-        remaining_events = await self.db.fetchall("SELECT id FROM events")
-        remaining_emails = await self.db.fetchall("SELECT id FROM outbound_emails")
-
-        self.assertEqual(result.case_id, "TEST_BY_NAME")
-        self.assertEqual(result.grievance_id, "2026998")
-        self.assertEqual(result.display_grievance, "2026998")
-        self.assertEqual(result.deleted_case_count, 1)
-        self.assertEqual(result.deleted_document_count, 1)
-        self.assertEqual(result.deleted_document_stage_count, 1)
-        self.assertEqual(result.deleted_stage_artifact_count, 1)
-        self.assertEqual(result.deleted_stage_field_value_count, 1)
-        self.assertEqual(result.deleted_event_count, 1)
-        self.assertEqual(result.deleted_outbound_email_count, 1)
-        self.assertEqual(remaining_cases, [("REAL1",)])
-        self.assertEqual(remaining_docs, [("DOC_REAL",)])
-        self.assertEqual(remaining_stages, [])
-        self.assertEqual(remaining_stage_artifacts, [])
-        self.assertEqual(remaining_stage_fields, [])
-        self.assertEqual(remaining_events, [])
-        self.assertEqual(remaining_emails, [])
+        self.assertEqual(response.case_id, "C1")
+        self.assertEqual(response.event_count, 1)
+        self.assertEqual(response.events[0].event_type, "officer_case_updated")
+        self.assertEqual(response.events[0].details["actor_email"], "chief@example.org")
 
 
 if __name__ == "__main__":

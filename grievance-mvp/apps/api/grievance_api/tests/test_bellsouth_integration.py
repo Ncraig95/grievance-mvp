@@ -51,6 +51,7 @@ class BellSouthCommandTests(unittest.TestCase):
                 "grievance_data_request_form": "/tmp/data-request.docx",
                 "true_intent_grievance_brief": "/tmp/true-intent.docx",
                 "disciplinary_grievance_brief": "/tmp/disciplinary.docx",
+                "mobility_record_of_grievance": "/tmp/mobility-record.docx",
             },
             document_policies={},
         )
@@ -70,6 +71,10 @@ class BellSouthCommandTests(unittest.TestCase):
         disciplinary = _resolve_document_command(cfg, "disciplinary_brief")
         self.assertEqual(disciplinary.doc_type, "disciplinary_grievance_brief")
         self.assertEqual(disciplinary.template_key, "disciplinary_grievance_brief")
+
+        mobility_record = _resolve_document_command(cfg, "mobility_record_of_grievance")
+        self.assertEqual(mobility_record.doc_type, "mobility_record_of_grievance")
+        self.assertEqual(mobility_record.template_key, "mobility_record_of_grievance")
 
     def test_existing_exact_folder_policy_is_applied(self) -> None:
         cfg = SimpleNamespace(
@@ -400,6 +405,34 @@ class BellSouthContextTests(unittest.TestCase):
         self.assertEqual(context["meeting_requested_time"], "TBD")
         self.assertEqual(context["meeting_requested_place"], "TBD")
 
+    def test_mobility_record_defaults_use_case_values(self) -> None:
+        payload = IntakeRequest(
+            request_id="req-6c",
+            contract="AT&T Mobility",
+            grievant_firstname="John",
+            grievant_lastname="Doe",
+            grievant_email="john@example.com",
+            incident_date="2026-04-02",
+            narrative="Initial union statement",
+            template_data={"local_number": "3106", "work_location": "Jacksonville, FL"},
+        )
+        cfg = SimpleNamespace(rendering=SimpleNamespace(layout_policies={}))
+
+        context, _ = _build_template_context(
+            cfg=cfg,
+            payload=payload,
+            case_id="C1",
+            grievance_id="2026001",
+            document_id="D1",
+            doc_type="mobility_record_of_grievance",
+            grievance_number=None,
+        )
+        self.assertEqual(context["cw_grievance_number"], "2026001")
+        self.assertEqual(context["date_grievance_occurred"], "2026-04-02")
+        self.assertEqual(context["specific_location_state"], "Jacksonville, FL")
+        self.assertEqual(context["employee_work_group_name"], "John Doe")
+        self.assertEqual(context["union_statement"], "Initial union statement")
+
 
 class FolderMatcherTests(unittest.TestCase):
     def test_exact_grievance_prefix_matcher(self) -> None:
@@ -429,6 +462,14 @@ class FolderMatcherTests(unittest.TestCase):
                 member_name=member_name,
             ),
             "2026001 - john doe - grievance data request",
+        )
+        self.assertEqual(
+            _build_document_basename(
+                doc_type="mobility_record_of_grievance",
+                grievance_id=grievance_id,
+                member_name=member_name,
+            ),
+            "2026001 - john doe - mobility record of grievance",
         )
 
     def test_find_case_folder_exact_returns_single_match(self) -> None:

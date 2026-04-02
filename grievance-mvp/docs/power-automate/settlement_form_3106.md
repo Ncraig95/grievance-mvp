@@ -157,6 +157,7 @@ Set `template_data.grievance_number` from `grievance_id` in flow.
 
 - `issue_text` is rendered as a dynamic row block (`issue_rows`) so it can expand vertically without manual line edits.
 - `settlement_text` is rendered as a dynamic row block (`settlement_rows`) so it can expand vertically without manual line edits.
+- The signature table is intentionally forced onto a fresh page so long settlement text cannot split DocuSeal anchors across pages.
 - If `issue_article` is blank but `article` is provided, the template uses `article` as fallback.
 - Signature fields are wired as DocuSeal tags.
 - `{{Sig_es_:signer1:signature}}` -> Company Representative Signature.

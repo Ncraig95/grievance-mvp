@@ -12,6 +12,7 @@ Supported guides:
 - `true_intent_grievance_brief.md`
 - `disciplinary_grievance_brief.md`
 - `settlement_form_3106.md`
+- `mobility_record_of_grievance.md`
 - `bst_grievance_form_3g3a.md` (Q1-Q10 staging guide)
 - `att_mobility_bargaining_suggestion.md` (combined Forms + Power Automate handoff for the standalone workflow)
 
@@ -49,6 +50,6 @@ Use `template_data` for document-specific placeholders.
 
 - Do not send `grievance_id` when system is in auto ID mode, except for docs that intentionally target an existing case folder (BellSouth/Mobility meeting requests).
 - Signature tags in DOCX (for example `Sig_es_:signer1:signature`) are template anchors; do not create Forms questions for those.
-- For 3-step sequential signature flows (like 3G3A), pass explicit signer order in `documents[0].signers`.
+- For 3-step sequential signature flows (like 3G3A or `mobility_record_of_grievance`), pass explicit signer order in `documents[0].signers`.
 - For signed documents, completion emails to signers include the signed PDF attachment when the file is within `email.max_attachment_bytes`.
 - If you retry the same Forms response, keep the same `request_id` to avoid duplicates.

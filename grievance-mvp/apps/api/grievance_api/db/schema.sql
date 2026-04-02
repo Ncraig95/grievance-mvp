@@ -23,12 +23,15 @@ CREATE TABLE IF NOT EXISTS cases (
   officer_source TEXT,
   officer_closed_at_utc TEXT,
   officer_closed_by TEXT,
+  tracking_contract TEXT,
   tracking_department TEXT,
   tracking_steward TEXT,
   tracking_occurrence_date TEXT,
   tracking_issue_summary TEXT,
   tracking_first_level_request_sent_date TEXT,
-  tracking_second_level_request_sent_date TEXT
+  tracking_second_level_request_sent_date TEXT,
+  tracking_third_level_request_sent_date TEXT,
+  tracking_fourth_level_request_sent_date TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_cases_intake_request_id
@@ -164,6 +167,23 @@ ON events(case_id);
 
 CREATE INDEX IF NOT EXISTS idx_events_document_id
 ON events(document_id);
+
+CREATE TABLE IF NOT EXISTS chief_steward_assignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  principal_id TEXT,
+  principal_email TEXT NOT NULL,
+  principal_display_name TEXT,
+  contract_scope TEXT NOT NULL,
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL,
+  assigned_by TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chief_steward_assignments_email_scope
+ON chief_steward_assignments(principal_email, contract_scope);
+
+CREATE INDEX IF NOT EXISTS idx_chief_steward_assignments_principal_id
+ON chief_steward_assignments(principal_id);
 
 CREATE TABLE IF NOT EXISTS webhook_receipts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

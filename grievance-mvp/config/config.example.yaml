@@ -25,6 +25,7 @@ doc_templates:
   settlement_form: /app/templates/docx/Settlement Form 3106.docx
   true_intent_grievance_brief: /app/templates/docx/form_true_intent_grievance_brief_revised_05.20.21.docx
   disciplinary_grievance_brief: /app/templates/docx/form_disciplinary_grievance_brief_revised_05.19.21.docx
+  mobility_record_of_grievance: /app/templates/docx/mobility_record_of_grievance_revised.docx
   bst_grievance_form_3g3a: /app/templates/docx/bst_grievance_form_3g3a.docx
 document_policies:
   bellsouth_meeting_request:
@@ -38,6 +39,14 @@ document_policies:
   mobility_formal_grievance_meeting_request:
     folder_resolution: existing_exact_grievance_id
     default_signer_field: union_rep_email
+    default_requires_signature: true
+  mobility_record_of_grievance:
+    folder_resolution: existing_exact_grievance_id
+    default_signer_field: ""
+    staged_flow_enabled: true
+    auto_advance: true
+    store_all_stage_artifacts: true
+    input_source: docuseal_fill_fields
     default_requires_signature: true
   bst_grievance_form_3g3a:
     staged_flow_enabled: true
@@ -88,6 +97,22 @@ grievance_id:
   separator: ""
 officer_tracking:
   roster: []
+officer_auth:
+  enabled: false
+  tenant_id: ""
+  client_id: ""
+  client_secret: ""
+  redirect_uri: https://grievance.REPLACE.org/auth/callback
+  post_logout_redirect_uri: https://grievance.REPLACE.org/
+  session_secret: REPLACE_WITH_LONG_RANDOM_SECRET
+  officer_group_ids: []
+  admin_group_ids: []
+  chief_steward_contract_scopes:
+    mobility:
+      group_ids: []
+      contract_aliases:
+      - mobility
+      - at&t mobility
 docuseal:
   base_url: http://docuseal:3000
   api_token: REPLACE

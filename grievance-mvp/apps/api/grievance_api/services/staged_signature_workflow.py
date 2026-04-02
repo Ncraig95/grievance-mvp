@@ -9,11 +9,37 @@ from ..db.db import Db
 from .signature_workflow import SignatureDispatchOutcome, send_document_for_signature
 
 
-_STAGE_KEYS = {
+_DEFAULT_STAGE_KEYS = {
     1: "stage1_union",
     2: "stage2_manager",
     3: "stage3_union_final",
 }
+_STAGED_FORM_STAGE_KEYS = {
+    "bst_grievance_form_3g3a": _DEFAULT_STAGE_KEYS,
+    "mobility_record_of_grievance": {
+        1: "stage1_union",
+        2: "stage2_company",
+        3: "stage3_union_appeal",
+    },
+}
+
+
+def resolve_staged_form_key(*, cfg, doc_type: str, template_key: str | None) -> str | None:  # noqa: ANN001
+    normalized_doc_type = (doc_type or "").strip().lower()
+    normalized_template_key = (template_key or "").strip().lower()
+
+    candidates: list[str] = []
+    for key in (normalized_doc_type, normalized_template_key):
+        if key and key not in candidates:
+            candidates.append(key)
+
+    for key in candidates:
+        if key not in _STAGED_FORM_STAGE_KEYS:
+            continue
+        policy = cfg.document_policies.get(key)
+        if policy and policy.staged_flow_enabled:
+            return key
+    return None
 
 
 @dataclass(frozen=True)
@@ -26,29 +52,40 @@ class StageSendOutcome:
     submission_id: str | None
 
 
+def is_staged_document(*, cfg, doc_type: str, template_key: str | None):  # noqa: ANN001
+    return resolve_staged_form_key(cfg=cfg, doc_type=doc_type, template_key=template_key) is not None
+
+
 def is_3g3a_staged(*, cfg, doc_type: str, template_key: str | None):  # noqa: ANN001
-    normalized_doc_type = (doc_type or "").strip().lower()
-    normalized_template_key = (template_key or "").strip().lower()
-    if normalized_doc_type != "bst_grievance_form_3g3a" and normalized_template_key != "bst_grievance_form_3g3a":
-        return False
-    for key in (normalized_doc_type, normalized_template_key):
-        if not key:
-            continue
-        policy = cfg.document_policies.get(key)
-        if policy and policy.staged_flow_enabled:
-            return True
-    return False
+    return resolve_staged_form_key(cfg=cfg, doc_type=doc_type, template_key=template_key) == "bst_grievance_form_3g3a"
 
 
-def stage_key_for(stage_no: int) -> str:
-    return _STAGE_KEYS.get(int(stage_no), f"stage{int(stage_no)}")
+def stage_key_for(stage_no: int, *, form_key: str | None = None) -> str:
+    normalized_form_key = str(form_key or "").strip().lower()
+    if normalized_form_key in _STAGED_FORM_STAGE_KEYS:
+        stage_keys = _STAGED_FORM_STAGE_KEYS[normalized_form_key]
+    else:
+        stage_keys = _DEFAULT_STAGE_KEYS
+    return stage_keys.get(int(stage_no), f"stage{int(stage_no)}")
+
+
+def stage_count_for(*, form_key: str | None) -> int:
+    normalized_form_key = str(form_key or "").strip().lower()
+    if normalized_form_key in _STAGED_FORM_STAGE_KEYS:
+        return len(_STAGED_FORM_STAGE_KEYS[normalized_form_key])
+    return len(_DEFAULT_STAGE_KEYS)
+
+
+def normalize_staged_signers(signers: list[str] | None, *, form_key: str | None) -> list[str]:
+    normalized = [str(email).strip() for email in (signers or []) if str(email).strip()]
+    required_signer_count = stage_count_for(form_key=form_key)
+    if len(normalized) < required_signer_count:
+        return []
+    return normalized[:required_signer_count]
 
 
 def normalize_3g3a_signers(signers: list[str] | None) -> list[str]:
-    normalized = [str(email).strip() for email in (signers or []) if str(email).strip()]
-    if len(normalized) < 3:
-        return []
-    return normalized[:3]
+    return normalize_staged_signers(signers, form_key="bst_grievance_form_3g3a")
 
 
 async def create_or_send_stage(
@@ -72,7 +109,8 @@ async def create_or_send_stage(
     idempotency_prefix: str,
 ) -> StageSendOutcome:
     stage_no = int(stage_no)
-    key = stage_key_for(stage_no)
+    form_key = resolve_staged_form_key(cfg=cfg, doc_type=doc_type, template_key=template_key)
+    key = stage_key_for(stage_no, form_key=form_key)
     existing = await db.get_document_stage(document_id=document_id, stage_no=stage_no)
     if existing:
         stage_id = int(existing[0])

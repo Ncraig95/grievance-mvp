@@ -154,6 +154,26 @@ class OfficerTrackingConfig:
     roster: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class ChiefStewardContractScopeConfig:
+    group_ids: tuple[str, ...] = ()
+    contract_aliases: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class OfficerAuthConfig:
+    enabled: bool = False
+    tenant_id: str = ""
+    client_id: str = ""
+    client_secret: str = ""
+    redirect_uri: str = ""
+    post_logout_redirect_uri: str = ""
+    session_secret: str = ""
+    officer_group_ids: tuple[str, ...] = ()
+    admin_group_ids: tuple[str, ...] = ()
+    chief_steward_contract_scopes: dict[str, ChiefStewardContractScopeConfig] = field(default_factory=dict)
+
+
 def _default_intake_auth() -> IntakeAuthConfig:
     return IntakeAuthConfig(
         shared_header_name="X-Intake-Key",
@@ -174,6 +194,10 @@ def _default_officer_tracking() -> OfficerTrackingConfig:
     return OfficerTrackingConfig()
 
 
+def _default_officer_auth() -> OfficerAuthConfig:
+    return OfficerAuthConfig()
+
+
 @dataclass(frozen=True)
 class AppConfig:
     hmac_shared_secret: str
@@ -189,6 +213,7 @@ class AppConfig:
     intake_auth: IntakeAuthConfig = field(default_factory=_default_intake_auth)
     rendering: RenderingConfig = field(default_factory=_default_rendering)
     officer_tracking: OfficerTrackingConfig = field(default_factory=_default_officer_tracking)
+    officer_auth: OfficerAuthConfig = field(default_factory=_default_officer_auth)
     document_policies: dict[str, DocumentPolicyConfig] = field(default_factory=dict)
     standalone_forms: dict[str, StandaloneFormConfig] = field(default_factory=dict)
     docx_pdf_engine: str = "libreoffice"
@@ -289,6 +314,19 @@ def _as_bool_mapping(value: object) -> dict[str, bool]:
             continue
         out[key] = parsed
     return out
+
+
+def _as_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    text = str(value or "").strip().lower()
+    if text in {"true", "1", "yes", "y", "on"}:
+        return True
+    if text in {"false", "0", "no", "n", "off"}:
+        return False
+    return bool(default)
 
 
 def _normalize_delivery_mode(value: object) -> str:
@@ -470,6 +508,28 @@ def _normalize_standalone_sequence_scope(value: object) -> str:
     return scope
 
 
+def _normalize_scope_key(value: object) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    return text.strip("_")
+
+
+def _as_chief_steward_contract_scopes(value: object) -> dict[str, ChiefStewardContractScopeConfig]:
+    if not isinstance(value, dict):
+        return {}
+
+    out: dict[str, ChiefStewardContractScopeConfig] = {}
+    for raw_key, raw_scope in value.items():
+        key = _normalize_scope_key(raw_key)
+        if not key or not isinstance(raw_scope, dict):
+            continue
+        out[key] = ChiefStewardContractScopeConfig(
+            group_ids=_as_str_tuple(raw_scope.get("group_ids")),
+            contract_aliases=_as_str_tuple(raw_scope.get("contract_aliases")),
+        )
+    return out
+
+
 def _parse_standalone_sharepoint_storage(
     raw_storage: object,
     *,
@@ -535,6 +595,7 @@ def load_config(path: str) -> AppConfig:
     intake_auth_raw = raw.get("intake_auth", {}) or {}
     rendering_raw = raw.get("rendering", {}) or {}
     officer_tracking_raw = raw.get("officer_tracking", {}) or {}
+    officer_auth_raw = raw.get("officer_auth", {}) or {}
     document_policies_raw = raw.get("document_policies", {}) or {}
     standalone_forms_raw = raw.get("standalone_forms", {}) or {}
 
@@ -703,6 +764,20 @@ def load_config(path: str) -> AppConfig:
         ),
         officer_tracking=OfficerTrackingConfig(
             roster=_as_str_tuple(officer_tracking_raw.get("roster")),
+        ),
+        officer_auth=OfficerAuthConfig(
+            enabled=_as_bool(officer_auth_raw.get("enabled"), False),
+            tenant_id=str(officer_auth_raw.get("tenant_id", "")).strip(),
+            client_id=str(officer_auth_raw.get("client_id", "")).strip(),
+            client_secret=str(officer_auth_raw.get("client_secret", "")).strip(),
+            redirect_uri=str(officer_auth_raw.get("redirect_uri", "")).strip(),
+            post_logout_redirect_uri=str(officer_auth_raw.get("post_logout_redirect_uri", "")).strip(),
+            session_secret=str(officer_auth_raw.get("session_secret", "")).strip(),
+            officer_group_ids=_as_str_tuple(officer_auth_raw.get("officer_group_ids")),
+            admin_group_ids=_as_str_tuple(officer_auth_raw.get("admin_group_ids")),
+            chief_steward_contract_scopes=_as_chief_steward_contract_scopes(
+                officer_auth_raw.get("chief_steward_contract_scopes")
+            ),
         ),
         document_policies=parsed_document_policies,
         standalone_forms=_as_standalone_forms(standalone_forms_raw),

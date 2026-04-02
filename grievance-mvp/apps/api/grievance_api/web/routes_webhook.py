@@ -27,8 +27,10 @@ from ..services.standalone_forms import (
 )
 from ..services.staged_signature_workflow import (
     create_or_send_stage,
-    is_3g3a_staged,
+    is_staged_document,
     record_stage_artifact,
+    resolve_staged_form_key,
+    stage_count_for,
     stage_alignment_pdf_path,
     stage_file_path,
 )
@@ -753,10 +755,12 @@ async def webhook_docuseal(request: Request):
         return {"ok": True, "deduped": True, "reason": "completion_already_processed"}
     try:
         stage_row = await db.get_document_stage_by_submission(submission_id=submission_id)
-        if stage_row and is_3g3a_staged(cfg=cfg, doc_type=doc_type, template_key=template_key):
+        staged_form_key = resolve_staged_form_key(cfg=cfg, doc_type=doc_type, template_key=template_key)
+        if stage_row and is_staged_document(cfg=cfg, doc_type=doc_type, template_key=template_key):
             stage_id = int(stage_row[0])
             stage_no = int(stage_row[3])
             stage_status = str(stage_row[5] or "")
+            stage_count = stage_count_for(form_key=staged_form_key)
             if stage_status == "completed":
                 await db.mark_receipt_handled("docuseal", completion_receipt_key)
                 await db.mark_receipt_handled("docuseal", receipt_key)
@@ -918,7 +922,7 @@ async def webhook_docuseal(request: Request):
                 {"stage_no": stage_no, "stage_id": stage_id},
             )
 
-            if stage_no < 3:
+            if stage_no < stage_count:
                 signer_order: list[str] = []
                 try:
                     parsed_signers = json.loads(signer_order_json or "[]")
@@ -926,13 +930,13 @@ async def webhook_docuseal(request: Request):
                         signer_order = [str(s).strip() for s in parsed_signers if str(s).strip()]
                 except Exception:
                     signer_order = []
-                if len(signer_order) < 3:
+                if len(signer_order) < stage_count:
                     await db.exec("UPDATE documents SET status='failed' WHERE id=?", (document_id,))
                     await db.add_event(
                         case_id,
                         document_id,
                         "document_stage_advance_failed",
-                        {"stage_no": stage_no, "reason": "missing_signers"},
+                        {"stage_no": stage_no, "reason": "missing_signers", "required_count": stage_count},
                     )
                     await db.mark_receipt_handled("docuseal", completion_receipt_key)
                     await db.mark_receipt_handled("docuseal", receipt_key)

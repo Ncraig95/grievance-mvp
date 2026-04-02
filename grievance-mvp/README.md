@@ -19,6 +19,7 @@ Replace each placeholder URL with the published Microsoft Form link for that loc
 | Local 3106 | True Intent Grievance Brief | `true_intent_brief` | `https://forms.office.com/r/REPLACE-TRUEINTENT-3106` |
 | Local 3106 | Disciplinary Grievance Brief | `disciplinary_brief` | `https://forms.office.com/r/REPLACE-DISCIPLINARY-3106` |
 | Local 3106 | Settlement Form 3106 | `settlement_form` | `https://forms.office.com/Pages/ResponsePage.aspx?id=Gm8hRgwHT0uKp3F4_OjDLETN-f9DdKFBsB6MNcKlT95UQzY4TVFaSUJPMVk0T1RUODhGVU0yQTE5UC4u` |
+| Local 3106 | Mobility Record of Grievance | `mobility_record_of_grievance` | `https://forms.office.com/r/REPLACE-MOBILITY-RECORD-3106` |
 | Local 3106 | BST Grievance Form 3G3A | `bst_grievance_form_3g3a` | `https://forms.office.com/r/REPLACE-3G3A-3106` |
 | Standalone | AT&T Mobility Bargaining Suggestion | `att_mobility_bargaining_suggestion` | `https://forms.office.com/r/REPLACE-ATT-MOBILITY-BARGAINING` |
 | Local (add rows) | Any additional local-specific form | `<document_command>` | `https://forms.office.com/r/REPLACE-LINK` |
@@ -468,6 +469,7 @@ These are ready for intake integration now:
 - `true_intent_brief` -> `form_true_intent_grievance_brief_revised_05.20.21.docx`
 - `disciplinary_brief` -> `form_disciplinary_grievance_brief_revised_05.19.21.docx`
 - `settlement_form` -> `Settlement Form 3106.docx`
+- `mobility_record_of_grievance` -> `mobility_record_of_grievance_revised.docx`
 
 Equivalent full command names also work:
 
@@ -476,6 +478,7 @@ Equivalent full command names also work:
 - `true_intent_grievance_brief`
 - `disciplinary_grievance_brief`
 - `settlement_form_3106`
+- `mobility_record_of_grievance`
 
 `bst_grievance_form_3g3a` now has a staged integration guide for questions 1-10:
 - `docs/power-automate/bst_grievance_form_3g3a.md`
@@ -489,6 +492,17 @@ Equivalent full command names also work:
   3. union final disposition
 - Intake sends stage 1 only; webhook completion auto-advances stages 2 and 3.
 - Q6-Q10 are DocuSeal-owned fill fields in stages 2/3 (`Txt_es_` tags), not Power Automate prefill fields.
+
+Mobility record staged flow behavior:
+- Enabled only when `document_policies.mobility_record_of_grievance.staged_flow_enabled=true`.
+- Requires explicit `documents[0].signers` with 3 emails in order:
+  1. union filing signer
+  2. company responder
+  3. union appeal/final signer
+- Intake sends stage 1 only; webhook completion auto-advances stages 2 and 3.
+- Stage 1 owns the union first-level position block.
+- Stage 2 owns company statement/disposition blocks and both company signature blocks.
+- Stage 3 owns the union disposition/final blocks and the union second-level position block.
 
 Minimum payload pattern for all commands:
 
@@ -520,6 +534,7 @@ Detailed per-document setup guides:
 - `docs/power-automate/true_intent_grievance_brief.md`
 - `docs/power-automate/disciplinary_grievance_brief.md`
 - `docs/power-automate/settlement_form_3106.md`
+- `docs/power-automate/mobility_record_of_grievance.md`
 - `docs/power-automate/att_mobility_bargaining_suggestion.md` (combined Forms + Power Automate handoff)
 
 ## 10b) Power Automate setup (BellSouth Meeting Request)

@@ -35,15 +35,35 @@ _TEXT_FIELD_DIMENSION_HINTS: dict[str, dict[str, float]] = {
     "q7_company_rep_name_attuid": {"min_w": 220.0, "min_h": 20.0, "max_h": 24.0, "y_lift": 6.0},
     "q8_union_disposition": {"min_w": 240.0, "min_h": 30.0, "max_h": 42.0},
     "article_affected": {"min_w": 176.0, "min_h": 18.0, "max_h": 20.0, "y_lift": 4.0},
+    # Mobility record staged narrative / position sections.
+    "company_statement_first_level": {"min_w": 430.0, "min_h": 46.0, "max_h": 56.0},
+    "proposed_disposition_first_level": {"min_w": 430.0, "min_h": 40.0, "max_h": 52.0},
+    "proposed_disposition_second_level": {"min_w": 430.0, "min_h": 40.0, "max_h": 52.0},
+    "company_position_first_level": {"min_w": 430.0, "min_h": 32.0, "max_h": 40.0},
+    "company_position_second_level": {"min_w": 430.0, "min_h": 32.0, "max_h": 40.0},
+    "union_position_first_level": {"min_w": 430.0, "min_h": 32.0, "max_h": 40.0},
+    "union_position_second_level": {"min_w": 430.0, "min_h": 32.0, "max_h": 40.0},
 }
 _DATE_FIELD_DIMENSION_HINTS: dict[str, dict[str, float]] = {
     "q5_l2_date": {"min_w": 140.0, "min_h": 20.0, "max_h": 28.0, "y_lift": 6.0},
     "date_true_intent": {"min_w": 112.0, "min_h": 12.0, "max_h": 16.0, "y_lift": 2.0},
 }
+_MOBILITY_RECORD_SIGNATURE_HINT = {"min_w": 180.0, "min_h": 14.0, "max_h": 16.0, "y_lift": 10.0}
+_MOBILITY_RECORD_SIGNATURE_HINTS: dict[str, dict[str, float]] = {
+    "signature_company_disp_l1": dict(_MOBILITY_RECORD_SIGNATURE_HINT),
+    "signature_company_disp_l2": dict(_MOBILITY_RECORD_SIGNATURE_HINT),
+    "signature_company_pos_l1": dict(_MOBILITY_RECORD_SIGNATURE_HINT),
+    "cp2s": dict(_MOBILITY_RECORD_SIGNATURE_HINT),
+    "signature_union_disp_l1": dict(_MOBILITY_RECORD_SIGNATURE_HINT),
+    "signature_union_disp_l2": dict(_MOBILITY_RECORD_SIGNATURE_HINT),
+    "signature_union_pos_l1": dict(_MOBILITY_RECORD_SIGNATURE_HINT),
+    "signature_union_pos_l2": dict(_MOBILITY_RECORD_SIGNATURE_HINT),
+}
 _FORM_SIGNATURE_FIELD_DIMENSION_HINTS: dict[str, dict[str, dict[str, float]]] = {
     "att_mobility_bargaining_suggestion": {
         "signer1_signature": {"min_h": 14.0, "max_h": 16.0, "y_lift": 16.0},
     },
+    "mobility_record_of_grievance": _MOBILITY_RECORD_SIGNATURE_HINTS,
 }
 _STATEMENT_SIGNER_DATE_HINTS: dict[str, dict[str, float]] = {
     # Statement form date placeholders sit close to baseline; keep lift/padding tight.
@@ -51,14 +71,32 @@ _STATEMENT_SIGNER_DATE_HINTS: dict[str, dict[str, float]] = {
     "signer2_date": {"min_w": 112.0, "min_h": 12.0, "max_h": 14.0, "y_lift": 2.0},
     "signer3_date": {"min_w": 112.0, "min_h": 12.0, "max_h": 14.0, "y_lift": 2.0},
 }
+_MOBILITY_RECORD_DATE_HINTS: dict[str, dict[str, float]] = {
+    "cd1": {"min_w": 84.0, "min_h": 12.0, "max_h": 14.0, "y_lift": 2.0},
+    "cd2": {"min_w": 84.0, "min_h": 12.0, "max_h": 14.0, "y_lift": 2.0},
+    "p1": {"min_w": 84.0, "min_h": 12.0, "max_h": 14.0, "y_lift": 2.0},
+    "p2": {"min_w": 84.0, "min_h": 12.0, "max_h": 14.0, "y_lift": 2.0},
+    "u1": {"min_w": 84.0, "min_h": 12.0, "max_h": 14.0, "y_lift": 2.0},
+    "u2": {"min_w": 84.0, "min_h": 12.0, "max_h": 14.0, "y_lift": 2.0},
+    "ud1": {"min_w": 84.0, "min_h": 12.0, "max_h": 14.0, "y_lift": 2.0},
+    "ud2": {"min_w": 84.0, "min_h": 12.0, "max_h": 14.0, "y_lift": 2.0},
+}
 _FORM_DATE_FIELD_DIMENSION_HINTS: dict[str, dict[str, dict[str, float]]] = {
     "statement_of_occurrence": _STATEMENT_SIGNER_DATE_HINTS,
     "grievance_form": _STATEMENT_SIGNER_DATE_HINTS,
+    "mobility_record_of_grievance": _MOBILITY_RECORD_DATE_HINTS,
 }
 _MULTILINE_TEXT_FIELDS = {
     "q6_company_statement",
     "q7_proposed_disposition_second_level",
     "q8_union_disposition",
+    "company_statement_first_level",
+    "proposed_disposition_first_level",
+    "proposed_disposition_second_level",
+    "company_position_first_level",
+    "company_position_second_level",
+    "union_position_first_level",
+    "union_position_second_level",
 }
 _MULTILINE_TEXT_PREFERENCES: dict[str, object] = {
     # DocuSeal overlay text wraps reliably only when text spans are width-bound.
@@ -421,9 +459,10 @@ class DocuSealClient:
                 pending_box["y_min"] = min(float(pending_box["y_min"]), raw_box["y_min"])
                 pending_box["x_max"] = max(float(pending_box["x_max"]), raw_box["x_max"])
                 pending_box["y_max"] = max(float(pending_box["y_max"]), raw_box["y_max"])
-                if "}}" not in token_raw:
+                joined_pending = "".join(pending_parts)
+                if "}}" not in joined_pending:
                     continue
-                token_candidate = "".join(pending_parts)
+                token_candidate = joined_pending
                 y_min = float(pending_box["y_min"])
                 y_max = float(pending_box["y_max"])
                 if pending_first_box is not None:
@@ -1040,6 +1079,11 @@ class DocuSealClient:
                     / 2.0,
                 )
             )
+            # Settlement forms remap signer indexes by visual row order so row 1 always
+            # binds to signer1 and row 2 to signer2. That is only safe when every signer
+            # row is complete; sparse rows must keep their original signer indexes.
+            if [item[0] for item in rows] != signer_indexes:
+                return rows
             remapped: list[tuple[int, dict, dict]] = []
             for row_index, (_, sig_anchor, date_anchor) in enumerate(rows, start=1):
                 remapped.append((row_index, sig_anchor, date_anchor))

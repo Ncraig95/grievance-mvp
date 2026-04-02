@@ -1102,6 +1102,21 @@ class DocuSealPlaceholderAlignmentTests(unittest.TestCase):
         self.assertEqual(len(overrides), 6)
         self.assertIn("guard_metrics", metrics)
 
+    def test_settlement_build_signer_rows_preserves_sparse_signer_indexes(self) -> None:
+        areas = {
+            (1, "signature"): [{"x_min": 250.0, "y_min": 650.0, "x_max": 350.0, "y_max": 662.0, "page": 0, "page_w": 612.0, "page_h": 792.0}],
+            (2, "signature"): [{"x_min": 250.0, "y_min": 598.0, "x_max": 350.0, "y_max": 610.0, "page": 0, "page_w": 612.0, "page_h": 792.0}],
+            (2, "date"): [{"x_min": 435.0, "y_min": 598.0, "x_max": 510.0, "y_max": 610.0, "page": 0, "page_w": 612.0, "page_h": 792.0}],
+        }
+
+        rows = self.client._build_signer_rows(
+            placeholder_areas=areas,
+            form_key="settlement_form_3106",
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], 2)
+
     def test_settlement_guard_ignores_vertical_map_drift(self) -> None:
         mapped_client = DocuSealClient(
             "http://docuseal:3000",

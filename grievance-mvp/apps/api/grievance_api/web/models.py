@@ -148,6 +148,8 @@ class OfficerCaseCreateRequest(BaseModel):
     issue_summary: str | None = None
     first_level_request_sent_date: str | None = None
     second_level_request_sent_date: str | None = None
+    third_level_request_sent_date: str | None = None
+    fourth_level_request_sent_date: str | None = None
     officer_assignee: str | None = None
     officer_notes: str | None = None
     officer_status: str | None = None
@@ -159,12 +161,15 @@ class OfficerCaseUpdateRequest(BaseModel):
     grievance_number: str | None = None
     member_name: str | None = None
     member_email: str | None = None
+    contract: str | None = None
     department: str | None = None
     steward: str | None = None
     occurrence_date: str | None = None
     issue_summary: str | None = None
     first_level_request_sent_date: str | None = None
     second_level_request_sent_date: str | None = None
+    third_level_request_sent_date: str | None = None
+    fourth_level_request_sent_date: str | None = None
     officer_assignee: str | None = None
     officer_notes: str | None = None
     officer_status: str | None = None
@@ -184,6 +189,8 @@ class OfficerCaseRow(BaseModel):
     grievance_id: str
     grievance_number: str | None = None
     display_grievance: str
+    contract: str | None = None
+    contract_scope: str | None = None
     member_name: str
     member_email: str | None = None
     department: str | None = None
@@ -192,6 +199,8 @@ class OfficerCaseRow(BaseModel):
     issue_summary: str | None = None
     first_level_request_sent_date: str | None = None
     second_level_request_sent_date: str | None = None
+    third_level_request_sent_date: str | None = None
+    fourth_level_request_sent_date: str | None = None
     officer_assignee: str | None = None
     officer_notes: str | None = None
     officer_status: str
@@ -203,9 +212,26 @@ class OfficerCaseRow(BaseModel):
     created_at_utc: str
 
 
+class OfficerViewerContext(BaseModel):
+    email: str | None = None
+    display_name: str | None = None
+    role: str
+    contract_scopes: list[str] = Field(default_factory=list)
+    auth_enabled: bool
+    can_create: bool
+    can_edit: bool
+    can_delete: bool
+    can_bulk_edit: bool
+    can_bulk_delete: bool
+    can_view_audit: bool
+    can_manage_chief_assignments: bool = False
+
+
 class OfficerCaseListResponse(BaseModel):
     rows: list[OfficerCaseRow]
     roster: list[str] = Field(default_factory=list)
+    viewer: OfficerViewerContext
+    available_contract_scopes: list[str] = Field(default_factory=list)
     count: int
 
 
@@ -240,3 +266,39 @@ class OfficerCaseBulkDeleteResponse(BaseModel):
     deleted_stage_field_value_count: int
     deleted_event_count: int
     deleted_outbound_email_count: int
+
+
+class OfficerCaseEventRow(BaseModel):
+    event_id: int
+    ts_utc: str
+    event_type: str
+    details: object | None = None
+
+
+class OfficerCaseEventsResponse(BaseModel):
+    case_id: str
+    display_grievance: str
+    event_count: int
+    events: list[OfficerCaseEventRow] = Field(default_factory=list)
+
+
+class ChiefStewardAssignmentCreateRequest(BaseModel):
+    principal_email: str
+    principal_display_name: str | None = None
+    contract_scope: str
+
+
+class ChiefStewardAssignmentRow(BaseModel):
+    assignment_id: int
+    principal_id: str | None = None
+    principal_email: str
+    principal_display_name: str | None = None
+    contract_scope: str
+    created_at_utc: str
+    updated_at_utc: str
+    assigned_by: str
+
+
+class ChiefStewardAssignmentListResponse(BaseModel):
+    rows: list[ChiefStewardAssignmentRow] = Field(default_factory=list)
+    available_contract_scopes: list[str] = Field(default_factory=list)

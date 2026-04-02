@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 
+from grievance_api.services.docuseal_client import DocuSealClient
+from grievance_api.services.pdf_convert import docx_to_pdf
 from grievance_api.services.doc_render import (
     _normalize_split_placeholders_in_xml,
     _replace_leftover_placeholders,
@@ -180,6 +183,60 @@ class DocRenderPlaceholderTests(unittest.TestCase):
             self.assertNotIn("{{", header2_xml)
             self.assertIn("2026001", header2_xml)
 
+    def test_settlement_template_long_render_keeps_both_signer_rows_on_one_page(self) -> None:
+        template_path = self._find_settlement_template()
+        if template_path is None:
+            self.skipTest("settlement template not available in test environment")
+        if shutil.which("soffice") is None:
+            self.skipTest("soffice not available in test environment")
+
+        context = {
+            "grievant_name": "Enis Sujak",
+            "grievance_number": "2026016",
+            "informal_meeting_date": "2026-03-24",
+            "company_rep_attending": "Robert Bendle",
+            "union_rep_attending": "Nicholas Craig",
+            "issue_article": "21",
+            "issue_rows": [
+                {"text": "Company did not payout full amount of you refer", "line_no": 1},
+            ],
+            "settlement_rows": [
+                {"text": "Resolved by You Refer Escalation. The Company agrees to correct You Refer ID", "line_no": 1},
+                {"text": "251217J915543 to", "line_no": 2},
+                {"text": "the proper referral type and process the payout correction so the total payout is", "line_no": 3},
+                {"text": "$2,000.00,", "line_no": 4},
+                {"text": "which will be paid with the next month's You Refer reward drop. Upon completion,", "line_no": 5},
+                {"text": "Grievance ID 2026016 will be considered resolved.", "line_no": 6},
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "settlement-anchor.docx"
+            render_docx(
+                str(template_path),
+                context,
+                str(out_path),
+                strip_signature_placeholders=False,
+                normalize_split_placeholders=True,
+            )
+            pdf_path = docx_to_pdf(str(out_path), tmp, timeout_seconds=45)
+            pdf_bytes = Path(pdf_path).read_bytes()
+
+        client = DocuSealClient("http://docuseal:3000", "token")
+        areas = client._extract_placeholder_areas(pdf_bytes=pdf_bytes)
+
+        self.assertEqual(
+            set(areas.keys()),
+            {
+                (1, "signature"),
+                (1, "date"),
+                (2, "signature"),
+                (2, "date"),
+            },
+        )
+        pages = {int(anchors[0]["page"]) for anchors in areas.values()}
+        self.assertEqual(len(pages), 1)
+
     @staticmethod
     def _find_statement_template() -> Path | None:
         direct_candidates = [
@@ -193,6 +250,23 @@ class DocRenderPlaceholderTests(unittest.TestCase):
         current = Path(__file__).resolve()
         for parent in current.parents:
             candidate = parent / "Docx Files Template" / "statement_of_occurrence fixed.docx"
+            if candidate.exists():
+                return candidate
+        return None
+
+    @staticmethod
+    def _find_settlement_template() -> Path | None:
+        direct_candidates = [
+            Path("/app/templates/docx/Settlement Form 3106.docx"),
+            Path("Docx Files Template/Settlement Form 3106.docx"),
+        ]
+        for candidate in direct_candidates:
+            if candidate.exists():
+                return candidate
+
+        current = Path(__file__).resolve()
+        for parent in current.parents:
+            candidate = parent / "Docx Files Template" / "Settlement Form 3106.docx"
             if candidate.exists():
                 return candidate
         return None

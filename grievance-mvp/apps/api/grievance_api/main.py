@@ -3,10 +3,12 @@ from __future__ import annotations
 import logging
 
 from fastapi import FastAPI
+from starlette.middleware.sessions import SessionMiddleware
 
 from .core.config import load_config
 from .core.intake_auth import validate_intake_auth_config
 from .core.logging import setup_logging
+from .core.officer_auth import validate_officer_auth_config
 from .db.db import Db
 from .db.migrate import migrate
 from .services.docuseal_client import DocuSealClient
@@ -18,6 +20,7 @@ from .web.routes_approval import router as approval_router
 from .web.routes_health import router as health_router
 from .web.routes_intake import router as intake_router
 from .web.routes_notifications import router as notifications_router
+from .web.officer_auth import router as officer_auth_router
 from .web.routes_officers import router as officers_router
 from .web.routes_ops import router as ops_router
 from .web.routes_standalone import router as standalone_router
@@ -28,10 +31,18 @@ def create_app() -> FastAPI:
     cfg = load_config("/app/config/config.yaml")
     setup_logging(cfg.log_level)
     validate_intake_auth_config(cfg.intake_auth)
+    validate_officer_auth_config(cfg.officer_auth)
 
     migrate(cfg.db_path)
 
     app = FastAPI(title="Grievance MVP API", version="0.2.0")
+    if cfg.officer_auth.enabled:
+        app.add_middleware(
+            SessionMiddleware,
+            secret_key=cfg.officer_auth.session_secret,
+            same_site="lax",
+            https_only=cfg.officer_auth.redirect_uri.startswith("https://"),
+        )
 
     app.state.cfg = cfg
     app.state.db = Db(cfg.db_path)
@@ -102,6 +113,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(health_router)
+    app.include_router(officer_auth_router)
     app.include_router(intake_router)
     app.include_router(webhook_router)
     app.include_router(notifications_router)

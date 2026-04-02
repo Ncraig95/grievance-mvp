@@ -32,7 +32,10 @@ from ..services.signature_workflow import normalize_signers, send_document_for_s
 from ..services.staged_signature_workflow import (
     create_or_send_stage,
     is_3g3a_staged,
-    normalize_3g3a_signers,
+    is_staged_document,
+    normalize_staged_signers,
+    resolve_staged_form_key,
+    stage_count_for,
 )
 from .models import (
     CaseStatusResponse,
@@ -178,6 +181,7 @@ _DOC_COMMAND_ALIASES: dict[str, str] = {
     "true_intent_brief": "true_intent_grievance_brief",
     "disciplinary_brief": "disciplinary_grievance_brief",
     "settlement_form": "settlement_form_3106",
+    "mobility_record_of_grievance": "mobility_record_of_grievance",
 }
 _DOC_TEMPLATE_FALLBACKS: dict[str, tuple[str, ...]] = {
     "bellsouth_meeting_request": (
@@ -199,6 +203,9 @@ _DOC_TEMPLATE_FALLBACKS: dict[str, tuple[str, ...]] = {
     "settlement_form_3106": (
         "settlement_form_3106",
         "settlement_form",
+    ),
+    "mobility_record_of_grievance": (
+        "mobility_record_of_grievance",
     ),
 }
 
@@ -294,6 +301,8 @@ def _build_document_basename(*, doc_type: str, grievance_id: str, member_name: s
         return f"{grievance_id} - {member} - true intent grievance brief"
     if normalized_type == "disciplinary_grievance_brief":
         return f"{grievance_id} - {member} - disciplinary grievance brief"
+    if normalized_type == "mobility_record_of_grievance":
+        return f"{grievance_id} - {member} - mobility record of grievance"
     if normalized_type in {"settlement_form", "settlement_form_3106"}:
         return f"{grievance_id} - {member} - settlement form 3106"
     return _safe_name(doc_type)
@@ -735,6 +744,50 @@ def _apply_3g3a_defaults(*, context: dict[str, object], grievance_id: str) -> No
 def _clear_3g3a_stage_interactive_marks(*, context: dict[str, object]) -> None:
     for marker_key in _3G3A_STAGE_INTERACTIVE_MARK_FIELDS:
         context[marker_key] = _UNCHECKED_MARK
+
+
+def _apply_mobility_record_defaults(
+    *,
+    context: dict[str, object],
+    grievance_id: str,
+    grievance_number: str | None,
+) -> None:
+    def _pick(*keys: str, fallback: str = "") -> str:
+        for key in keys:
+            raw = context.get(key)
+            if raw is None:
+                continue
+            text = str(raw).strip()
+            if text:
+                return text
+        return fallback
+
+    context.setdefault(
+        "cw_grievance_number",
+        _pick("grievance_number", fallback=str(grievance_number or "").strip() or grievance_id),
+    )
+    context.setdefault("district_grievance_number", _pick("district_grievance_number", fallback=""))
+    context.setdefault("date_grievance_occurred", _pick("date_grievance_occurred", "incident_date", fallback=""))
+    context.setdefault("department", _pick("department", fallback=""))
+    context.setdefault("specific_location_state", _pick("specific_location_state", "work_location", fallback=""))
+    context.setdefault("local_number", _pick("local_number", fallback=""))
+    context.setdefault(
+        "employee_work_group_name",
+        _pick("employee_work_group_name", "grievant_name", fallback=""),
+    )
+    context.setdefault("job_title", _pick("job_title", "title", fallback=""))
+    context.setdefault("ncs_date", _pick("ncs_date", fallback=""))
+    context.setdefault("union_statement", _pick("union_statement", "narrative", fallback=""))
+    context.setdefault("contract_articles", _pick("contract_articles", "article", "articles", fallback=""))
+    context.setdefault("date_informal", _pick("date_informal", "informal_meeting_date", fallback=""))
+    context.setdefault(
+        "date_first_step_requested",
+        _pick("date_first_step_requested", "first_level_request_sent_date", fallback=""),
+    )
+    context.setdefault(
+        "date_first_step_held",
+        _pick("date_first_step_held", "first_level_meeting_date", fallback=""),
+    )
 
 
 def _clamp_with_ellipsis(value: str, max_chars: int) -> str:
@@ -1238,6 +1291,12 @@ def _build_template_context(
         _apply_bellsouth_defaults(context=context, payload=payload)
     if doc_type == "bst_grievance_form_3g3a":
         _apply_3g3a_defaults(context=context, grievance_id=grievance_id)
+    if doc_type == "mobility_record_of_grievance":
+        _apply_mobility_record_defaults(
+            context=context,
+            grievance_id=grievance_id,
+            grievance_number=grievance_number,
+        )
     for ctx_key in tuple(context.keys()):
         if _is_date_field_key(str(ctx_key)):
             context[ctx_key] = _format_context_date_value(context.get(ctx_key))
@@ -1613,9 +1672,10 @@ async def intake(request: Request):
             doc_type=doc_type,
             grievance_number=grievance_number,
         )
-        is_staged_3g3a_document = is_3g3a_staged(cfg=cfg, doc_type=doc_type, template_key=doc_req.template_key)
+        staged_form_key = resolve_staged_form_key(cfg=cfg, doc_type=doc_type, template_key=doc_req.template_key)
+        is_staged_document_flow = staged_form_key is not None
         render_context = context
-        if doc_req.requires_signature and is_staged_3g3a_document:
+        if doc_req.requires_signature and is_staged_3g3a_document(cfg=cfg, doc_type=doc_type, template_key=doc_req.template_key):
             render_context = dict(context)
             _clear_3g3a_stage_interactive_marks(context=render_context)
         if layout_meta.get("policy_applied"):
@@ -1657,45 +1717,25 @@ async def intake(request: Request):
                         graph_temp_folder_path=cfg.docx_pdf_graph_temp_folder,
                     )
                     alignment_pdf_bytes = Path(anchor_pdf_path).read_bytes()
-                    if is_staged_3g3a_document:
+                    if is_staged_document_flow:
                         # Build stage-specific alignment PDFs so each stage can activate only its own fields.
-                        stage1_bytes = _create_stage_alignment_pdf_from_anchor_docx(
-                            anchor_docx_path=anchor_docx_path,
-                            doc_dir=ddir,
-                            stage_no=1,
-                            libreoffice_timeout_seconds=cfg.libreoffice_timeout_seconds,
-                            docx_pdf_engine=cfg.docx_pdf_engine,
-                            graph=graph,
-                            graph_site_hostname=cfg.graph.site_hostname,
-                            graph_site_path=cfg.graph.site_path,
-                            graph_library=cfg.graph.document_library,
-                            graph_temp_folder_path=cfg.docx_pdf_graph_temp_folder,
-                        )
-                        _create_stage_alignment_pdf_from_anchor_docx(
-                            anchor_docx_path=anchor_docx_path,
-                            doc_dir=ddir,
-                            stage_no=2,
-                            libreoffice_timeout_seconds=cfg.libreoffice_timeout_seconds,
-                            docx_pdf_engine=cfg.docx_pdf_engine,
-                            graph=graph,
-                            graph_site_hostname=cfg.graph.site_hostname,
-                            graph_site_path=cfg.graph.site_path,
-                            graph_library=cfg.graph.document_library,
-                            graph_temp_folder_path=cfg.docx_pdf_graph_temp_folder,
-                        )
-                        _create_stage_alignment_pdf_from_anchor_docx(
-                            anchor_docx_path=anchor_docx_path,
-                            doc_dir=ddir,
-                            stage_no=3,
-                            libreoffice_timeout_seconds=cfg.libreoffice_timeout_seconds,
-                            docx_pdf_engine=cfg.docx_pdf_engine,
-                            graph=graph,
-                            graph_site_hostname=cfg.graph.site_hostname,
-                            graph_site_path=cfg.graph.site_path,
-                            graph_library=cfg.graph.document_library,
-                            graph_temp_folder_path=cfg.docx_pdf_graph_temp_folder,
-                        )
-                        alignment_pdf_bytes = stage1_bytes
+                        first_stage_bytes: bytes | None = None
+                        for stage_no in range(1, stage_count_for(form_key=staged_form_key) + 1):
+                            stage_bytes = _create_stage_alignment_pdf_from_anchor_docx(
+                                anchor_docx_path=anchor_docx_path,
+                                doc_dir=ddir,
+                                stage_no=stage_no,
+                                libreoffice_timeout_seconds=cfg.libreoffice_timeout_seconds,
+                                docx_pdf_engine=cfg.docx_pdf_engine,
+                                graph=graph,
+                                graph_site_hostname=cfg.graph.site_hostname,
+                                graph_site_path=cfg.graph.site_path,
+                                graph_library=cfg.graph.document_library,
+                                graph_temp_folder_path=cfg.docx_pdf_graph_temp_folder,
+                            )
+                            if stage_no == 1:
+                                first_stage_bytes = stage_bytes
+                        alignment_pdf_bytes = first_stage_bytes
                 finally:
                     Path(anchor_docx_path).unlink(missing_ok=True)
                     if anchor_pdf_path:
@@ -1819,8 +1859,9 @@ async def intake(request: Request):
         signing_link: str | None = None
 
         if doc_req.requires_signature:
-            if is_3g3a_staged(cfg=cfg, doc_type=doc_type, template_key=doc_req.template_key):
-                staged_signers = normalize_3g3a_signers(doc_req.signers)
+            if is_staged_document(cfg=cfg, doc_type=doc_type, template_key=doc_req.template_key):
+                staged_signers = normalize_staged_signers(doc_req.signers, form_key=staged_form_key)
+                required_signer_count = stage_count_for(form_key=staged_form_key)
                 if not staged_signers:
                     any_failed = True
                     await db.exec("UPDATE documents SET status=?, signer_order_json=? WHERE id=?", ("failed", "[]", document_id))
@@ -1830,7 +1871,7 @@ async def intake(request: Request):
                         "staged_signature_signers_required",
                         {
                             "doc_type": doc_type,
-                            "required_count": 3,
+                            "required_count": required_signer_count,
                             "provided_count": len(doc_req.signers or []),
                         },
                     )

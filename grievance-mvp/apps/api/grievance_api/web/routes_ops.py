@@ -7,15 +7,24 @@ import time
 
 import requests
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..core.hmac_auth import compute_signature
 from ..db.db import Db, utcnow
 from .admin_common import parse_json_safely, require_local_access
+from .officer_auth import require_admin_user, require_ops_page_access
 
 router = APIRouter()
 
 _OPS_CLEARED_STATUS = "ops_cleared"
+
+
+async def _require_ops_api_access(request: Request) -> None:
+    cfg = request.app.state.cfg
+    if getattr(cfg, "officer_auth", None) and cfg.officer_auth.enabled:
+        await require_admin_user(request)
+        return
+    require_local_access(request)
 
 
 def _build_intake_headers(*, cfg, body: bytes) -> dict[str, str]:  # noqa: ANN001
@@ -998,7 +1007,9 @@ async def _post_internal_json(*, cfg, url: str, payload: dict[str, object]) -> o
 
 @router.get("/ops", response_class=HTMLResponse)
 async def ops_page(request: Request):
-    require_local_access(request)
+    gate = await require_ops_page_access(request, next_path="/ops")
+    if isinstance(gate, RedirectResponse):
+        return gate
     return """
 <!doctype html>
 <html>
@@ -1328,28 +1339,28 @@ async def ops_page(request: Request):
 
 @router.get("/ops/cases/{case_id}/trace")
 async def ops_case_trace(case_id: str, request: Request):
-    require_local_access(request)
+    await _require_ops_api_access(request)
     db: Db = request.app.state.db
     return await _load_case_trace(db=db, case_id=case_id)
 
 
 @router.get("/ops/grievances/{grievance_ref}/documents")
 async def ops_grievance_documents(grievance_ref: str, request: Request):
-    require_local_access(request)
+    await _require_ops_api_access(request)
     db: Db = request.app.state.db
     return await _load_grievance_doc_catalog(db=db, grievance_ref=grievance_ref)
 
 
 @router.get("/ops/active-signatures")
 async def ops_active_signatures(request: Request, grievance_ref: str | None = None):
-    require_local_access(request)
+    await _require_ops_api_access(request)
     db: Db = request.app.state.db
     return await _load_active_signature_queue(db=db, grievance_ref=grievance_ref)
 
 
 @router.post("/ops/documents/{document_id}/clear")
 async def ops_clear_document(document_id: str, request: Request, reason: str = ""):
-    require_local_access(request)
+    await _require_ops_api_access(request)
     db: Db = request.app.state.db
     docuseal = request.app.state.docuseal
     return await _clear_case_document(
@@ -1362,7 +1373,7 @@ async def ops_clear_document(document_id: str, request: Request, reason: str = "
 
 @router.post("/ops/standalone-documents/{document_id}/clear")
 async def ops_clear_standalone_document(document_id: str, request: Request, reason: str = ""):
-    require_local_access(request)
+    await _require_ops_api_access(request)
     db: Db = request.app.state.db
     docuseal = request.app.state.docuseal
     return await _clear_standalone_document(
@@ -1381,7 +1392,7 @@ async def ops_update_document_email(
     new_email: str = "",
     resend_email: bool = True,
 ):
-    require_local_access(request)
+    await _require_ops_api_access(request)
     db: Db = request.app.state.db
     docuseal = request.app.state.docuseal
     return await _update_case_document_signer_email(
@@ -1402,7 +1413,7 @@ async def ops_update_standalone_document_email(
     new_email: str = "",
     resend_email: bool = True,
 ):
-    require_local_access(request)
+    await _require_ops_api_access(request)
     db: Db = request.app.state.db
     docuseal = request.app.state.docuseal
     return await _update_standalone_document_signer_email(
@@ -1417,14 +1428,14 @@ async def ops_update_standalone_document_email(
 
 @router.get("/ops/standalone/{submission_id}/trace")
 async def ops_standalone_trace(submission_id: str, request: Request):
-    require_local_access(request)
+    await _require_ops_api_access(request)
     db: Db = request.app.state.db
     return await _load_standalone_trace(db=db, submission_id=submission_id)
 
 
 @router.post("/ops/cases/{case_id}/resend-signature")
 async def ops_resend_signature(case_id: str, request: Request):
-    require_local_access(request)
+    await _require_ops_api_access(request)
     db: Db = request.app.state.db
 
     docs = await db.fetchall(
@@ -1465,7 +1476,7 @@ async def ops_resend_signature(case_id: str, request: Request):
 
 @router.post("/ops/cases/{case_id}/resubmit")
 async def ops_resubmit(case_id: str, request: Request):
-    require_local_access(request)
+    await _require_ops_api_access(request)
     db: Db = request.app.state.db
     cfg = request.app.state.cfg
 
@@ -1496,7 +1507,7 @@ async def ops_resubmit(case_id: str, request: Request):
 
 @router.post("/ops/grievances/{grievance_ref}/resubmit")
 async def ops_resubmit_by_grievance(grievance_ref: str, doc_type: str, request: Request):
-    require_local_access(request)
+    await _require_ops_api_access(request)
     db: Db = request.app.state.db
     cfg = request.app.state.cfg
 
@@ -1561,7 +1572,7 @@ async def ops_resubmit_by_grievance(grievance_ref: str, doc_type: str, request: 
 
 @router.post("/ops/standalone/{submission_id}/resubmit")
 async def ops_resubmit_standalone(submission_id: str, request: Request):
-    require_local_access(request)
+    await _require_ops_api_access(request)
     db: Db = request.app.state.db
     cfg = request.app.state.cfg
 
