@@ -136,6 +136,8 @@ officer_auth:
       - Utility
 external_steward_auth:
   enabled: false
+  tenant_id: ""
+  reuse_officer_auth_app: true
   authority: ""
   discovery_url: ""
   client_id: ""

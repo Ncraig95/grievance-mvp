@@ -27,6 +27,8 @@ What it does not do:
   Installs the Power Platform PowerShell modules and checks for `pac`.
 - `New-GrievancePayloadTemplate.ps1`
   Generates a starter JSON payload for a selected form key.
+- `New-TrueIntentBriefPowerAutomatePack.ps1`
+  Generates the True Intent Brief Forms question map, HTTP body template, and flow runbook.
 - `Invoke-GrievanceApiSmokeTest.ps1`
   Posts a payload JSON file to the repo API endpoint for smoke testing.
 - `Import-GrievanceFlowSolution.ps1`
@@ -35,6 +37,10 @@ What it does not do:
   Builds a local markdown guide from the catalog and optional local config.
 - `Setup-EntraOfficerGroups.ps1`
   Creates the Entra officer/admin/chief steward groups and seeds the current members from this folder.
+- `Setup-B2BStewardGuests.ps1`
+  Invites outside stewards as B2B guest users in the current Entra tenant and prints the next app-side steps.
+- `Setup-ExternalStewardAuth.ps1`
+  Creates or reuses the free multitenant Microsoft sign-in app used by the external steward portal and prints the `external_steward_auth` config block.
 - `FORM_SETUP_GUIDE.md`
   Human-readable checklist for each supported form.
 
@@ -65,6 +71,12 @@ Generate a payload skeleton for the mobility record:
   -FormKey mobility_record_of_grievance `
   -OutputPath .\output\mobility_record_of_grievance.payload.json `
   -Overwrite
+```
+
+Generate the True Intent Brief Forms + flow pack:
+
+```powershell
+.\New-TrueIntentBriefPowerAutomatePack.ps1 -Overwrite
 ```
 
 Dry-run an API smoke test without submitting:
@@ -100,4 +112,11 @@ Create the Entra groups used by `/officers` sign-in:
 
 ```powershell
 .\Setup-EntraOfficerGroups.ps1
+```
+
+Create the free Microsoft sign-in app for external stewards:
+
+```powershell
+.\Setup-ExternalStewardAuth.ps1 `
+  -TenantId 46216f1a-070c-4b4f-8aa7-7178fce8c32c
 ```

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import secrets
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -33,14 +32,11 @@ _ROLE_OFFICER = "officer"
 _ROLE_CHIEF_STEWARD = "chief_steward"
 _ROLE_ADMIN = "admin"
 _ROLE_EXTERNAL_STEWARD = "external_steward"
-_EXTERNAL_AUTH_SOURCE = "external_oidc"
+_EXTERNAL_AUTH_SOURCE = "microsoft_oidc"
 _EXTERNAL_STEWARD_STATUS_ACTIVE = "active"
 _EXTERNAL_STEWARD_STATUS_DISABLED = "disabled"
 
 _EXTERNAL_OIDC_TIMEOUT_SECONDS = 15
-_external_oidc_metadata_cache: dict[str, dict[str, Any]] = {}
-
-
 @dataclass(frozen=True)
 class OfficerUserContext:
     user_id: str | None
@@ -144,6 +140,51 @@ def _auth_host_from_redirect_uri(redirect_uri: str) -> str | None:
     return host or None
 
 
+def _external_steward_tenant_id(cfg: AppConfig) -> str:
+    tenant_id = str(cfg.external_steward_auth.tenant_id or "").strip()
+    if tenant_id:
+        return tenant_id
+    if cfg.external_steward_auth.reuse_officer_auth_app:
+        return str(cfg.officer_auth.tenant_id or "").strip()
+    return ""
+
+
+def _external_steward_client_id(cfg: AppConfig) -> str:
+    client_id = str(cfg.external_steward_auth.client_id or "").strip()
+    if client_id:
+        return client_id
+    if cfg.external_steward_auth.reuse_officer_auth_app:
+        return str(cfg.officer_auth.client_id or "").strip()
+    return ""
+
+
+def _external_steward_client_secret(cfg: AppConfig) -> str:
+    client_secret = str(cfg.external_steward_auth.client_secret or "").strip()
+    if client_secret:
+        return client_secret
+    if cfg.external_steward_auth.reuse_officer_auth_app:
+        return str(cfg.officer_auth.client_secret or "").strip()
+    return ""
+
+
+def _external_steward_redirect_uri(cfg: AppConfig) -> str:
+    redirect_uri = str(cfg.external_steward_auth.redirect_uri or "").strip()
+    if redirect_uri:
+        return redirect_uri
+    if cfg.external_steward_auth.reuse_officer_auth_app:
+        return str(cfg.officer_auth.redirect_uri or "").strip()
+    return ""
+
+
+def _external_steward_post_logout_redirect_uri(cfg: AppConfig) -> str:
+    redirect_uri = str(cfg.external_steward_auth.post_logout_redirect_uri or "").strip()
+    if redirect_uri:
+        return redirect_uri
+    if cfg.external_steward_auth.reuse_officer_auth_app:
+        return str(cfg.officer_auth.post_logout_redirect_uri or "").strip()
+    return ""
+
+
 def _request_host(request: Request) -> str | None:
     headers = getattr(request, "headers", None)
     if headers is not None:
@@ -158,16 +199,6 @@ def _request_host(request: Request) -> str | None:
     return host or None
 
 
-def _default_external_discovery_url(cfg: AppConfig) -> str:
-    configured = str(cfg.external_steward_auth.discovery_url or "").strip()
-    if configured:
-        return configured
-    authority = str(cfg.external_steward_auth.authority or "").strip().rstrip("/")
-    if not authority:
-        raise HTTPException(status_code=503, detail="external steward discovery configuration is missing")
-    return f"{authority}/.well-known/openid-configuration"
-
-
 def _http_json(method: str, url: str, *, data: dict[str, object] | None = None, headers: dict[str, str] | None = None) -> dict[str, Any]:
     response = requests.request(
         method=method,
@@ -180,19 +211,6 @@ def _http_json(method: str, url: str, *, data: dict[str, object] | None = None, 
         raise RuntimeError(f"{response.status_code} {response.text[:500]}")
     payload = response.json()
     return payload if isinstance(payload, dict) else {}
-
-
-async def _external_oidc_metadata(cfg: AppConfig) -> dict[str, Any]:
-    discovery_url = _default_external_discovery_url(cfg)
-    cached = _external_oidc_metadata_cache.get(discovery_url)
-    if isinstance(cached, dict) and cached:
-        return cached
-    try:
-        metadata = await asyncio.to_thread(_http_json, "GET", discovery_url)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=f"external steward discovery failed: {exc}") from exc
-    _external_oidc_metadata_cache[discovery_url] = metadata
-    return metadata
 
 
 def _decode_jwt_claims_unverified(token: str) -> dict[str, Any]:
@@ -807,6 +825,16 @@ def _build_msal_client(cfg: AppConfig) -> msal.ConfidentialClientApplication:
     )
 
 
+def _build_external_steward_msal_client(cfg: AppConfig) -> msal.ConfidentialClientApplication:
+    tenant_id = _external_steward_tenant_id(cfg)
+    authority = f"https://login.microsoftonline.com/{tenant_id}"
+    return msal.ConfidentialClientApplication(
+        client_id=_external_steward_client_id(cfg),
+        authority=authority,
+        client_credential=_external_steward_client_secret(cfg),
+    )
+
+
 @router.get("/auth/login")
 async def officer_login(request: Request, next: str | None = None):
     cfg: AppConfig = request.app.state.cfg
@@ -840,6 +868,16 @@ async def officer_login(request: Request, next: str | None = None):
 @router.get("/auth/callback")
 async def officer_callback(request: Request):
     cfg: AppConfig = request.app.state.cfg
+    external_flow = _session(request).get(_EXTERNAL_SESSION_FLOW_KEY)
+    callback_state = str(request.query_params.get("state") or "").strip()
+    if (
+        external_steward_auth_enabled(cfg)
+        and isinstance(external_flow, dict)
+        and str(external_flow.get("state") or "").strip()
+        and str(external_flow.get("state") or "").strip() == callback_state
+    ):
+        return await _complete_external_steward_callback(request)
+
     if not officer_auth_enabled(cfg):
         raise HTTPException(status_code=503, detail="officer auth is disabled")
 
@@ -882,8 +920,9 @@ async def external_steward_login(request: Request, next: str | None = None):
     if existing:
         return RedirectResponse(url=next_path, status_code=303)
 
-    auth_origin = _auth_origin_from_redirect_uri(cfg.external_steward_auth.redirect_uri)
-    auth_host = _auth_host_from_redirect_uri(cfg.external_steward_auth.redirect_uri)
+    redirect_uri = _external_steward_redirect_uri(cfg)
+    auth_origin = _auth_origin_from_redirect_uri(redirect_uri)
+    auth_host = _auth_host_from_redirect_uri(redirect_uri)
     request_host = _request_host(request)
     if auth_origin and auth_host and request_host and auth_host != request_host:
         return RedirectResponse(
@@ -891,29 +930,19 @@ async def external_steward_login(request: Request, next: str | None = None):
             status_code=303,
         )
 
-    metadata = await _external_oidc_metadata(cfg)
-    authorization_endpoint = str(metadata.get("authorization_endpoint") or "").strip()
-    if not authorization_endpoint:
-        raise HTTPException(status_code=503, detail="external steward authorization endpoint is unavailable")
-
-    state = secrets.token_urlsafe(24)
-    nonce = secrets.token_urlsafe(24)
+    flow = _build_external_steward_msal_client(cfg).initiate_auth_code_flow(scopes=[], redirect_uri=redirect_uri)
     session = _session(request)
-    session[_EXTERNAL_SESSION_FLOW_KEY] = {"state": state, "nonce": nonce}
+    session[_EXTERNAL_SESSION_FLOW_KEY] = flow
     session[_EXTERNAL_SESSION_NEXT_KEY] = next_path
-    params = {
-        "client_id": cfg.external_steward_auth.client_id,
-        "response_type": "code",
-        "redirect_uri": cfg.external_steward_auth.redirect_uri,
-        "scope": "openid profile email",
-        "state": state,
-        "nonce": nonce,
-    }
-    return RedirectResponse(url=f"{authorization_endpoint}?{urlencode(params)}", status_code=302)
+    return RedirectResponse(url=str(flow["auth_uri"]), status_code=302)
 
 
 @router.get("/auth/steward/callback")
 async def external_steward_callback(request: Request):
+    return await _complete_external_steward_callback(request)
+
+
+async def _complete_external_steward_callback(request: Request):
     cfg: AppConfig = request.app.state.cfg
     if not external_steward_auth_enabled(cfg):
         raise HTTPException(status_code=503, detail="external steward auth is disabled")
@@ -921,69 +950,39 @@ async def external_steward_callback(request: Request):
     session = _session(request)
     flow = session.get(_EXTERNAL_SESSION_FLOW_KEY)
     if not isinstance(flow, dict):
-        raise HTTPException(status_code=400, detail="missing external steward auth flow in session")
-
-    expected_state = str(flow.get("state") or "").strip()
-    state = str(request.query_params.get("state") or "").strip()
-    code = str(request.query_params.get("code") or "").strip()
-    if not expected_state or expected_state != state or not code:
-        session.pop(_EXTERNAL_SESSION_FLOW_KEY, None)
-        raise HTTPException(status_code=400, detail="invalid external steward auth callback")
-
-    metadata = await _external_oidc_metadata(cfg)
-    token_endpoint = str(metadata.get("token_endpoint") or "").strip()
-    if not token_endpoint:
-        session.pop(_EXTERNAL_SESSION_FLOW_KEY, None)
-        raise HTTPException(status_code=503, detail="external steward token endpoint is unavailable")
+        session.pop(_EXTERNAL_SESSION_NEXT_KEY, None)
+        return _external_login_redirect("/steward")
 
     try:
-        token_result = await asyncio.to_thread(
-            _http_json,
-            "POST",
-            token_endpoint,
-            data={
-                "grant_type": "authorization_code",
-                "client_id": cfg.external_steward_auth.client_id,
-                "client_secret": cfg.external_steward_auth.client_secret,
-                "code": code,
-                "redirect_uri": cfg.external_steward_auth.redirect_uri,
-            },
-            headers={"Accept": "application/json"},
+        token_result = _build_external_steward_msal_client(cfg).acquire_token_by_auth_code_flow(
+            flow,
+            dict(request.query_params),
         )
-    except RuntimeError as exc:
-        session.pop(_EXTERNAL_SESSION_FLOW_KEY, None)
-        raise HTTPException(status_code=401, detail=f"external steward token exchange failed: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid external steward auth callback: {exc}") from exc
     finally:
         session.pop(_EXTERNAL_SESSION_FLOW_KEY, None)
 
-    id_token = str(token_result.get("id_token") or "").strip()
-    access_token = str(token_result.get("access_token") or "").strip()
-    id_claims = _decode_jwt_claims_unverified(id_token)
-    if flow.get("nonce") and str(id_claims.get("nonce") or "").strip() != str(flow.get("nonce") or "").strip():
-        raise HTTPException(status_code=401, detail="external steward login nonce mismatch")
+    if not isinstance(token_result, dict):
+        raise HTTPException(status_code=401, detail="external steward callback returned an invalid token response")
+    if token_result.get("error"):
+        description = str(token_result.get("error_description") or token_result.get("error") or "login failed").strip()
+        raise HTTPException(status_code=401, detail=description)
 
-    userinfo_claims: dict[str, Any] = {}
-    userinfo_endpoint = str(metadata.get("userinfo_endpoint") or "").strip()
-    if userinfo_endpoint and access_token:
-        try:
-            userinfo_claims = await asyncio.to_thread(
-                _http_json,
-                "GET",
-                userinfo_endpoint,
-                headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
-            )
-        except RuntimeError:
-            userinfo_claims = {}
+    id_claims = token_result.get("id_token_claims")
+    if not isinstance(id_claims, dict):
+        id_token = str(token_result.get("id_token") or "").strip()
+        id_claims = _decode_jwt_claims_unverified(id_token)
+    if not isinstance(id_claims, dict):
+        raise HTTPException(status_code=401, detail="missing id_token_claims in external steward response")
 
-    issuer = str(userinfo_claims.get("iss") or id_claims.get("iss") or metadata.get("issuer") or "").strip()
-    provider_subject = str(userinfo_claims.get("sub") or id_claims.get("sub") or "").strip()
-    verified_email = _external_email_verified(userinfo_claims, id_claims)
-    email = _external_email_from_claims(userinfo_claims, id_claims)
-    display_name = _external_display_name_from_claims(userinfo_claims, id_claims)
+    issuer = str(id_claims.get("iss") or "").strip()
+    provider_subject = str(id_claims.get("oid") or id_claims.get("sub") or "").strip()
+    email = _external_email_from_claims(id_claims)
+    display_name = _external_display_name_from_claims(id_claims)
+    verified_email = bool(email)
     if not issuer or not provider_subject:
         raise HTTPException(status_code=401, detail="external steward identity response is missing issuer or subject")
-    if not verified_email:
-        raise HTTPException(status_code=403, detail="external steward login requires a verified email claim")
     if not email:
         raise HTTPException(status_code=403, detail="external steward login is missing a usable email")
 
@@ -994,9 +993,9 @@ async def external_steward_callback(request: Request):
         issuer=issuer,
         provider_subject=provider_subject,
     )
-    exp = int(id_claims.get("exp") or 0)
+    exp = int(id_claims.get("exp") or token_result.get("expires_on") or 0)
     if exp <= int(time.time()):
-        exp = int(time.time()) + max(int(token_result.get("expires_in") or 3600), 300)
+        exp = int(time.time()) + 3600
     session[_EXTERNAL_SESSION_USER_KEY] = _external_session_user_payload(user, exp=exp)
     next_path = _sanitize_next_path(session.pop(_EXTERNAL_SESSION_NEXT_KEY, None), default="/steward")
     return RedirectResponse(url=next_path, status_code=303)
@@ -1011,14 +1010,11 @@ async def officer_logout(request: Request):
     session.clear()
 
     if had_external_session and external_steward_auth_enabled(cfg):
-        metadata = await _external_oidc_metadata(cfg)
-        end_session_endpoint = str(metadata.get("end_session_endpoint") or "").strip()
-        if end_session_endpoint:
-            query = urlencode(
-                {"post_logout_redirect_uri": cfg.external_steward_auth.post_logout_redirect_uri}
-            )
-            return RedirectResponse(url=f"{end_session_endpoint}?{query}", status_code=303)
-        return RedirectResponse(url=cfg.external_steward_auth.post_logout_redirect_uri or "/", status_code=303)
+        query = urlencode({"post_logout_redirect_uri": _external_steward_post_logout_redirect_uri(cfg)})
+        logout_url = (
+            f"https://login.microsoftonline.com/{_external_steward_tenant_id(cfg)}/oauth2/v2.0/logout?{query}"
+        )
+        return RedirectResponse(url=logout_url, status_code=303)
 
     if had_staff_session and officer_auth_enabled(cfg):
         query = urlencode({"post_logout_redirect_uri": cfg.officer_auth.post_logout_redirect_uri})

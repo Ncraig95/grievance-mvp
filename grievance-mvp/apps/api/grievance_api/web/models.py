@@ -225,6 +225,7 @@ class OfficerViewerContext(BaseModel):
     can_bulk_delete: bool
     can_view_audit: bool
     can_manage_chief_assignments: bool = False
+    can_view_ops: bool = False
 
 
 class OfficerCaseListResponse(BaseModel):

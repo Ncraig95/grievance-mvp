@@ -178,6 +178,8 @@ class OfficerAuthConfig:
 @dataclass(frozen=True)
 class ExternalStewardAuthConfig:
     enabled: bool = False
+    tenant_id: str = ""
+    reuse_officer_auth_app: bool = True
     authority: str = ""
     discovery_url: str = ""
     client_id: str = ""
@@ -800,6 +802,11 @@ def load_config(path: str) -> AppConfig:
         ),
         external_steward_auth=ExternalStewardAuthConfig(
             enabled=_as_bool(external_steward_auth_raw.get("enabled"), False),
+            tenant_id=str(external_steward_auth_raw.get("tenant_id", "")).strip(),
+            reuse_officer_auth_app=_as_bool(
+                external_steward_auth_raw.get("reuse_officer_auth_app"),
+                True,
+            ),
             authority=str(external_steward_auth_raw.get("authority", "")).strip(),
             discovery_url=str(external_steward_auth_raw.get("discovery_url", "")).strip(),
             client_id=str(external_steward_auth_raw.get("client_id", "")).strip(),

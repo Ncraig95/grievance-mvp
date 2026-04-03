@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from html import escape
 
 import aiosqlite
 from fastapi import APIRouter, HTTPException, Request
@@ -195,6 +196,7 @@ def _build_viewer_model(user: OfficerUserContext) -> OfficerViewerContext:
         can_bulk_delete=user.can_bulk_delete,
         can_view_audit=user.can_view_audit,
         can_manage_chief_assignments=user.can_manage_chief_assignments,
+        can_view_ops=(user.role == "admin" or not user.auth_enabled),
     )
 
 
@@ -643,6 +645,37 @@ def _directory_match_score(row: DirectoryUserRow, *, query: str) -> int:
     return 0
 
 
+def _directory_row_aliases(row: DirectoryUserRow) -> list[str]:
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for prefix, value in (
+        ("email", row.email),
+        ("upn", row.user_principal_name),
+        ("principal", row.principal_id),
+    ):
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            continue
+        alias = f"{prefix}:{normalized}"
+        if alias in seen:
+            continue
+        seen.add(alias)
+        aliases.append(alias)
+    return aliases
+
+
+def _merge_directory_row(existing: DirectoryUserRow, incoming: DirectoryUserRow) -> DirectoryUserRow:
+    return DirectoryUserRow(
+        principal_id=existing.principal_id or incoming.principal_id,
+        display_name=existing.display_name or incoming.display_name,
+        email=existing.email or incoming.email,
+        user_principal_name=existing.user_principal_name or incoming.user_principal_name,
+        match_source="directory"
+        if existing.match_source == "directory" or incoming.match_source == "directory"
+        else "local",
+    )
+
+
 def _merge_directory_user_rows(
     primary_rows: list[DirectoryUserRow],
     secondary_rows: list[DirectoryUserRow],
@@ -651,26 +684,38 @@ def _merge_directory_user_rows(
     limit: int,
 ) -> list[DirectoryUserRow]:
     merged: dict[str, DirectoryUserRow] = {}
+    alias_map: dict[str, str] = {}
 
     def _merge_row(row: DirectoryUserRow) -> None:
-        key = (
-            str(row.principal_id or "").strip().lower()
-            or str(row.email or "").strip().lower()
-            or str(row.user_principal_name or "").strip().lower()
-        )
-        if not key:
+        aliases = _directory_row_aliases(row)
+        if not aliases:
             return
-        existing = merged.get(key)
-        if existing is None:
-            merged[key] = row
+
+        matched_keys = [alias_map[alias] for alias in aliases if alias in alias_map]
+        if not matched_keys:
+            canonical_key = aliases[0]
+            merged[canonical_key] = row
+            for alias in aliases:
+                alias_map[alias] = canonical_key
             return
-        merged[key] = DirectoryUserRow(
-            principal_id=existing.principal_id or row.principal_id,
-            display_name=existing.display_name or row.display_name,
-            email=existing.email or row.email,
-            user_principal_name=existing.user_principal_name or row.user_principal_name,
-            match_source=existing.match_source if existing.match_source == "directory" else row.match_source,
-        )
+
+        canonical_key = matched_keys[0]
+        combined = merged.get(canonical_key, row)
+
+        for other_key in matched_keys[1:]:
+            if other_key == canonical_key:
+                continue
+            other_row = merged.pop(other_key, None)
+            if other_row is not None:
+                combined = _merge_directory_row(combined, other_row)
+                for alias, mapped_key in list(alias_map.items()):
+                    if mapped_key == other_key:
+                        alias_map[alias] = canonical_key
+
+        combined = _merge_directory_row(combined, row)
+        merged[canonical_key] = combined
+        for alias in aliases:
+            alias_map[alias] = canonical_key
 
     for row in primary_rows:
         _merge_row(row)
@@ -873,6 +918,128 @@ def _render_officers_page(user: OfficerUserContext) -> str:
     show_actions = user.can_edit or user.can_delete or user.can_view_audit
     show_bulk_panel = user.can_bulk_edit or user.can_bulk_delete
     show_mutation_split = user.can_create or user.can_edit
+    edit_contract_disabled_attr = "" if user.can_delete else "disabled"
+    role_labels = {
+        "admin": "Admin",
+        "chief_steward": "Chief Steward",
+        "officer": "Officer",
+        "read_only": "Read Only",
+    }
+    viewer_name = str(user.display_name or user.email or "Unknown").strip() or "Unknown"
+    viewer_role_label = role_labels.get(user.role, "Read Only")
+    if user.role == "admin":
+        hero_summary = "Run triage, assignments, manual entries, and contract-level follow-up from one workspace."
+    elif user.role == "chief_steward":
+        hero_summary = "Review in-scope grievances quickly, update tracking dates, and keep escalation work moving."
+    elif user.role == "officer":
+        hero_summary = "Work the active tracker, keep statuses current, and manage paper entries without leaving the table."
+    else:
+        hero_summary = "Review grievance activity in a read-only tracker view."
+    if user.contract_scopes:
+        scope_pills = "".join(
+            f'<span class="scope-pill">{escape(str(scope).replace("_", " ").title())}</span>'
+            for scope in user.contract_scopes
+        )
+    elif user.role == "admin":
+        scope_pills = '<span class="scope-pill scope-pill-muted">All configured scopes</span>'
+    elif user.auth_enabled:
+        scope_pills = '<span class="scope-pill scope-pill-muted">All contract scopes</span>'
+    else:
+        scope_pills = '<span class="scope-pill scope-pill-muted">Local read-only mode</span>'
+    hero_links = [
+        '<a class="link-chip" href="#filtersPanel">Filters</a>',
+        '<a class="link-chip" href="#trackerPanel">Tracker</a>',
+    ]
+    if show_mutation_split:
+        hero_links.append('<a class="link-chip" href="#mutationSplit">Edit Workspace</a>')
+    if user.can_manage_chief_assignments:
+        hero_links.append('<a class="link-chip" href="#chiefAssignmentPanel">Assignments</a>')
+    hero_links_html = "".join(hero_links)
+
+    def _menu_link(label: str, href: str, description: str, *, external: bool = False) -> str:
+        attrs = [f'title="{escape(description, quote=True)}"']
+        if external:
+            attrs.append('data-nav-kind="external"')
+        rendered_attrs = " " + " ".join(attrs) if attrs else ""
+        return (
+            f'<a class="menu-link{" menu-link-external" if external else ""}" href="{escape(href, quote=True)}"{rendered_attrs}>'
+            f'<span class="menu-link-label">{escape(label)}</span>'
+            "</a>"
+        )
+
+    review_links = [
+        _menu_link("Filters", "#filtersPanel", "Search, scope, assignee, status, and source filters."),
+        _menu_link("Tracker", "#trackerPanel", "Jump straight to the live grievance table."),
+        _menu_link("Response Log", "#responsePanel", "See the latest API response and debug payload."),
+    ]
+    work_links: list[str] = []
+    if show_bulk_panel:
+        work_links.append(_menu_link("Bulk Update", "#bulkPanel", "Apply status, dates, assignee, or notes to checked rows."))
+    if show_mutation_split:
+        work_links.append(_menu_link("Edit Workspace", "#mutationSplit", "Create paper entries and edit the selected case."))
+    admin_links: list[str] = []
+    if user.can_manage_chief_assignments:
+        admin_links.extend(
+            [
+                _menu_link(
+                    "Chief Stewards",
+                    "#chiefAssignmentPanel",
+                    "Manage contract-scoped chief steward assignments.",
+                ),
+                _menu_link(
+                    "External Stewards",
+                    "#externalStewardPanel",
+                    "Allowlist outside stewards and review their status.",
+                ),
+                _menu_link(
+                    "Case Assignments",
+                    "#caseExternalAssignmentPanel",
+                    "Assign external stewards to the selected grievance.",
+                ),
+            ]
+        )
+    system_links: list[str] = []
+    if user.role == "admin" or not user.auth_enabled:
+        system_links.append(_menu_link("Ops Console", "/ops", "Open the signature and submission operations queue.", external=True))
+    menu_groups = []
+    if review_links:
+        menu_groups.append(
+            '<div class="menu-group"><div class="menu-group-title">Review</div><div class="menu-link-list">'
+            + "".join(review_links)
+            + "</div></div>"
+        )
+    if work_links:
+        menu_groups.append(
+            '<div class="menu-group"><div class="menu-group-title">Work</div><div class="menu-link-list">'
+            + "".join(work_links)
+            + "</div></div>"
+        )
+    if admin_links:
+        menu_groups.append(
+            '<div class="menu-group"><div class="menu-group-title">Admin</div><div class="menu-link-list">'
+            + "".join(admin_links)
+            + "</div></div>"
+        )
+    if system_links:
+        menu_groups.append(
+            '<div class="menu-group"><div class="menu-group-title">System</div><div class="menu-link-list">'
+            + "".join(system_links)
+            + "</div></div>"
+        )
+    workspace_menu_panel = (
+        """
+  <div class="panel workspace-menu-panel" id="workspaceMenuPanel">
+    <div class="workspace-menu-bar">
+      <div class="workspace-menu-title">Quick Nav</div>
+      <div class="menu-grid">
+"""
+        + "".join(menu_groups)
+        + """
+      </div>
+    </div>
+  </div>
+"""
+    )
     status_options = """
           <option value="open">Open</option>
           <option value="in_progress">In Progress</option>
@@ -1105,7 +1272,7 @@ def _render_officers_page(user: OfficerUserContext) -> str:
         f"""
   <div class="split" id="mutationSplit">
     {
-      '''
+      f'''
     <div class="panel">
       <h2>Manual Paper Entry</h2>
       <div class="grid">
@@ -1173,11 +1340,13 @@ def _render_officers_page(user: OfficerUserContext) -> str:
     }
 
     {
-      '''
+      f'''
     <div class="panel">
       <h2>Edit Selected Case</h2>
       <div id="editHint" class="summary">Select a table row to edit.</div>
       <input id="editCaseId" type="hidden" />
+      <input id="editOriginalGrievanceNumber" type="hidden" />
+      <input id="editOriginalDisplayGrievance" type="hidden" />
       <div class="grid">
         <label>Case ID
           <input id="editCaseIdDisplay" disabled />
@@ -1198,7 +1367,7 @@ def _render_officers_page(user: OfficerUserContext) -> str:
           <input id="editMemberEmail" />
         </label>
         <label>Contract / Scope
-          <input id="editContract" ''' + ('' if user.can_delete else 'disabled') + ''' />
+          <input id="editContract" {edit_contract_disabled_attr} />
         </label>
         <label>Department
           <input id="editDepartment" />
@@ -1271,24 +1440,222 @@ def _render_officers_page(user: OfficerUserContext) -> str:
     }}
     body {{
       font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
-      margin: 20px;
+      margin: 0;
+      padding: 24px;
       color: var(--sheet-text);
-      background: linear-gradient(180deg, #ffffff 0%, #f4f7f9 100%);
+      background:
+        radial-gradient(circle at top left, rgba(149, 207, 70, 0.16), transparent 22%),
+        radial-gradient(circle at top right, rgba(79, 129, 189, 0.14), transparent 20%),
+        linear-gradient(180deg, #f8fbfd 0%, #eef3f7 100%);
     }}
     h1, h2 {{ margin: 0 0 12px; }}
+    .page-shell {{
+      max-width: 1760px;
+      margin: 0 auto;
+    }}
+    .panel[id] {{
+      scroll-margin-top: 110px;
+    }}
     .panel {{
       background: rgba(255, 255, 255, 0.94);
       border: 1px solid #dde4ea;
-      border-radius: 12px;
-      padding: 16px;
+      border-radius: 16px;
+      padding: 18px;
       margin-bottom: 16px;
-      box-shadow: 0 10px 25px rgba(15, 23, 42, 0.05);
+      box-shadow: 0 18px 40px rgba(15, 23, 42, 0.06);
+      backdrop-filter: blur(8px);
+    }}
+    .hero-panel {{
+      display: grid;
+      grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.9fr);
+      gap: 18px;
+      padding: 24px;
+      background:
+        linear-gradient(135deg, rgba(255,255,255,0.96) 0%, rgba(248, 252, 255, 0.96) 54%, rgba(231, 244, 252, 0.98) 100%);
+    }}
+    .eyebrow {{
+      margin-bottom: 10px;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #516574;
+    }}
+    .hero-panel h1 {{
+      font-size: clamp(30px, 4vw, 42px);
+      line-height: 1.04;
+      letter-spacing: -0.03em;
+      margin-bottom: 10px;
+    }}
+    .hero-subtitle {{
+      margin: 0;
+      max-width: 64ch;
+      font-size: 15px;
+      line-height: 1.6;
+      color: #435565;
+    }}
+    .hero-meta {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+      align-items: center;
+    }}
+    .role-pill,
+    .scope-pill,
+    .link-chip {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1;
+    }}
+    .role-pill {{
+      background: linear-gradient(180deg, #153a5d 0%, #1f4d7a 100%);
+      color: white;
+      box-shadow: 0 12px 24px rgba(31, 77, 122, 0.24);
+    }}
+    .hero-user {{
+      font-size: 14px;
+      font-weight: 600;
+      color: #203040;
+    }}
+    .scope-pills,
+    .hero-links {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+    }}
+    .scope-pill {{
+      background: #edf4f8;
+      color: #345062;
+      border: 1px solid #d5e1ea;
+    }}
+    .scope-pill-muted {{
+      background: #f4f7f9;
+      color: #5a6d7e;
+    }}
+    .hero-tools {{
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 16px;
+      border-radius: 14px;
+      padding: 16px;
+      background: linear-gradient(180deg, #f7fbff 0%, #ecf4fb 100%);
+      border: 1px solid #d8e5f0;
+    }}
+    .hero-tools h2 {{
+      margin-bottom: 8px;
+    }}
+    .hero-tools .summary {{
+      margin-top: 0;
+    }}
+    .link-chip {{
+      color: #163a5b;
+      text-decoration: none;
+      border: 1px solid #c9d8e6;
+      background: rgba(255, 255, 255, 0.88);
+    }}
+    .link-chip:hover {{
+      background: white;
     }}
     .user-panel {{
       display: flex;
       justify-content: space-between;
       align-items: center;
       gap: 12px;
+    }}
+    .section-header {{
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 14px;
+      margin-bottom: 14px;
+    }}
+    .section-header .summary {{
+      margin-top: 6px;
+    }}
+    .section-actions {{
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }}
+    .workspace-menu-panel {{
+      position: sticky;
+      top: 14px;
+      z-index: 9;
+      padding: 12px 16px;
+    }}
+    .workspace-menu-bar {{
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      flex-wrap: wrap;
+    }}
+    .workspace-menu-title {{
+      flex: 0 0 auto;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #576a7a;
+    }}
+    .menu-grid {{
+      flex: 1 1 0;
+      display: flex;
+      align-items: center;
+      gap: 14px 18px;
+      flex-wrap: wrap;
+    }}
+    .menu-group {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: auto;
+    }}
+    .menu-group-title {{
+      margin: 0;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #5d7080;
+    }}
+    .menu-link-list {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }}
+    .menu-link {{
+      display: inline-flex;
+      align-items: center;
+      gap: 0;
+      border-radius: 999px;
+      padding: 10px 14px;
+      text-decoration: none;
+      color: #17334f;
+      border: 1px solid #d8e2eb;
+      background: rgba(255, 255, 255, 0.92);
+      transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+    }}
+    .menu-link:hover {{
+      transform: translateY(-1px);
+      border-color: #c0d3e2;
+      box-shadow: 0 10px 22px rgba(15, 23, 42, 0.08);
+    }}
+    .menu-link-external {{
+      background: linear-gradient(180deg, #f3f8fd 0%, #ebf3fa 100%);
+    }}
+    .menu-link-label {{
+      font-size: 13px;
+      font-weight: 800;
+      color: #163a5b;
     }}
     .strong {{
       font-weight: 700;
@@ -1349,16 +1716,99 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       font-size: 13px;
       color: #4a5a68;
     }}
+    .metric-grid {{
+      display: grid;
+      grid-template-columns: repeat(5, minmax(150px, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }}
+    .metric-card {{
+      padding: 14px 16px;
+      border-radius: 14px;
+      border: 1px solid #d9e3ec;
+      background: linear-gradient(180deg, #ffffff 0%, #f5f8fb 100%);
+      min-height: 104px;
+    }}
+    .metric-label {{
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #5d7080;
+    }}
+    .metric-value {{
+      margin-top: 8px;
+      font-size: 32px;
+      font-weight: 800;
+      line-height: 1;
+      color: #12212f;
+    }}
+    .metric-note {{
+      margin-top: 8px;
+      font-size: 13px;
+      color: #5b6b78;
+      line-height: 1.45;
+    }}
     .table-wrap {{
       overflow-x: auto;
       border-radius: 12px;
       border: 1px solid var(--sheet-border);
       background: white;
+      scrollbar-gutter: stable both-edges;
+    }}
+    .tracker-table-wrap {{
+      position: relative;
+      max-height: 70vh;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }}
+    .scrollbar-dock {{
+      position: sticky;
+      bottom: 0;
+      z-index: 7;
+      display: none;
+      align-items: center;
+      gap: 12px;
+      margin-top: 8px;
+      padding: 8px 12px;
+      border: 1px solid var(--sheet-border);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: 0 -8px 24px rgba(15, 23, 42, 0.08);
+    }}
+    .scrollbar-hint {{
+      flex: 0 0 auto;
+      font-size: 12px;
+      font-weight: 700;
+      color: #52606d;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }}
+    .table-scrollbar {{
+      flex: 1 1 auto;
+      overflow-x: auto;
+      overflow-y: hidden;
+      height: 16px;
+      border-radius: 999px;
+      background: linear-gradient(180deg, #dbe5ef 0%, #c7d4e3 100%);
+    }}
+    .table-scrollbar > div {{
+      height: 1px;
     }}
     table {{
       width: 100%;
       border-collapse: collapse;
       min-width: 1600px;
+    }}
+    #trackerTable thead th {{
+      position: sticky;
+      top: 0;
+      z-index: 4;
+      box-shadow: inset 0 -1px 0 var(--sheet-border);
+    }}
+    #trackerTable thead th.select-col,
+    #trackerTable thead th.actions-col {{
+      z-index: 6;
     }}
     th, td {{
       border: 1px solid var(--sheet-border);
@@ -1437,25 +1887,69 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       border-radius: 12px;
       padding: 12px;
       overflow: auto;
-      max-height: 320px;
+      max-height: 220px;
       margin: 0;
     }}
     @media (max-width: 1200px) {{
-      .grid, .grid-wide, .split {{
+      .hero-panel, .grid, .grid-wide, .split, .metric-grid, .menu-grid {{
         grid-template-columns: 1fr;
+      }}
+      .section-header {{
+        flex-direction: column;
+      }}
+      .section-actions {{
+        justify-content: flex-start;
+      }}
+      .workspace-menu-panel {{
+        position: static;
+      }}
+      .workspace-menu-bar,
+      .menu-group {{
+        align-items: flex-start;
       }}
     }}
   </style>
 </head>
 <body>
-  <h1>Officer Grievance Tracker</h1>
+  <div class="page-shell">
+  {workspace_menu_panel}
+  <div class="panel hero-panel">
+    <div>
+      <div class="eyebrow">Officer Workspace</div>
+      <h1>Officer Grievance Tracker</h1>
+      <p class="hero-subtitle">{escape(hero_summary)}</p>
+      <div class="hero-meta">
+        <span class="role-pill">{escape(viewer_role_label)}</span>
+        <span class="hero-user">{escape(viewer_name)}</span>
+      </div>
+      <div class="scope-pills">{scope_pills}</div>
+    </div>
+    <div class="hero-tools">
+      <div>
+        <div class="eyebrow">Quick Jump</div>
+        <h2>Move Fast</h2>
+        <div class="summary">Jump straight to the controls, active tracker, or assignment panels without hunting through the page.</div>
+      </div>
+      <div class="hero-links">{hero_links_html}</div>
+    </div>
+  </div>
   {auth_panel}
   {chief_assignment_panel}
   {external_steward_panel}
   {case_external_assignment_panel}
 
-  <div class="panel">
-    <h2>Filters</h2>
+  <div class="panel" id="filtersPanel">
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">Control Center</div>
+        <h2>Filters</h2>
+        <div class="summary">Slice the tracker by scope, assignee, status, source, or a free-text search across grievance details.</div>
+      </div>
+      <div class="section-actions">
+        <button id="reloadBtn" type="button">Load Tracker</button>
+        <button id="clearFiltersBtn" class="secondary" type="button">Clear Filters</button>
+      </div>
+    </div>
     <div class="grid">
       <label>Search
         <input id="filterSearch" placeholder="Grievance, contract, name, issue..." />
@@ -1487,9 +1981,32 @@ def _render_officers_page(user: OfficerUserContext) -> str:
         </select>
       </label>
     </div>
-    <div class="actions">
-      <button id="reloadBtn" type="button">Load Tracker</button>
-      <button id="clearFiltersBtn" class="secondary" type="button">Clear Filters</button>
+    <div class="metric-grid" id="trackerStats">
+      <div class="metric-card">
+        <div class="metric-label">Visible Cases</div>
+        <div class="metric-value" id="metricTotalValue">0</div>
+        <div class="metric-note" id="metricScopeNote">Load the tracker to see scope coverage.</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Active</div>
+        <div class="metric-value" id="metricActiveValue">0</div>
+        <div class="metric-note">Open, in progress, and waiting cases still on the board.</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Escalated</div>
+        <div class="metric-value" id="metricEscalatedValue">0</div>
+        <div class="metric-note">Cases already moved to state or national level.</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Waiting</div>
+        <div class="metric-value" id="metricWaitingValue">0</div>
+        <div class="metric-note">Cases paused pending the next union or company step.</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Closed</div>
+        <div class="metric-value" id="metricClosedValue">0</div>
+        <div class="metric-note">Completed grievances in the current filtered view.</div>
+      </div>
     </div>
     <div id="tableSummary" class="summary">Tracker not loaded yet.</div>
   </div>
@@ -1497,10 +2014,16 @@ def _render_officers_page(user: OfficerUserContext) -> str:
   {bulk_panel}
   {mutation_split}
 
-  <div class="panel">
-    <h2>Tracker Table</h2>
-    <div class="table-wrap">
-      <table>
+  <div class="panel" id="trackerPanel">
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">Live Results</div>
+        <h2>Tracker Table</h2>
+        <div class="summary">The header stays visible inside this pane. Use the bottom dock to scroll sideways when the table is wider than the screen.</div>
+      </div>
+    </div>
+    <div class="table-wrap tracker-table-wrap">
+      <table id="trackerTable">
         <thead>
           <tr>
             {selection_header}
@@ -1527,11 +2050,18 @@ def _render_officers_page(user: OfficerUserContext) -> str:
         </tbody>
       </table>
     </div>
+    <div class="scrollbar-dock" id="trackerScrollbarDock" aria-hidden="true">
+      <div class="scrollbar-hint">Scroll left / right</div>
+      <div class="table-scrollbar" id="trackerScrollbar">
+        <div id="trackerScrollbarInner"></div>
+      </div>
+    </div>
   </div>
 
-  <div class="panel">
+  <div class="panel" id="responsePanel">
     <h2>Last Response</h2>
     <pre id="out">Ready.</pre>
+  </div>
   </div>
 
   <script>
@@ -1540,6 +2070,17 @@ def _render_officers_page(user: OfficerUserContext) -> str:
     const SHOW_ACTIONS = {str(show_actions).lower()};
     const EMPTY_COLSPAN = 15 + (ENABLE_SELECTION ? 1 : 0) + (SHOW_ACTIONS ? 1 : 0);
     const out = document.getElementById('out');
+    const trackerTable = document.getElementById('trackerTable');
+    const trackerTableWrap = trackerTable ? trackerTable.closest('.table-wrap') : null;
+    const trackerScrollbarDock = document.getElementById('trackerScrollbarDock');
+    const trackerScrollbar = document.getElementById('trackerScrollbar');
+    const trackerScrollbarInner = document.getElementById('trackerScrollbarInner');
+    const metricTotalValue = document.getElementById('metricTotalValue');
+    const metricActiveValue = document.getElementById('metricActiveValue');
+    const metricEscalatedValue = document.getElementById('metricEscalatedValue');
+    const metricWaitingValue = document.getElementById('metricWaitingValue');
+    const metricClosedValue = document.getElementById('metricClosedValue');
+    const metricScopeNote = document.getElementById('metricScopeNote');
     const tableBody = document.getElementById('tableBody');
     const tableSummary = document.getElementById('tableSummary');
     const filterAssignee = document.getElementById('filterAssignee');
@@ -1557,10 +2098,14 @@ def _render_officers_page(user: OfficerUserContext) -> str:
     const caseExternalAssignmentsBody = document.getElementById('caseExternalAssignmentsBody');
     const caseExternalStewardSelect = document.getElementById('caseExternalStewardSelect');
     const caseExternalAssignmentHint = document.getElementById('caseExternalAssignmentHint');
+    const DIRECTORY_SEARCH_MIN_CHARS = 3;
     const currentRows = new Map();
     const selectedCaseIds = new Set();
     let currentRoster = [];
     let currentExternalStewardUsers = [];
+    let directorySearchTimer = null;
+    let directorySearchRequestSeq = 0;
+    let syncingTrackerScroll = false;
 
     function esc(value) {{
       return String(value == null ? '' : value)
@@ -1748,6 +2293,15 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       }}
     }}
 
+    function syncTrackerScrollbarMetrics() {{
+      if (!trackerTableWrap || !trackerScrollbar || !trackerScrollbarInner || !trackerScrollbarDock || !trackerTable) return;
+      const scrollWidth = trackerTable.scrollWidth;
+      const clientWidth = trackerTableWrap.clientWidth;
+      trackerScrollbarInner.style.width = `${{scrollWidth}}px`;
+      trackerScrollbar.scrollLeft = trackerTableWrap.scrollLeft;
+      trackerScrollbarDock.style.display = scrollWidth > clientWidth ? 'flex' : 'none';
+    }}
+
     function clearBulkSelection() {{
       if (!ENABLE_SELECTION) return;
       selectedCaseIds.clear();
@@ -1778,6 +2332,34 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       return '';
     }}
 
+    function updateTrackerMetrics(rows) {{
+      const scopeSet = new Set();
+      let active = 0;
+      let escalated = 0;
+      let waiting = 0;
+      let closed = 0;
+      for (const row of rows) {{
+        if (row.contract_scope) scopeSet.add(String(row.contract_scope));
+        if (row.officer_status === 'closed') {{
+          closed += 1;
+        }} else {{
+          active += 1;
+        }}
+        if (row.officer_status === 'waiting') waiting += 1;
+        if (row.officer_status === 'open_at_state' || row.officer_status === 'open_at_national') escalated += 1;
+      }}
+      if (metricTotalValue) metricTotalValue.textContent = String(rows.length);
+      if (metricActiveValue) metricActiveValue.textContent = String(active);
+      if (metricEscalatedValue) metricEscalatedValue.textContent = String(escalated);
+      if (metricWaitingValue) metricWaitingValue.textContent = String(waiting);
+      if (metricClosedValue) metricClosedValue.textContent = String(closed);
+      if (metricScopeNote) {{
+        metricScopeNote.textContent = rows.length
+          ? `${{scopeSet.size}} scope(s) represented in the current view.`
+          : 'Load the tracker to see scope coverage.';
+      }}
+    }}
+
     function renderRows(rows) {{
       currentRows.clear();
       for (const row of rows) currentRows.set(row.case_id, row);
@@ -1787,8 +2369,12 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       const selectedFilter = valueOf('filterAssignee');
       refreshRosterOptions(rows, selectedFilter);
       updateSelectionUi();
+      updateTrackerMetrics(rows);
 
-      tableSummary.textContent = `${{rows.length}} case(s) loaded.`;
+      const scopeSet = new Set(rows.map((row) => String(row.contract_scope || '').trim()).filter(Boolean));
+      tableSummary.textContent = rows.length
+        ? `${{rows.length}} case(s) loaded across ${{scopeSet.size || 1}} scope(s).`
+        : 'No matching grievances found for the current filters.';
       if (!rows.length) {{
         tableBody.innerHTML = `<tr><td colspan="${{EMPTY_COLSPAN}}">No matching grievances found.</td></tr>`;
         return;
@@ -1826,6 +2412,7 @@ def _render_officers_page(user: OfficerUserContext) -> str:
         </tr>
       `).join('');
       updateSelectionUi();
+      syncTrackerScrollbarMetrics();
     }}
 
     function queryString() {{
@@ -2005,7 +2592,8 @@ def _render_officers_page(user: OfficerUserContext) -> str:
 
     function clearEditSelection() {{
       for (const id of [
-        'editCaseId', 'editCaseIdDisplay', 'editWorkflowStatus', 'editSource', 'editGrievanceNumber',
+        'editCaseId', 'editCaseIdDisplay', 'editOriginalGrievanceNumber', 'editOriginalDisplayGrievance',
+        'editWorkflowStatus', 'editSource', 'editGrievanceNumber',
         'editMemberName', 'editMemberEmail', 'editContract', 'editDepartment', 'editSteward',
         'editOccurrenceDate', 'editFirstLevelDate', 'editSecondLevelDate', 'editThirdLevelDate',
         'editFourthLevelDate', 'editAssigneeManual', 'editIssueSummary', 'editOfficerNotes'
@@ -2026,9 +2614,11 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       if (!row) return;
       document.getElementById('editCaseId').value = row.case_id || '';
       document.getElementById('editCaseIdDisplay').value = row.case_id || '';
+      document.getElementById('editOriginalGrievanceNumber').value = row.grievance_number || '';
+      document.getElementById('editOriginalDisplayGrievance').value = row.display_grievance || '';
       document.getElementById('editWorkflowStatus').value = row.workflow_status || '';
       document.getElementById('editSource').value = labelForSource(row.officer_source || '');
-      document.getElementById('editGrievanceNumber').value = row.grievance_number || '';
+      document.getElementById('editGrievanceNumber').value = row.grievance_number || row.display_grievance || '';
       document.getElementById('editMemberName').value = row.member_name || '';
       document.getElementById('editMemberEmail').value = row.member_email || '';
       if (document.getElementById('editContract')) document.getElementById('editContract').value = row.contract || '';
@@ -2057,7 +2647,6 @@ def _render_officers_page(user: OfficerUserContext) -> str:
         return show({{ error: 'Select a case first.' }});
       }}
       const payload = {{
-        grievance_number: nullableValue('editGrievanceNumber'),
         member_name: nullableValue('editMemberName'),
         member_email: nullableValue('editMemberEmail'),
         department: nullableValue('editDepartment'),
@@ -2072,6 +2661,12 @@ def _render_officers_page(user: OfficerUserContext) -> str:
         officer_notes: nullableValue('editOfficerNotes'),
         officer_status: valueOf('editOfficerStatus') || 'open'
       }};
+      const grievanceNumberValue = nullableValue('editGrievanceNumber');
+      const originalGrievanceNumber = nullableValue('editOriginalGrievanceNumber');
+      const originalDisplayGrievance = nullableValue('editOriginalDisplayGrievance');
+      if (originalGrievanceNumber || grievanceNumberValue !== originalDisplayGrievance) {{
+        payload.grievance_number = grievanceNumberValue;
+      }}
       if (VIEWER.can_delete) {{
         payload.contract = nullableValue('editContract');
       }}
@@ -2305,21 +2900,51 @@ def _render_officers_page(user: OfficerUserContext) -> str:
 
     async function searchDirectoryUsers() {{
       const search = valueOf('directorySearchInput');
-      if (search.length < 2) {{
-        if (directorySearchStatus) directorySearchStatus.textContent = '';
+      if (search.length < DIRECTORY_SEARCH_MIN_CHARS) {{
+        if (directorySearchStatus) {{
+          directorySearchStatus.textContent = search
+            ? `Type at least ${{DIRECTORY_SEARCH_MIN_CHARS}} characters to search the directory.`
+            : '';
+        }}
         renderDirectoryResults([], '');
-        return show({{ error: 'Enter at least 2 characters to search the directory.' }});
+        return;
       }}
+      const requestSeq = ++directorySearchRequestSeq;
       try {{
         const data = await call(`/officers/directory/users?search=${{encodeURIComponent(search)}}`);
+        if (requestSeq !== directorySearchRequestSeq) return;
         if (directorySearchStatus) directorySearchStatus.textContent = data.warning || '';
         renderDirectoryResults(Array.isArray(data.rows) ? data.rows : [], data.search || search);
-        show(data);
       }} catch (e) {{
+        if (requestSeq !== directorySearchRequestSeq) return;
         if (directorySearchStatus) directorySearchStatus.textContent = '';
         renderDirectoryResults([], search);
         show(e);
       }}
+    }}
+
+    function scheduleDirectorySearch() {{
+      if (directorySearchTimer) {{
+        window.clearTimeout(directorySearchTimer);
+        directorySearchTimer = null;
+      }}
+      const search = valueOf('directorySearchInput');
+      if (!search) {{
+        if (directorySearchStatus) directorySearchStatus.textContent = '';
+        renderDirectoryResults([], '');
+        return;
+      }}
+      if (search.length < DIRECTORY_SEARCH_MIN_CHARS) {{
+        if (directorySearchStatus) {{
+          directorySearchStatus.textContent = `Type at least ${{DIRECTORY_SEARCH_MIN_CHARS}} characters to search the directory.`;
+        }}
+        renderDirectoryResults([], '');
+        return;
+      }}
+      directorySearchTimer = window.setTimeout(() => {{
+        directorySearchTimer = null;
+        void searchDirectoryUsers();
+      }}, 250);
     }}
 
     async function saveChiefAssignment() {{
@@ -2440,7 +3065,26 @@ def _render_officers_page(user: OfficerUserContext) -> str:
     document.getElementById('directorySearchInput') && document.getElementById('directorySearchInput').addEventListener('keydown', (event) => {{
       if (event.key !== 'Enter') return;
       event.preventDefault();
+      if (directorySearchTimer) {{
+        window.clearTimeout(directorySearchTimer);
+        directorySearchTimer = null;
+      }}
       void searchDirectoryUsers();
+    }});
+    document.getElementById('directorySearchInput') && document.getElementById('directorySearchInput').addEventListener('input', () => {{
+      scheduleDirectorySearch();
+    }});
+    trackerTableWrap && trackerTableWrap.addEventListener('scroll', () => {{
+      if (syncingTrackerScroll || !trackerScrollbar) return;
+      syncingTrackerScroll = true;
+      trackerScrollbar.scrollLeft = trackerTableWrap.scrollLeft;
+      syncingTrackerScroll = false;
+    }});
+    trackerScrollbar && trackerScrollbar.addEventListener('scroll', () => {{
+      if (syncingTrackerScroll || !trackerTableWrap) return;
+      syncingTrackerScroll = true;
+      trackerTableWrap.scrollLeft = trackerScrollbar.scrollLeft;
+      syncingTrackerScroll = false;
     }});
     document.getElementById('chiefAssignmentEmail') && document.getElementById('chiefAssignmentEmail').addEventListener('input', () => {{
       const principalIdInput = document.getElementById('chiefAssignmentPrincipalId');
@@ -2467,11 +3111,15 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       populateChiefAssignmentScopeOptions([], '');
       populateExternalStewardSelect('');
       updateSelectionUi();
+      syncTrackerScrollbarMetrics();
       void loadCases();
       if (VIEWER.can_manage_chief_assignments) {{
         void loadChiefAssignments();
         void loadExternalStewards();
       }}
+    }});
+    window.addEventListener('resize', () => {{
+      syncTrackerScrollbarMetrics();
     }});
   </script>
 </body>

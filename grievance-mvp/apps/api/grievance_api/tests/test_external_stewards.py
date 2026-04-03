@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import json
 import tempfile
 import time
@@ -74,9 +73,12 @@ class _Request:
         self.session = session if session is not None else {}
         self.query_params = query_params if query_params is not None else {}
 
+class _FakeExternalMsalClient:
+    def __init__(self, result: dict[str, object]) -> None:
+        self._result = result
 
-async def _run_to_thread(func, *args, **kwargs):  # noqa: ANN001
-    return func(*args, **kwargs)
+    def acquire_token_by_auth_code_flow(self, flow: dict[str, object], query_params: dict[str, object]) -> dict[str, object]:
+        return dict(self._result)
 
 
 class ExternalStewardTests(unittest.IsolatedAsyncioTestCase):
@@ -119,8 +121,8 @@ class ExternalStewardTests(unittest.IsolatedAsyncioTestCase):
     def _external_auth(enabled: bool) -> ExternalStewardAuthConfig:
         return ExternalStewardAuthConfig(
             enabled=enabled,
-            authority="https://external.example.org/tenant/v2.0",
-            discovery_url="https://external.example.org/.well-known/openid-configuration",
+            tenant_id="tenant-id",
+            reuse_officer_auth_app=False,
             client_id="external-client-id",
             client_secret="external-client-secret",
             redirect_uri="https://grievance.example.org/auth/steward/callback",
@@ -165,21 +167,13 @@ class ExternalStewardTests(unittest.IsolatedAsyncioTestCase):
                 "email": email,
                 "display_name": display_name,
                 "role": "external_steward",
-                "auth_source": "external_oidc",
+                "auth_source": "microsoft_oidc",
                 "issuer": issuer,
                 "provider_subject": provider_subject,
                 "verified_email": True,
                 "exp": int(time.time()) + 3600,
             }
         }
-
-    @staticmethod
-    def _jwt(payload: dict[str, object]) -> str:
-        def _segment(value: dict[str, object]) -> str:
-            encoded = base64.urlsafe_b64encode(json.dumps(value).encode("utf-8")).decode("ascii")
-            return encoded.rstrip("=")
-
-        return f"{_segment({'alg': 'none', 'typ': 'JWT'})}.{_segment(payload)}."
 
     async def _insert_case(
         self,
@@ -247,7 +241,7 @@ class ExternalStewardTests(unittest.IsolatedAsyncioTestCase):
                 email.lower(),
                 display_name,
                 status,
-                "external_oidc" if issuer and subject else None,
+                "microsoft_oidc" if issuer and subject else None,
                 issuer,
                 subject,
                 "admin@example.org",
@@ -288,35 +282,27 @@ class ExternalStewardTests(unittest.IsolatedAsyncioTestCase):
             state=SimpleNamespace(cfg=self._cfg(), db=self.db),
             host="grievance.example.org",
             session={
-                "external_steward_auth_flow": {"state": "abc", "nonce": "nonce-123"},
+                "external_steward_auth_flow": {"state": "abc"},
                 "external_steward_auth_next": "/steward",
             },
             query_params={"code": "good-code", "state": "abc"},
         )
-        id_token = self._jwt(
-            {
+        token_result = {
+            "access_token": "graph-access-token",
+            "id_token_claims": {
                 "exp": int(time.time()) + 3600,
-                "nonce": "nonce-123",
-                "iss": "https://external.example.org",
-                "sub": "provider-subject-1",
+                "iss": "https://login.microsoftonline.com/tenant-id/v2.0",
+                "oid": "provider-subject-1",
+                "sub": "ignored-subject",
                 "email": "outside@example.org",
-                "email_verified": True,
                 "name": "Outside Steward",
-            }
-        )
+            },
+        }
 
         with (
             patch(
-                "grievance_api.web.officer_auth._external_oidc_metadata",
-                return_value={
-                    "issuer": "https://external.example.org",
-                    "token_endpoint": "https://external.example.org/token",
-                },
-            ),
-            patch("grievance_api.web.officer_auth.asyncio.to_thread", side_effect=_run_to_thread),
-            patch(
-                "grievance_api.web.officer_auth._http_json",
-                return_value={"id_token": id_token, "expires_in": 3600},
+                "grievance_api.web.officer_auth._build_external_steward_msal_client",
+                return_value=_FakeExternalMsalClient(token_result),
             ),
         ):
             response = await external_steward_callback(request)
@@ -340,8 +326,8 @@ class ExternalStewardTests(unittest.IsolatedAsyncioTestCase):
             """,
             (external_user_id,),
         )
-        self.assertEqual(row[0], "external_oidc")
-        self.assertEqual(row[1], "https://external.example.org")
+        self.assertEqual(row[0], "microsoft_oidc")
+        self.assertEqual(row[1], "https://login.microsoftonline.com/tenant-id/v2.0")
         self.assertEqual(row[2], "provider-subject-1")
         self.assertTrue(str(row[3] or "").strip())
 
@@ -349,35 +335,25 @@ class ExternalStewardTests(unittest.IsolatedAsyncioTestCase):
         request = _Request(
             state=SimpleNamespace(cfg=self._cfg(), db=self.db),
             session={
-                "external_steward_auth_flow": {"state": "abc", "nonce": "nonce-123"},
+                "external_steward_auth_flow": {"state": "abc"},
                 "external_steward_auth_next": "/steward",
             },
             query_params={"code": "good-code", "state": "abc"},
         )
-        id_token = self._jwt(
-            {
+        token_result = {
+            "id_token_claims": {
                 "exp": int(time.time()) + 3600,
-                "nonce": "nonce-123",
-                "iss": "https://external.example.org",
-                "sub": "provider-subject-2",
+                "iss": "https://login.microsoftonline.com/tenant-id/v2.0",
+                "oid": "provider-subject-2",
                 "email": "not-allowed@example.org",
-                "email_verified": True,
                 "name": "Not Allowed",
             }
-        )
+        }
 
         with (
             patch(
-                "grievance_api.web.officer_auth._external_oidc_metadata",
-                return_value={
-                    "issuer": "https://external.example.org",
-                    "token_endpoint": "https://external.example.org/token",
-                },
-            ),
-            patch("grievance_api.web.officer_auth.asyncio.to_thread", side_effect=_run_to_thread),
-            patch(
-                "grievance_api.web.officer_auth._http_json",
-                return_value={"id_token": id_token, "expires_in": 3600},
+                "grievance_api.web.officer_auth._build_external_steward_msal_client",
+                return_value=_FakeExternalMsalClient(token_result),
             ),
         ):
             with self.assertRaises(HTTPException) as exc:
@@ -385,6 +361,19 @@ class ExternalStewardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(exc.exception.status_code, 403)
         self.assertIn("allowlisted", exc.exception.detail)
+
+    async def test_external_callback_without_session_flow_restarts_login(self) -> None:
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(), db=self.db),
+            session={},
+            query_params={"code": "good-code", "state": "abc"},
+        )
+
+        response = await external_steward_callback(request)
+
+        self.assertIsInstance(response, RedirectResponse)
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/auth/steward/login?next=/steward")
 
     async def test_external_callback_denies_subject_mismatch_for_bound_identity(self) -> None:
         await self._insert_external_user(
@@ -395,34 +384,24 @@ class ExternalStewardTests(unittest.IsolatedAsyncioTestCase):
         request = _Request(
             state=SimpleNamespace(cfg=self._cfg(), db=self.db),
             session={
-                "external_steward_auth_flow": {"state": "abc", "nonce": "nonce-123"},
+                "external_steward_auth_flow": {"state": "abc"},
                 "external_steward_auth_next": "/steward",
             },
             query_params={"code": "good-code", "state": "abc"},
         )
-        id_token = self._jwt(
-            {
+        token_result = {
+            "id_token_claims": {
                 "exp": int(time.time()) + 3600,
-                "nonce": "nonce-123",
                 "iss": "https://external.example.org",
-                "sub": "different-subject",
+                "oid": "different-subject",
                 "email": "outside@example.org",
-                "email_verified": True,
             }
-        )
+        }
 
         with (
             patch(
-                "grievance_api.web.officer_auth._external_oidc_metadata",
-                return_value={
-                    "issuer": "https://external.example.org",
-                    "token_endpoint": "https://external.example.org/token",
-                },
-            ),
-            patch("grievance_api.web.officer_auth.asyncio.to_thread", side_effect=_run_to_thread),
-            patch(
-                "grievance_api.web.officer_auth._http_json",
-                return_value={"id_token": id_token, "expires_in": 3600},
+                "grievance_api.web.officer_auth._build_external_steward_msal_client",
+                return_value=_FakeExternalMsalClient(token_result),
             ),
         ):
             with self.assertRaises(HTTPException) as exc:

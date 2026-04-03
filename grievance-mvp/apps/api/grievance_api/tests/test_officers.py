@@ -312,6 +312,84 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Delete Checked Rows", html)
         self.assertNotIn("Save Edits", html)
 
+    async def test_officers_page_renders_status_options_in_create_and_edit_forms(self) -> None:
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        response = await officers_page(request)
+        html = response.body.decode("utf-8")
+        create_select = html[
+            html.index('<select id="createOfficerStatus">') : html.index("</select>", html.index('<select id="createOfficerStatus">'))
+        ]
+        edit_select = html[
+            html.index('<select id="editOfficerStatus">') : html.index("</select>", html.index('<select id="editOfficerStatus">'))
+        ]
+
+        self.assertIn('<select id="createOfficerStatus">', html)
+        self.assertIn('<select id="editOfficerStatus">', html)
+        self.assertIn('<option value="open">Open</option>', create_select)
+        self.assertIn('<option value="open_at_state">Open at State</option>', create_select)
+        self.assertIn('<option value="open_at_national">Open at National</option>', create_select)
+        self.assertIn('<option value="open">Open</option>', edit_select)
+        self.assertIn('<option value="open_at_state">Open at State</option>', edit_select)
+        self.assertIn('<option value="open_at_national">Open at National</option>', edit_select)
+
+    async def test_officers_page_renders_sticky_tracker_header_css(self) -> None:
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        response = await officers_page(request)
+        html = response.body.decode("utf-8")
+
+        self.assertIn("#trackerTable thead th {", html)
+        self.assertIn("position: sticky;", html)
+        self.assertIn("top: 0;", html)
+        self.assertIn(".tracker-table-wrap {", html)
+        self.assertIn("max-height: 70vh;", html)
+        self.assertIn("overflow-y: auto;", html)
+        self.assertIn('<div class="table-wrap tracker-table-wrap">', html)
+
+    async def test_officers_page_renders_hero_and_tracker_metrics(self) -> None:
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        response = await officers_page(request)
+        html = response.body.decode("utf-8")
+
+        self.assertIn('class="panel hero-panel"', html)
+        self.assertIn("Officer Workspace", html)
+        self.assertIn('id="trackerStats"', html)
+        self.assertIn('id="metricTotalValue">0</div>', html)
+        self.assertIn('id="metricEscalatedValue">0</div>', html)
+        self.assertIn('href="#trackerPanel"', html)
+
+    async def test_officers_page_renders_workspace_menu_with_ops_link_for_admin(self) -> None:
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        response = await officers_page(request)
+        html = response.body.decode("utf-8")
+
+        self.assertIn('id="workspaceMenuPanel"', html)
+        self.assertIn("Quick Nav", html)
+        self.assertIn('class="workspace-menu-bar"', html)
+        self.assertIn('href="#filtersPanel"', html)
+        self.assertIn('href="#mutationSplit"', html)
+        self.assertIn('href="/ops"', html)
+        self.assertIn("Ops Console", html)
+
     async def test_officer_mutation_routes_block_when_auth_disabled(self) -> None:
         request = _Request(state=SimpleNamespace(cfg=self._cfg(auth_enabled=False), db=self.db))
         await self._insert_case(
@@ -627,6 +705,39 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(response.warning)
         self.assertEqual(graph.last_search, "jmck")
         self.assertEqual(graph.last_limit, 8)
+
+    async def test_directory_search_deduplicates_graph_and_local_match_by_email(self) -> None:
+        graph = _DirectoryGraphStub(
+            [
+                DirectoryUserRef(
+                    id="oid-chief-1",
+                    display_name="Jamie McKinney",
+                    email="jmckinney@cwa3106.com",
+                    user_principal_name="jmckinney@cwa3106.com",
+                )
+            ]
+        )
+        admin_request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db, graph=graph),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        await create_chief_steward_assignment(
+            ChiefStewardAssignmentCreateRequest(
+                principal_email="jmckinney@cwa3106.com",
+                principal_display_name="Local Jamie",
+                contract_scope="mobility",
+            ),
+            admin_request,
+        )
+
+        response = await officer_directory_users(admin_request, search="jmck", limit=8)
+
+        self.assertEqual(response.count, 1)
+        self.assertEqual(response.rows[0].principal_id, "oid-chief-1")
+        self.assertEqual(response.rows[0].email, "jmckinney@cwa3106.com")
+        self.assertEqual(response.rows[0].match_source, "directory")
 
     async def test_directory_search_falls_back_to_local_known_people_when_graph_is_denied(self) -> None:
         graph = _FailingDirectoryGraphStub(

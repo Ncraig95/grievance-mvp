@@ -33,7 +33,7 @@ def create_app() -> FastAPI:
     setup_logging(cfg.log_level)
     validate_intake_auth_config(cfg.intake_auth)
     validate_officer_auth_config(cfg.officer_auth)
-    validate_external_steward_auth_config(cfg.external_steward_auth)
+    validate_external_steward_auth_config(cfg.external_steward_auth, cfg.officer_auth)
 
     migrate(cfg.db_path)
 

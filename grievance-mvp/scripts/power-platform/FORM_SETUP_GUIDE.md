@@ -61,6 +61,7 @@ Use the detailed field-map docs under `grievance-mvp/docs/power-automate/` when 
 - The repo already supports the template and intake side.
 - Your remaining work is the Microsoft Form, the Power Automate flow, and the real published Form URL.
 - Prefer `template_data.signer_email` only when you need to override the default signer behavior.
+- Use `.\New-TrueIntentBriefPowerAutomatePack.ps1 -Overwrite` when you want the ready-to-wire Forms question sheet and flow body template in `scripts/power-platform/output/true_intent_brief/`.
 - Generate a starter payload with:
   `.\New-GrievancePayloadTemplate.ps1 -FormKey true_intent_brief -OutputPath .\output\true_intent_brief.payload.json -Overwrite`
 
