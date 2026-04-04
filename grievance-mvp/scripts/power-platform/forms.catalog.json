@@ -240,6 +240,58 @@
       ]
     },
     {
+      "key": "non_discipline_brief",
+      "title": "Non-Discipline Grievance Brief",
+      "routeType": "intake",
+      "endpointPath": "/intake",
+      "documentCommand": "non_discipline_brief",
+      "requestIdPattern": "forms-<Response Id>",
+      "detailedGuide": "docs/power-automate/non_discipline_grievance_brief.md",
+      "topLevelFields": {
+        "contract": "CWA",
+        "grievant_firstname": "<Grievant first name>",
+        "grievant_lastname": "<Grievant last name>",
+        "grievant_email": "<Grievant email>",
+        "narrative": "Non-discipline grievance brief"
+      },
+      "templateDataFields": {
+        "analysis_of_grievance": "<Analysis of grievance>",
+        "attachment_1": "",
+        "attachment_10": "",
+        "attachment_2": "",
+        "attachment_3": "",
+        "attachment_4": "",
+        "attachment_5": "",
+        "attachment_6": "",
+        "attachment_7": "",
+        "attachment_8": "",
+        "attachment_9": "",
+        "action_taken": "<Action taken>",
+        "chronology_of_facts": "<Chronology of facts>",
+        "company_position": "<Company position>",
+        "current_status": "<Current status>",
+        "date_grievance_appealed_to_executive_level": "<yyyy-mm-dd>",
+        "date_grievance_filed": "<yyyy-mm-dd>",
+        "date_grievance_occurred": "<yyyy-mm-dd>",
+        "grievant_home_address": "<Grievant home address>",
+        "grievant_name": "<Full name>",
+        "grievant_or_work_group": "<Grievant(s) or work group>",
+        "issue_or_condition_involved": "<Issue or condition involved>",
+        "local_grievance_number": "<Local grievance number>",
+        "local_number": "<Local number>",
+        "location": "<Location>",
+        "potential_witnesses": "<Potential witnesses>",
+        "recommendation": "<Recommendation>",
+        "signer_email": "<Optional signer email override>",
+        "union_position": "<Union position>"
+      },
+      "notes": [
+        "This is the first-class intake implementation of the 2010 non-discipline staff guide.",
+        "Shared Form and Power Automate deployments can branch between true_intent_brief and non_discipline_brief on a required Brief type choice.",
+        "Go-live work is the Microsoft Form, the Power Automate flow, and the real published Form URL."
+      ]
+    },
+    {
       "key": "disciplinary_brief",
       "title": "Disciplinary Grievance Brief",
       "routeType": "intake",

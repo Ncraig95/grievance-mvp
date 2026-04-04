@@ -320,6 +320,157 @@ class DocuSealClient:
                     return item
         return {}
 
+    @staticmethod
+    def _comparable_template_area(area: dict) -> dict[str, object]:
+        out: dict[str, object] = {
+            "page": int(area.get("page") or 0),
+            "x": round(float(area.get("x") or 0.0), 6),
+            "y": round(float(area.get("y") or 0.0), 6),
+            "w": round(float(area.get("w") or 0.0), 6),
+            "h": round(float(area.get("h") or 0.0), 6),
+        }
+        attachment_uuid = str(area.get("attachment_uuid") or "").strip()
+        if attachment_uuid:
+            out["attachment_uuid"] = attachment_uuid
+        option_uuid = str(area.get("option_uuid") or "").strip()
+        if option_uuid:
+            out["option_uuid"] = option_uuid
+        return out
+
+    def _comparable_template_field(self, field: dict) -> dict[str, object]:
+        raw_areas = field.get("areas")
+        areas = [
+            self._comparable_template_area(area)
+            for area in (raw_areas if isinstance(raw_areas, list) else [])
+            if isinstance(area, dict)
+        ]
+        return {
+            "name": str(field.get("name") or "").strip(),
+            "type": str(field.get("type") or "").strip().lower(),
+            "submitter_uuid": str(field.get("submitter_uuid") or "").strip(),
+            "areas": areas,
+        }
+
+    def _validate_template_field_alignment(
+        self,
+        *,
+        template_id: str,
+        expected_fields: list[dict],
+    ) -> None:
+        resp = requests.get(
+            f"{self.base_url}/api/templates/{template_id}",
+            headers=self._headers(is_json=False),
+            timeout=self.timeout,
+        )
+        if not (200 <= resp.status_code < 300):
+            raise RuntimeError(
+                f"DocuSeal template alignment verification failed: template fetch returned {resp.status_code}"
+            )
+
+        template_obj = self._json_object(resp)
+        actual_fields = template_obj.get("fields")
+        if not isinstance(actual_fields, list):
+            raise RuntimeError("DocuSeal template alignment verification failed: template fields missing")
+
+        comparable_expected = [
+            self._comparable_template_field(field)
+            for field in expected_fields
+            if isinstance(field, dict)
+        ]
+        actual_names = [str(field.get("name") or "").strip() for field in actual_fields if isinstance(field, dict)]
+
+        unnamed_actual = sum(1 for name in actual_names if not name)
+        duplicate_actual = sorted({name for name in actual_names if name and actual_names.count(name) > 1})
+        if unnamed_actual or duplicate_actual:
+            problems: list[str] = []
+            if unnamed_actual:
+                problems.append(f"unnamed_fields={unnamed_actual}")
+            if duplicate_actual:
+                problems.append(f"duplicate_names={duplicate_actual}")
+            raise RuntimeError(
+                "DocuSeal template alignment verification failed: "
+                + "; ".join(problems)
+            )
+
+        expected_by_name = {str(field["name"]): field for field in comparable_expected if str(field.get("name") or "").strip()}
+        actual_by_name = {
+            str(field.get("name") or "").strip(): self._comparable_template_field(field)
+            for field in actual_fields
+            if isinstance(field, dict) and str(field.get("name") or "").strip()
+        }
+
+        missing = sorted(set(expected_by_name) - set(actual_by_name))
+        extras = sorted(set(actual_by_name) - set(expected_by_name))
+        mismatched = sorted(
+            name
+            for name in set(expected_by_name).intersection(actual_by_name)
+            if actual_by_name[name] != expected_by_name[name]
+        )
+        if missing or extras or mismatched:
+            problems: list[str] = []
+            if missing:
+                problems.append(f"missing={missing}")
+            if extras:
+                problems.append(f"extras={extras}")
+            if mismatched:
+                problems.append(f"mismatched={mismatched}")
+            raise RuntimeError(
+                f"DocuSeal template alignment verification failed for template {template_id}: "
+                + "; ".join(problems)
+            )
+
+    @staticmethod
+    def _web_origin_base(web_base: str) -> str:
+        parsed = urlparse(web_base)
+        scheme = (parsed.scheme or "https").lower()
+        host = parsed.hostname or parsed.netloc.strip()
+        if not host:
+            raise RuntimeError("DocuSeal web base URL is missing a host")
+        if scheme == "http":
+            # The internal proxy terminates HTTP locally but forwards HTTPS upstream.
+            return f"https://{host}"
+        if parsed.port and parsed.port != 443:
+            return f"https://{host}:{parsed.port}"
+        return f"https://{host}"
+
+    @staticmethod
+    def _session_cookie_header(sess: requests.Session) -> str | None:
+        cookie_parts: list[str] = []
+        for cookie in sess.cookies:
+            name = str(getattr(cookie, "name", "") or "").strip()
+            value = str(getattr(cookie, "value", "") or "").strip()
+            if name and value:
+                cookie_parts.append(f"{name}={value}")
+        if not cookie_parts:
+            return None
+        return "; ".join(cookie_parts)
+
+    def _web_request_headers(
+        self,
+        *,
+        sess: requests.Session,
+        web_base: str,
+        referer_path: str | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        headers = dict(extra_headers or {})
+        origin_base = self._web_origin_base(web_base)
+        headers.setdefault("Origin", origin_base)
+        if referer_path:
+            headers.setdefault("Referer", f"{origin_base}{referer_path}")
+
+        # requests will not replay secure cookies over an internal http:// proxy URL.
+        if (urlparse(web_base).scheme or "").lower() != "https":
+            cookie_header = self._session_cookie_header(sess)
+            if cookie_header:
+                headers.setdefault("Cookie", cookie_header)
+        return headers
+
+    def _clone_and_replace_timeout(self) -> int:
+        # Clone-and-replace can take noticeably longer than simple DocuSeal API reads,
+        # especially for larger rendered PDFs with placeholder alignment updates.
+        return max(int(self.timeout), 120)
+
     def _clone_and_replace_template(
         self,
         *,
@@ -352,6 +503,11 @@ class DocuSealClient:
                 "user[email]": self.web_email,
                 "user[password]": self.web_password,
             },
+            headers=self._web_request_headers(
+                sess=sess,
+                web_base=web_base,
+                referer_path="/sign_in",
+            ),
             allow_redirects=False,
             timeout=self.timeout,
         )
@@ -360,7 +516,15 @@ class DocuSealClient:
         if sign_in_resp.status_code == 200 and "Invalid Email or password" in sign_in_resp.text:
             raise RuntimeError("DocuSeal web sign-in failed: invalid credentials")
 
-        edit_resp = sess.get(f"{web_base}/templates/{base_template_id}/edit", timeout=self.timeout)
+        edit_resp = sess.get(
+            f"{web_base}/templates/{base_template_id}/edit",
+            headers=self._web_request_headers(
+                sess=sess,
+                web_base=web_base,
+                referer_path="/sign_in",
+            ),
+            timeout=self.timeout,
+        )
         edit_resp.raise_for_status()
         csrf_token = self._extract_csrf_token(edit_resp.text)
 
@@ -373,13 +537,18 @@ class DocuSealClient:
         }
         clone_resp = sess.post(
             f"{web_base}/templates/{base_template_id}/clone_and_replace",
-            headers={
-                "Accept": "application/json",
-                "X-Requested-With": "XMLHttpRequest",
-                "X-CSRF-Token": csrf_token,
-            },
+            headers=self._web_request_headers(
+                sess=sess,
+                web_base=web_base,
+                referer_path=f"/templates/{base_template_id}/edit",
+                extra_headers={
+                    "Accept": "application/json",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "X-CSRF-Token": csrf_token,
+                },
+            ),
             files=files,
-            timeout=self.timeout,
+            timeout=self._clone_and_replace_timeout(),
         )
         if not (200 <= clone_resp.status_code < 300):
             raise RuntimeError(f"DocuSeal clone-and-replace failed: {clone_resp.status_code} {clone_resp.text[:400]}")
@@ -388,12 +557,47 @@ class DocuSealClient:
         template_id = str(obj.get("id") or "").strip()
         if not template_id:
             raise RuntimeError("DocuSeal clone-and-replace response missing template id")
-        self._apply_placeholder_field_alignment(
+        alignment_source_pdf = alignment_pdf_bytes or upload_pdf_bytes
+        alignment_placeholders = self._extract_placeholder_areas(pdf_bytes=alignment_source_pdf)
+        rebuilt_fields = self._apply_placeholder_field_alignment(
             template_id=template_id,
-            pdf_bytes=alignment_pdf_bytes or upload_pdf_bytes,
+            pdf_bytes=alignment_source_pdf,
             form_key=form_key,
             table_pdf_bytes=upload_pdf_bytes,
         )
+        if alignment_placeholders:
+            if not isinstance(rebuilt_fields, list) or not rebuilt_fields:
+                raise RuntimeError(
+                    f"DocuSeal template alignment expected placeholder-derived fields for template {template_id}"
+                )
+            for attempt in range(2):
+                try:
+                    self._validate_template_field_alignment(
+                        template_id=template_id,
+                        expected_fields=rebuilt_fields,
+                    )
+                    break
+                except RuntimeError:
+                    if attempt >= 1:
+                        raise
+                    self.logger.warning(
+                        "docuseal_template_alignment_retry",
+                        extra={
+                            "template_id": template_id,
+                            "form_key": str(form_key or ""),
+                            "attempt": attempt + 1,
+                        },
+                    )
+                    rebuilt_fields = self._apply_placeholder_field_alignment(
+                        template_id=template_id,
+                        pdf_bytes=alignment_source_pdf,
+                        form_key=form_key,
+                        table_pdf_bytes=upload_pdf_bytes,
+                    )
+                    if not isinstance(rebuilt_fields, list) or not rebuilt_fields:
+                        raise RuntimeError(
+                            f"DocuSeal template alignment retry produced no fields for template {template_id}"
+                        )
         return template_id
 
     def _extract_placeholder_areas(self, *, pdf_bytes: bytes) -> dict[tuple[int, str], list[dict]]:
@@ -1783,7 +1987,7 @@ class DocuSealClient:
         pdf_bytes: bytes,
         form_key: str | None = None,
         table_pdf_bytes: bytes | None = None,
-    ) -> None:
+    ) -> list[dict] | None:
         placeholder_areas = self._extract_placeholder_areas(pdf_bytes=pdf_bytes)
         if not placeholder_areas:
             return
@@ -2038,6 +2242,7 @@ class DocuSealClient:
             json={"fields": rebuilt_fields},
             timeout=self.timeout,
         )
+        return rebuilt_fields
 
     def _resolve_signer_email_fields(self, *, template_id: str) -> dict[int, str]:
         try:

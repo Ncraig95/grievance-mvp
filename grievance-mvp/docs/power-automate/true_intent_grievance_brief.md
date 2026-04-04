@@ -239,6 +239,21 @@ Use the generated pack in `scripts/power-platform/output/true_intent_brief/` if 
    `grievance_id`
    `documents[0].signing_link` when present
 
+## Shared Form / Shared Flow Option
+
+If you want one Microsoft Form and one Power Automate flow for both brief types:
+
+1. Add a required `Brief type` question to the Form.
+2. Use choices:
+   `True Intent Brief`
+   `Non-Discipline Brief`
+3. Use Microsoft Forms branching so each choice routes to the matching brief section.
+4. In Power Automate, add a `Switch` on `Brief type`.
+5. For the True Intent branch, keep:
+   `document_command = true_intent_brief`
+   `narrative = True intent grievance brief`
+6. For the Non-Discipline branch, send the payload documented in `non_discipline_grievance_brief.md`.
+
 ## Go-Live Notes
 
 - If you do not need a signer override, either leave `template_data.signer_email` blank in the Form or remove that property from the JSON body.

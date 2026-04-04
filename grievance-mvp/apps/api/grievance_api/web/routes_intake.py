@@ -67,6 +67,8 @@ _DATE_FIELD_KEYS = {
     "today_date",
     "todaydate",
     "date_grievance_occurred",
+    "date_grievance_filed",
+    "date_grievance_appealed_to_executive_level",
     "informal_meeting_date",
 }
 
@@ -179,6 +181,9 @@ _DOC_COMMAND_ALIASES: dict[str, str] = {
     "mobility_meeting_request": "mobility_formal_grievance_meeting_request",
     "grievance_data_request": "grievance_data_request_form",
     "true_intent_brief": "true_intent_grievance_brief",
+    "non_discipline_brief": "non_discipline_grievance_brief",
+    "non_disciplinary_brief": "non_discipline_grievance_brief",
+    "non_disciplinary_grievance_brief": "non_discipline_grievance_brief",
     "disciplinary_brief": "disciplinary_grievance_brief",
     "settlement_form": "settlement_form_3106",
     "mobility_record_of_grievance": "mobility_record_of_grievance",
@@ -196,6 +201,9 @@ _DOC_TEMPLATE_FALLBACKS: dict[str, tuple[str, ...]] = {
     ),
     "true_intent_grievance_brief": (
         "true_intent_grievance_brief",
+    ),
+    "non_discipline_grievance_brief": (
+        "non_discipline_grievance_brief",
     ),
     "disciplinary_grievance_brief": (
         "disciplinary_grievance_brief",
@@ -299,6 +307,8 @@ def _build_document_basename(*, doc_type: str, grievance_id: str, member_name: s
         return f"{grievance_id} - {member} - grievance data request"
     if normalized_type == "true_intent_grievance_brief":
         return f"{grievance_id} - {member} - true intent grievance brief"
+    if normalized_type == "non_discipline_grievance_brief":
+        return f"{grievance_id} - {member} - non discipline grievance brief"
     if normalized_type == "disciplinary_grievance_brief":
         return f"{grievance_id} - {member} - disciplinary grievance brief"
     if normalized_type == "mobility_record_of_grievance":
@@ -1233,6 +1243,17 @@ def _doc_uses_auto_grievance_id(doc_req: DocumentRequest) -> bool:
     return doc_type in statement_keys or template_key in statement_keys
 
 
+def _should_clear_3g3a_stage_marks(*, cfg, doc_req: DocumentRequest) -> bool:  # noqa: ANN001
+    return bool(
+        doc_req.requires_signature
+        and is_3g3a_staged(
+            cfg=cfg,
+            doc_type=doc_req.doc_type,
+            template_key=doc_req.template_key,
+        )
+    )
+
+
 def _build_template_context(
     *,
     cfg,  # noqa: ANN001
@@ -1675,7 +1696,7 @@ async def intake(request: Request):
         staged_form_key = resolve_staged_form_key(cfg=cfg, doc_type=doc_type, template_key=doc_req.template_key)
         is_staged_document_flow = staged_form_key is not None
         render_context = context
-        if doc_req.requires_signature and is_staged_3g3a_document(cfg=cfg, doc_type=doc_type, template_key=doc_req.template_key):
+        if _should_clear_3g3a_stage_marks(cfg=cfg, doc_req=doc_req):
             render_context = dict(context)
             _clear_3g3a_stage_interactive_marks(context=render_context)
         if layout_meta.get("policy_applied"):

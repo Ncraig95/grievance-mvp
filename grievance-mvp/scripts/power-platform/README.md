@@ -29,6 +29,8 @@ What it does not do:
   Generates a starter JSON payload for a selected form key.
 - `New-TrueIntentBriefPowerAutomatePack.ps1`
   Generates the True Intent Brief Forms question map, HTTP body template, and flow runbook.
+- `New-NonDisciplineBriefPowerAutomatePack.ps1`
+  Generates the Non-Discipline Brief Forms question map, HTTP body template, and flow runbook.
 - `Invoke-GrievanceApiSmokeTest.ps1`
   Posts a payload JSON file to the repo API endpoint for smoke testing.
 - `Import-GrievanceFlowSolution.ps1`
@@ -77,6 +79,12 @@ Generate the True Intent Brief Forms + flow pack:
 
 ```powershell
 .\New-TrueIntentBriefPowerAutomatePack.ps1 -Overwrite
+```
+
+Generate the Non-Discipline Brief Forms + flow pack:
+
+```powershell
+.\New-NonDisciplineBriefPowerAutomatePack.ps1 -Overwrite
 ```
 
 Dry-run an API smoke test without submitting:

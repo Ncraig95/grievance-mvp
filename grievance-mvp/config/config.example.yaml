@@ -24,10 +24,15 @@ doc_templates:
   settlement_form_3106: /app/templates/docx/Settlement Form 3106.docx
   settlement_form: /app/templates/docx/Settlement Form 3106.docx
   true_intent_grievance_brief: /app/templates/docx/form_true_intent_grievance_brief_revised_05.20.21.docx
+  non_discipline_grievance_brief: /app/templates/docx/Non Discipline guide to staff 2010.docx
   disciplinary_grievance_brief: /app/templates/docx/form_disciplinary_grievance_brief_revised_05.19.21.docx
   mobility_record_of_grievance: /app/templates/docx/mobility_record_of_grievance_revised.docx
   bst_grievance_form_3g3a: /app/templates/docx/bst_grievance_form_3g3a.docx
 document_policies:
+  non_discipline_grievance_brief:
+    folder_resolution: default
+    default_signer_field: signer_email
+    default_requires_signature: true
   bellsouth_meeting_request:
     folder_resolution: existing_exact_grievance_id
     default_signer_field: union_rep_email
@@ -149,7 +154,7 @@ docuseal:
   api_token: REPLACE
   webhook_secret: REPLACE
   public_base_url: https://docuseal.REPLACE.org
-  web_base_url: https://docuseal.REPLACE.org
+  web_base_url: http://docuseal_proxy:8080
   web_email: ""     # optional; fallback uses DOCUSEAL_WEB_EMAIL or DOCUSEAL_ADMIN_EMAIL
   web_password: ""  # optional; fallback uses DOCUSEAL_WEB_PASSWORD or DOCUSEAL_ADMIN_PASSWORD
   default_template_id: 1  # base template id with signature fields; app clones+replaces with generated PDF
@@ -226,7 +231,8 @@ email:
   enabled: true
   test_mode: false
   # Optional per-form test mode overrides (keys are template_key or doc_type).
-  test_mode_by_form: {}
+  test_mode_by_form:
+    non_discipline_grievance_brief: false
   sender_user_id: grievance-mailbox@REPLACE.onmicrosoft.com
   templates_dir: /app/templates/email
   internal_recipients:

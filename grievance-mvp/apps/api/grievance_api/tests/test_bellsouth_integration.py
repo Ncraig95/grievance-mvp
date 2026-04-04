@@ -17,6 +17,7 @@ from grievance_api.web.routes_intake import (
     _build_template_context,
     _doc_uses_auto_grievance_id,
     _doc_requires_existing_exact_folder,
+    _should_clear_3g3a_stage_marks,
     _validate_existing_folder_mode,
     _preferred_signer_email_for_doc,
     _resolve_document_command,
@@ -50,6 +51,7 @@ class BellSouthCommandTests(unittest.TestCase):
                 "mobility_formal_grievance_meeting_request": "/tmp/mobility.docx",
                 "grievance_data_request_form": "/tmp/data-request.docx",
                 "true_intent_grievance_brief": "/tmp/true-intent.docx",
+                "non_discipline_grievance_brief": "/tmp/non-discipline.docx",
                 "disciplinary_grievance_brief": "/tmp/disciplinary.docx",
                 "mobility_record_of_grievance": "/tmp/mobility-record.docx",
             },
@@ -67,6 +69,14 @@ class BellSouthCommandTests(unittest.TestCase):
         true_intent = _resolve_document_command(cfg, "true_intent_brief")
         self.assertEqual(true_intent.doc_type, "true_intent_grievance_brief")
         self.assertEqual(true_intent.template_key, "true_intent_grievance_brief")
+
+        non_discipline = _resolve_document_command(cfg, "non_discipline_brief")
+        self.assertEqual(non_discipline.doc_type, "non_discipline_grievance_brief")
+        self.assertEqual(non_discipline.template_key, "non_discipline_grievance_brief")
+
+        non_disciplinary = _resolve_document_command(cfg, "non_disciplinary_grievance_brief")
+        self.assertEqual(non_disciplinary.doc_type, "non_discipline_grievance_brief")
+        self.assertEqual(non_disciplinary.template_key, "non_discipline_grievance_brief")
 
         disciplinary = _resolve_document_command(cfg, "disciplinary_brief")
         self.assertEqual(disciplinary.doc_type, "disciplinary_grievance_brief")
@@ -138,6 +148,50 @@ class BellSouthCommandTests(unittest.TestCase):
                 cfg=cfg,
                 doc_type="bellsouth_meeting_request",
                 template_key="bellsouth_formal_grievance_meeting_request",
+            )
+        )
+
+    def test_statement_of_occurrence_does_not_clear_3g3a_stage_marks(self) -> None:
+        cfg = SimpleNamespace(
+            document_policies={
+                "bst_grievance_form_3g3a": DocumentPolicyConfig(
+                    folder_resolution="default",
+                    default_signer_field="",
+                    default_requires_signature=True,
+                    staged_flow_enabled=True,
+                )
+            }
+        )
+        self.assertFalse(
+            _should_clear_3g3a_stage_marks(
+                cfg=cfg,
+                doc_req=DocumentRequest(
+                    doc_type="statement_of_occurrence",
+                    template_key="statement_of_occurrence",
+                    requires_signature=True,
+                ),
+            )
+        )
+
+    def test_3g3a_documents_clear_stage_marks_before_render(self) -> None:
+        cfg = SimpleNamespace(
+            document_policies={
+                "bst_grievance_form_3g3a": DocumentPolicyConfig(
+                    folder_resolution="default",
+                    default_signer_field="",
+                    default_requires_signature=True,
+                    staged_flow_enabled=True,
+                )
+            }
+        )
+        self.assertTrue(
+            _should_clear_3g3a_stage_marks(
+                cfg=cfg,
+                doc_req=DocumentRequest(
+                    doc_type="bst_grievance_form_3g3a",
+                    template_key="bst_grievance_form_3g3a",
+                    requires_signature=True,
+                ),
             )
         )
 
@@ -433,6 +487,48 @@ class BellSouthContextTests(unittest.TestCase):
         self.assertEqual(context["employee_work_group_name"], "John Doe")
         self.assertEqual(context["union_statement"], "Initial union statement")
 
+    def test_non_discipline_dates_are_normalized(self) -> None:
+        payload = IntakeRequest(
+            request_id="req-6d",
+            contract="CWA",
+            grievant_firstname="John",
+            grievant_lastname="Doe",
+            grievant_email="john@example.com",
+            narrative="Non-discipline brief",
+            template_data={
+                "grievant_name": "John Doe",
+                "local_number": "3106",
+                "location": "Jacksonville, FL",
+                "grievant_or_work_group": "John Doe",
+                "grievant_home_address": "123 Main St",
+                "date_grievance_occurred": "04/02/2026",
+                "date_grievance_filed": "04/03/2026",
+                "date_grievance_appealed_to_executive_level": "04/10/2026",
+                "issue_or_condition_involved": "Issue text",
+                "action_taken": "Action text",
+                "chronology_of_facts": "Facts text",
+                "analysis_of_grievance": "Analysis text",
+                "current_status": "Current status",
+                "union_position": "Union position",
+                "company_position": "Company position",
+                "recommendation": "Recommendation",
+            },
+        )
+        cfg = SimpleNamespace(rendering=SimpleNamespace(layout_policies={}))
+
+        context, _ = _build_template_context(
+            cfg=cfg,
+            payload=payload,
+            case_id="C1",
+            grievance_id="2026001",
+            document_id="D1",
+            doc_type="non_discipline_grievance_brief",
+            grievance_number=None,
+        )
+        self.assertEqual(context["date_grievance_occurred"], "2026-04-02")
+        self.assertEqual(context["date_grievance_filed"], "2026-04-03")
+        self.assertEqual(context["date_grievance_appealed_to_executive_level"], "2026-04-10")
+
 
 class FolderMatcherTests(unittest.TestCase):
     def test_exact_grievance_prefix_matcher(self) -> None:
@@ -470,6 +566,14 @@ class FolderMatcherTests(unittest.TestCase):
                 member_name=member_name,
             ),
             "2026001 - john doe - mobility record of grievance",
+        )
+        self.assertEqual(
+            _build_document_basename(
+                doc_type="non_discipline_grievance_brief",
+                grievance_id=grievance_id,
+                member_name=member_name,
+            ),
+            "2026001 - john doe - non discipline grievance brief",
         )
 
     def test_find_case_folder_exact_returns_single_match(self) -> None:

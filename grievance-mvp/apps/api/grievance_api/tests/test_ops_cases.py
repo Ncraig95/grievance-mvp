@@ -395,6 +395,11 @@ class OpsCaseTests(unittest.IsolatedAsyncioTestCase):
 
         html = await ops_page(request)
 
+        self.assertIn('id="opsNav"', html)
+        self.assertIn('href="/officers"', html)
+        self.assertIn("Officer Tracker", html)
+        self.assertIn('href="#activeQueueSection"', html)
+        self.assertIn('href="#responsePanel"', html)
         self.assertIn('data-action="clear-case-document"', html)
         self.assertIn('data-action="clear-standalone-document"', html)
         self.assertIn("activeQueueBody.addEventListener('click'", html)

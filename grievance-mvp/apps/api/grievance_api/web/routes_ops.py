@@ -1015,31 +1015,273 @@ async def ops_page(request: Request):
 <html>
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Grievance Ops</title>
   <style>
-    body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 24px; }
+    :root {
+      --ops-border: #d7e0ea;
+      --ops-text: #203040;
+      --ops-muted: #5d7080;
+      --ops-bg: #eef4f8;
+      --ops-card: rgba(255, 255, 255, 0.95);
+      --ops-accent: #1f4d7a;
+      --ops-accent-soft: #edf4fa;
+    }
+    body {
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      margin: 0;
+      padding: 24px;
+      color: var(--ops-text);
+      background:
+        radial-gradient(circle at top left, rgba(31, 77, 122, 0.10), transparent 18%),
+        radial-gradient(circle at top right, rgba(149, 207, 70, 0.10), transparent 16%),
+        linear-gradient(180deg, #f8fbfd 0%, var(--ops-bg) 100%);
+    }
+    .page-shell {
+      max-width: 1680px;
+      margin: 0 auto;
+    }
+    .top-nav {
+      position: sticky;
+      top: 14px;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+      padding: 12px 16px;
+      border: 1px solid var(--ops-border);
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.95);
+      box-shadow: 0 16px 36px rgba(15, 23, 42, 0.08);
+      backdrop-filter: blur(8px);
+    }
+    .top-nav-title {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-right: auto;
+    }
+    .eyebrow {
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--ops-muted);
+    }
+    .top-nav h1 {
+      margin: 0;
+      font-size: 28px;
+      line-height: 1;
+      letter-spacing: -0.03em;
+    }
+    .nav-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .nav-link {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 13px;
+      font-weight: 700;
+      text-decoration: none;
+      color: #17334f;
+      border: 1px solid var(--ops-border);
+      background: rgba(255, 255, 255, 0.92);
+    }
+    .nav-link-primary {
+      color: white;
+      background: linear-gradient(180deg, #173a5c 0%, var(--ops-accent) 100%);
+      border-color: #173a5c;
+      box-shadow: 0 12px 24px rgba(31, 77, 122, 0.22);
+    }
+    .panel {
+      background: var(--ops-card);
+      border: 1px solid var(--ops-border);
+      border-radius: 18px;
+      padding: 18px;
+      margin-bottom: 18px;
+      box-shadow: 0 18px 36px rgba(15, 23, 42, 0.05);
+    }
+    .section {
+      scroll-margin-top: 92px;
+    }
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .section-head h2 {
+      margin: 0;
+      font-size: 24px;
+    }
+    .section-head .summary {
+      margin: 6px 0 0;
+      font-weight: 500;
+    }
+    .tool-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(320px, 1fr));
+      gap: 16px;
+    }
+    .tool-card {
+      border: 1px solid var(--ops-border);
+      border-radius: 16px;
+      padding: 16px;
+      background: linear-gradient(180deg, #ffffff 0%, #f6f9fc 100%);
+    }
+    .tool-card h3 {
+      margin: 0 0 8px;
+      font-size: 18px;
+    }
+    .tool-card .summary {
+      margin: 0 0 12px;
+      font-weight: 500;
+    }
     .row { margin-bottom: 12px; }
-    input, select { width: 420px; padding: 8px; }
-    button { padding: 8px 12px; margin-right: 8px; }
-    table { border-collapse: collapse; width: 100%; margin: 12px 0 24px; }
-    th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; text-align: left; }
-    th { background: #f3f3f3; }
-    .section { margin-top: 24px; }
-    .summary { margin: 8px 0 12px; font-weight: 600; }
-    .muted { color: #666; font-size: 12px; }
+    input, select {
+      width: min(100%, 460px);
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid #bdc9d6;
+      background: white;
+      font: inherit;
+    }
+    button {
+      padding: 10px 14px;
+      margin-right: 8px;
+      border-radius: 10px;
+      border: 0;
+      background: var(--ops-accent);
+      color: white;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    table { border-collapse: collapse; width: 100%; margin: 12px 0 0; }
+    th, td { border: 1px solid #ccd5de; padding: 10px 8px; vertical-align: top; text-align: left; }
+    th { background: #eef4f8; }
+    .summary { margin: 8px 0 12px; font-weight: 600; color: #334e62; }
+    .muted { color: var(--ops-muted); font-size: 12px; }
     .link-group a { margin-right: 8px; }
-    pre { background: #111; color: #ddd; padding: 12px; overflow: auto; max-height: 70vh; }
+    pre {
+      margin: 0;
+      background: #101923;
+      color: #dde7f1;
+      padding: 14px;
+      border-radius: 14px;
+      overflow: auto;
+      max-height: 48vh;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    @media (max-width: 1100px) {
+      .tool-grid {
+        grid-template-columns: 1fr;
+      }
+      .top-nav {
+        position: static;
+      }
+      .top-nav-title {
+        margin-right: 0;
+        width: 100%;
+      }
+    }
+    @media (max-width: 760px) {
+      body {
+        padding: 12px;
+      }
+      .panel {
+        padding: 14px;
+        border-radius: 14px;
+      }
+      .nav-links {
+        width: 100%;
+      }
+      .nav-link {
+        flex: 1 1 calc(50% - 8px);
+        justify-content: center;
+      }
+      button {
+        width: 100%;
+        margin-right: 0;
+        margin-bottom: 8px;
+      }
+      input, select {
+        width: 100%;
+      }
+      #activeQueueTable thead {
+        display: none;
+      }
+      #activeQueueTable,
+      #activeQueueTable tbody,
+      #activeQueueTable tr,
+      #activeQueueTable td {
+        display: block;
+        width: 100%;
+      }
+      #activeQueueTable tr {
+        margin-bottom: 12px;
+        border: 1px solid #ccd5de;
+        border-radius: 14px;
+        overflow: hidden;
+        background: white;
+      }
+      #activeQueueTable td {
+        border: 0;
+        border-top: 1px solid #e6edf3;
+      }
+      #activeQueueTable td:first-child {
+        border-top: 0;
+      }
+      #activeQueueTable td::before {
+        content: attr(data-label);
+        display: block;
+        margin-bottom: 4px;
+        font-size: 11px;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--ops-muted);
+      }
+    }
   </style>
 </head>
 <body>
-  <h2>Grievance Ops</h2>
-  <div class="section">
+  <div class="page-shell">
+  <div class="top-nav" id="opsNav">
+    <div class="top-nav-title">
+      <div class="eyebrow">Operations Console</div>
+      <h1>Grievance Ops</h1>
+    </div>
+    <div class="nav-links">
+      <a class="nav-link nav-link-primary" href="/officers">Officer Tracker</a>
+      <a class="nav-link" href="#activeQueueSection">Active Queue</a>
+      <a class="nav-link" href="#caseToolsSection">Case Tools</a>
+      <a class="nav-link" href="#grievanceToolsSection">Grievance Docs</a>
+      <a class="nav-link" href="#standaloneToolsSection">Standalone</a>
+      <a class="nav-link" href="#responsePanel">Last Response</a>
+    </div>
+  </div>
+  <div class="panel section" id="activeQueueSection">
+    <div class="section-head">
+      <div>
+        <div class="eyebrow">Signature Queue</div>
+        <h2>Active Signature Requests</h2>
+        <div class="summary">Load the current signature backlog, inspect who is blocked, and jump straight into trace or cleanup actions.</div>
+      </div>
+    </div>
     <div class="row">
       <button onclick="loadActiveSignatures()">Load Active Signature Queue</button>
     </div>
     <div id="activeSummary" class="summary">Active signature requests not loaded yet.</div>
     <div class="muted">Optional filter: fill Grievance ID / Number below before loading the queue.</div>
-    <table>
+    <table id="activeQueueTable">
       <thead>
         <tr>
           <th>Kind</th>
@@ -1057,40 +1299,60 @@ async def ops_page(request: Request):
       </tbody>
     </table>
   </div>
-  <div class="section">
-  <div class="row">
-    <input id="caseId" placeholder="Case ID (example: C2026...)" />
+  <div class="tool-grid">
+  <div class="panel section tool-card" id="caseToolsSection">
+    <div class="eyebrow">Case Operations</div>
+    <h3>Case Tools</h3>
+    <div class="summary">Trace a case, resend outstanding signature links, or resubmit the full case package.</div>
+    <div class="row">
+      <input id="caseId" placeholder="Case ID (example: C2026...)" />
+    </div>
+    <div class="row">
+      <button onclick="loadTrace()">Load Trace</button>
+      <button onclick="resendSignature()">Resend Signature Emails</button>
+      <button onclick="resubmitCase()">Resubmit Case</button>
+    </div>
   </div>
-  <div class="row">
-    <button onclick="loadTrace()">Load Trace</button>
-    <button onclick="resendSignature()">Resend Signature Emails</button>
-    <button onclick="resubmitCase()">Resubmit Case</button>
+  <div class="panel section tool-card" id="grievanceToolsSection">
+    <div class="eyebrow">Document Operations</div>
+    <h3>Grievance Docs</h3>
+    <div class="summary">Inspect the document catalog for a grievance and resubmit the latest matching document type.</div>
+    <div class="row">
+      <input id="grievanceRef" placeholder="Grievance ID or Grievance Number (example: 2026015)" />
+    </div>
+    <div class="row">
+      <select id="docTypeSelect">
+        <option value="">Select doc type after loading grievance docs</option>
+      </select>
+    </div>
+    <div class="row">
+      <button onclick="loadGrievanceDocs()">Load Grievance Docs</button>
+      <button onclick="resubmitDocType()">Resubmit Latest Matching Doc Type</button>
+    </div>
+  </div>
+  <div class="panel section tool-card" id="standaloneToolsSection">
+    <div class="eyebrow">Standalone Operations</div>
+    <h3>Standalone Forms</h3>
+    <div class="summary">Open the trace for a standalone submission or resubmit it without leaving the ops console.</div>
+    <div class="row">
+      <input id="submissionId" placeholder="Standalone Submission ID (example: S2026...)" />
+    </div>
+    <div class="row">
+      <button onclick="loadStandaloneTrace()">Load Standalone Trace</button>
+      <button onclick="resubmitStandalone()">Resubmit Standalone</button>
+    </div>
   </div>
   </div>
-  <div class="section">
-  <div class="row">
-    <input id="grievanceRef" placeholder="Grievance ID or Grievance Number (example: 2026015)" />
-  </div>
-  <div class="row">
-    <select id="docTypeSelect">
-      <option value="">Select doc type after loading grievance docs</option>
-    </select>
-  </div>
-  <div class="row">
-    <button onclick="loadGrievanceDocs()">Load Grievance Docs</button>
-    <button onclick="resubmitDocType()">Resubmit Latest Matching Doc Type</button>
+  <div class="panel section" id="responsePanel">
+    <div class="section-head">
+      <div>
+        <div class="eyebrow">Debug Output</div>
+        <h2>Last Response</h2>
+      </div>
+    </div>
+    <pre id="out">Ready.</pre>
   </div>
   </div>
-  <div class="section">
-  <div class="row">
-    <input id="submissionId" placeholder="Standalone Submission ID (example: S2026...)" />
-  </div>
-  <div class="row">
-    <button onclick="loadStandaloneTrace()">Load Standalone Trace</button>
-    <button onclick="resubmitStandalone()">Resubmit Standalone</button>
-  </div>
-  </div>
-  <pre id="out">Ready.</pre>
   <script>
     const out = document.getElementById('out');
     const caseInput = document.getElementById('caseId');
@@ -1142,13 +1404,13 @@ async def ops_page(request: Request):
         rows.push(`
           <tr>
             <td>Grievance</td>
-            <td>${esc(item.doc_type || item.template_key || '')}</td>
-            <td>${esc(item.case_id || '')}<br><span class="muted">${esc(item.document_id || '')}</span></td>
-            <td>${esc(item.grievance_id || item.grievance_number || '')}</td>
-            <td>${esc(signerText(item.signer_order))}</td>
-            <td>${esc(item.document_status || '')}<br><span class="muted">${esc(item.case_status || '')}</span></td>
-            <td>${esc(item.created_at_utc || '')}</td>
-            <td class="link-group">
+            <td data-label="Document">${esc(item.doc_type || item.template_key || '')}</td>
+            <td data-label="Case / Submission">${esc(item.case_id || '')}<br><span class="muted">${esc(item.document_id || '')}</span></td>
+            <td data-label="Grievance / Filing">${esc(item.grievance_id || item.grievance_number || '')}</td>
+            <td data-label="Signer(s)">${esc(signerText(item.signer_order))}</td>
+            <td data-label="Status">${esc(item.document_status || '')}<br><span class="muted">${esc(item.case_status || '')}</span></td>
+            <td data-label="Created">${esc(item.created_at_utc || '')}</td>
+            <td class="link-group" data-label="Actions">
               <button type="button" data-action="trace-case" data-case-id="${esc(item.case_id || '')}">Trace</button>
               ${item.docuseal_signing_link ? `<a href="${esc(item.docuseal_signing_link)}" target="_blank" rel="noreferrer">Open Link</a>` : ''}
               <button
@@ -1166,13 +1428,13 @@ async def ops_page(request: Request):
         rows.push(`
           <tr>
             <td>Standalone</td>
-            <td>${esc(item.form_key || item.template_key || '')}</td>
-            <td>${esc(item.submission_id || '')}<br><span class="muted">${esc(item.document_id || '')}</span></td>
-            <td>${esc(item.sharepoint_folder_path || item.form_title || '')}</td>
-            <td>${esc(item.signer_email || '')}</td>
-            <td>${esc(item.document_status || '')}<br><span class="muted">${esc(item.submission_status || '')}</span></td>
-            <td>${esc(item.created_at_utc || '')}</td>
-            <td class="link-group">
+            <td data-label="Document">${esc(item.form_key || item.template_key || '')}</td>
+            <td data-label="Case / Submission">${esc(item.submission_id || '')}<br><span class="muted">${esc(item.document_id || '')}</span></td>
+            <td data-label="Grievance / Filing">${esc(item.sharepoint_folder_path || item.form_title || '')}</td>
+            <td data-label="Signer(s)">${esc(item.signer_email || '')}</td>
+            <td data-label="Status">${esc(item.document_status || '')}<br><span class="muted">${esc(item.submission_status || '')}</span></td>
+            <td data-label="Created">${esc(item.created_at_utc || '')}</td>
+            <td class="link-group" data-label="Actions">
               <button type="button" data-action="trace-standalone" data-submission-id="${esc(item.submission_id || '')}">Trace</button>
               ${item.docuseal_signing_link ? `<a href="${esc(item.docuseal_signing_link)}" target="_blank" rel="noreferrer">Open Link</a>` : ''}
               <button

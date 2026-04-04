@@ -1428,6 +1428,7 @@ def _render_officers_page(user: OfficerUserContext) -> str:
 <html>
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Officer Grievance Tracker</title>
   <style>
     :root {{
@@ -1755,6 +1756,7 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       border: 1px solid var(--sheet-border);
       background: white;
       scrollbar-gutter: stable both-edges;
+      -webkit-overflow-scrolling: touch;
     }}
     .tracker-table-wrap {{
       position: relative;
@@ -1906,6 +1908,105 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       .workspace-menu-bar,
       .menu-group {{
         align-items: flex-start;
+      }}
+    }}
+    @media (max-width: 760px) {{
+      body {{
+        padding: 12px;
+      }}
+      .panel {{
+        padding: 14px;
+        border-radius: 14px;
+      }}
+      .hero-panel {{
+        padding: 16px;
+      }}
+      .user-panel,
+      .workspace-menu-bar,
+      .section-header {{
+        flex-direction: column;
+        align-items: stretch;
+      }}
+      .menu-group,
+      .menu-link-list,
+      .section-actions,
+      .actions {{
+        width: 100%;
+      }}
+      .metric-grid {{
+        grid-template-columns: 1fr 1fr;
+      }}
+      .metric-card {{
+        min-height: 0;
+      }}
+      .tracker-table-wrap {{
+        max-height: none;
+        overflow: visible;
+      }}
+      .scrollbar-dock {{
+        display: none !important;
+      }}
+      #trackerTable {{
+        min-width: 0;
+      }}
+      #trackerTable thead {{
+        display: none;
+      }}
+      #trackerTable,
+      #trackerTable tbody,
+      #trackerTable tr,
+      #trackerTable td {{
+        display: block;
+        width: 100%;
+      }}
+      #trackerTable tr {{
+        margin-bottom: 12px;
+        border: 1px solid var(--sheet-border);
+        border-radius: 14px;
+        overflow: hidden;
+        background: white;
+      }}
+      #trackerTable td {{
+        border: 0;
+        border-top: 1px solid #e5ecf2;
+        padding: 10px 12px;
+      }}
+      #trackerTable td:first-child {{
+        border-top: 0;
+      }}
+      #trackerTable td::before {{
+        content: attr(data-label);
+        display: block;
+        margin-bottom: 4px;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: #607181;
+      }}
+      #trackerTable th.select-col,
+      #trackerTable td.select-col,
+      #trackerTable th.actions-col,
+      #trackerTable td.actions-col {{
+        position: static;
+        left: auto;
+        right: auto;
+        z-index: auto;
+        min-width: 0;
+        width: 100%;
+        box-shadow: none;
+        background: inherit;
+      }}
+      #trackerTable td.actions-col .row-actions {{
+        justify-content: flex-start;
+      }}
+      pre {{
+        max-height: 34vh;
+      }}
+    }}
+    @media (max-width: 520px) {{
+      .metric-grid {{
+        grid-template-columns: 1fr;
       }}
     }}
   </style>
@@ -2383,26 +2484,26 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       tableBody.innerHTML = rows.map((row) => `
         <tr class="${{row.officer_status === 'closed' ? 'closed-row' : ''}}">
           ${{ENABLE_SELECTION ? `
-            <td class="select-col">
+            <td class="select-col" data-label="Select">
               <input type="checkbox" data-select-case-id="${{esc(row.case_id)}}" ${{selectedCaseIds.has(row.case_id) ? 'checked' : ''}} />
             </td>` : ''}}
-          <td>${{esc(row.display_grievance)}}<div class="muted">${{esc(row.case_id)}}</div></td>
-          <td>${{contractCell(row)}}</td>
-          <td>${{esc(row.department || '')}}</td>
-          <td>${{esc(row.member_name || '')}}</td>
-          <td>${{esc(row.steward || '')}}</td>
-          <td>${{esc(row.occurrence_date || '')}}</td>
-          <td>${{esc(row.issue_summary || '')}}</td>
-          <td>${{esc(row.first_level_request_sent_date || '')}}</td>
-          <td>${{esc(row.second_level_request_sent_date || '')}}</td>
-          <td>${{esc(row.third_level_request_sent_date || '')}}</td>
-          <td>${{esc(row.fourth_level_request_sent_date || '')}}</td>
-          <td>${{esc(row.officer_assignee || '')}}</td>
-          <td><span class="badge ${{esc(row.officer_status)}}">${{esc(labelForStatus(row.officer_status))}}</span></td>
-          <td>${{esc(row.workflow_status || '')}}</td>
-          <td>${{esc(labelForSource(row.officer_source))}}</td>
+          <td data-label="Grievance Number">${{esc(row.display_grievance)}}<div class="muted">${{esc(row.case_id)}}</div></td>
+          <td data-label="Contract / Scope">${{contractCell(row)}}</td>
+          <td data-label="Department">${{esc(row.department || '')}}</td>
+          <td data-label="Name">${{esc(row.member_name || '')}}</td>
+          <td data-label="Steward">${{esc(row.steward || '')}}</td>
+          <td data-label="Date of Occurrence">${{esc(row.occurrence_date || '')}}</td>
+          <td data-label="Issue">${{esc(row.issue_summary || '')}}</td>
+          <td data-label="Date Sent 1st Level Request">${{esc(row.first_level_request_sent_date || '')}}</td>
+          <td data-label="Date Sent 2nd Level Request">${{esc(row.second_level_request_sent_date || '')}}</td>
+          <td data-label="Date Sent 3rd Level Request">${{esc(row.third_level_request_sent_date || '')}}</td>
+          <td data-label="Date Sent 4th Level Request">${{esc(row.fourth_level_request_sent_date || '')}}</td>
+          <td data-label="Assigned To">${{esc(row.officer_assignee || '')}}</td>
+          <td data-label="Officer Status"><span class="badge ${{esc(row.officer_status)}}">${{esc(labelForStatus(row.officer_status))}}</span></td>
+          <td data-label="Workflow Status">${{esc(row.workflow_status || '')}}</td>
+          <td data-label="Source">${{esc(labelForSource(row.officer_source))}}</td>
           ${{SHOW_ACTIONS ? `
-            <td class="actions-col">
+            <td class="actions-col" data-label="Actions">
               <div class="row-actions">
                 ${{VIEWER.can_edit ? `<button type="button" data-action="edit" data-case-id="${{esc(row.case_id)}}">Edit</button>` : ''}}
                 ${{VIEWER.can_view_audit ? `<button type="button" class="secondary" data-action="audit" data-case-id="${{esc(row.case_id)}}">Audit</button>` : ''}}

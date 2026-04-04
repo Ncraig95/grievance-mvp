@@ -10,11 +10,18 @@ Supported guides:
 - `mobility_meeting_request.md`
 - `grievance_data_request.md`
 - `true_intent_grievance_brief.md`
+- `non_discipline_grievance_brief.md`
+- `non_discipline_brief_README.md`
 - `disciplinary_grievance_brief.md`
 - `settlement_form_3106.md`
 - `mobility_record_of_grievance.md`
 - `bst_grievance_form_3g3a.md` (Q1-Q10 staging guide)
 - `att_mobility_bargaining_suggestion.md` (combined Forms + Power Automate handoff for the standalone workflow)
+
+Notes:
+
+- `non_discipline_grievance_brief.md` is the canonical guide for the first-class non-discipline brief workflow.
+- `non_discipline_brief_README.md` is retained as a short compatibility pointer for operators following older repo links.
 
 Automation toolkit:
 
@@ -59,3 +66,4 @@ Use `template_data` for document-specific placeholders.
 - For 3-step sequential signature flows (like 3G3A or `mobility_record_of_grievance`), pass explicit signer order in `documents[0].signers`.
 - For signed documents, completion emails to signers include the signed PDF attachment when the file is within `email.max_attachment_bytes`.
 - If you retry the same Forms response, keep the same `request_id` to avoid duplicates.
+- Shared Form/Flow deployments are supported when Power Automate branches on a required choice question and sends the correct `document_command`.

@@ -17,6 +17,7 @@ Replace each placeholder URL with the published Microsoft Form link for that loc
 | Local 3106 | Mobility Meeting Request | `mobility_meeting_request` | `https://forms.office.com/Pages/ResponsePage.aspx?id=Gm8hRgwHT0uKp3F4_OjDLETN-f9DdKFBsB6MNcKlT95UMERRWUI3VkIwNVlRNzZVWFU4MU8yU0FKVC4u` |
 | Local 3106 | Grievance Data Request | `grievance_data_request` | `https://forms.office.com/r/REPLACE-DATA-3106` |
 | Local 3106 | True Intent Grievance Brief | `true_intent_brief` | `https://forms.office.com/r/REPLACE-TRUEINTENT-3106` |
+| Local 3106 | Non-Discipline Grievance Brief | `non_discipline_brief` | `https://forms.office.com/r/REPLACE-NONDISCIPLINE-3106` |
 | Local 3106 | Disciplinary Grievance Brief | `disciplinary_brief` | `https://forms.office.com/r/REPLACE-DISCIPLINARY-3106` |
 | Local 3106 | Settlement Form 3106 | `settlement_form` | `https://forms.office.com/Pages/ResponsePage.aspx?id=Gm8hRgwHT0uKp3F4_OjDLETN-f9DdKFBsB6MNcKlT95UQzY4TVFaSUJPMVk0T1RUODhGVU0yQTE5UC4u` |
 | Local 3106 | Mobility Record of Grievance | `mobility_record_of_grievance` | `https://forms.office.com/r/REPLACE-MOBILITY-RECORD-3106` |
@@ -467,6 +468,7 @@ These are ready for intake integration now:
 - `mobility_meeting_request` -> `mobility-formal-grievance-meeting-request.docx`
 - `grievance_data_request` -> `grievance_data_request_form.docx`
 - `true_intent_brief` -> `form_true_intent_grievance_brief_revised_05.20.21.docx`
+- `non_discipline_brief` -> `Non Discipline guide to staff 2010.docx`
 - `disciplinary_brief` -> `form_disciplinary_grievance_brief_revised_05.19.21.docx`
 - `settlement_form` -> `Settlement Form 3106.docx`
 - `mobility_record_of_grievance` -> `mobility_record_of_grievance_revised.docx`
@@ -476,6 +478,7 @@ Equivalent full command names also work:
 - `mobility_formal_grievance_meeting_request`
 - `grievance_data_request_form`
 - `true_intent_grievance_brief`
+- `non_discipline_grievance_brief`
 - `disciplinary_grievance_brief`
 - `settlement_form_3106`
 - `mobility_record_of_grievance`
@@ -532,6 +535,7 @@ Detailed per-document setup guides:
 - `docs/power-automate/mobility_meeting_request.md`
 - `docs/power-automate/grievance_data_request.md`
 - `docs/power-automate/true_intent_grievance_brief.md`
+- `docs/power-automate/non_discipline_grievance_brief.md`
 - `docs/power-automate/disciplinary_grievance_brief.md`
 - `docs/power-automate/settlement_form_3106.md`
 - `docs/power-automate/mobility_record_of_grievance.md`
@@ -617,6 +621,23 @@ In Power Automate (Condition or Switch), map that answer to command + contract:
 - `AT&T Mobility` -> `document_command: "mobility_meeting_request"`, `contract: "AT&T Mobility"`
 
 All other meeting-request fields can stay identical between the two branches.
+
+## 10d) Single Microsoft Form for True Intent + Non-Discipline briefs
+
+If you want one shared Form/Flow:
+- Add a required multiple-choice question, for example `Brief type`
+- Choices: `True Intent Brief`, `Non-Discipline Brief`
+- Use Microsoft Forms branching so each choice lands on the matching section set for that brief
+
+In Power Automate (Condition or Switch), map that answer to command + narrative:
+- `True Intent Brief` -> `document_command: "true_intent_brief"`, `narrative: "True intent grievance brief"`
+- `Non-Discipline Brief` -> `document_command: "non_discipline_brief"`, `narrative: "Non-discipline grievance brief"`
+
+Shared branch guidance:
+- Keep `contract: "CWA"` fixed in both branches
+- Keep top-level grievant fields shared if you want one intake front page
+- Compose `template_data.grievant_name` in both branches
+- Send the branch-specific `template_data` fields required by the selected brief
 
 ## 11) Dynamic Statement Rows (Template-ready backend)
 

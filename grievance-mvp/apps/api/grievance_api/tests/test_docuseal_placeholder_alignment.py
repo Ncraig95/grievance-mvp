@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import requests
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -782,6 +783,254 @@ class DocuSealPlaceholderAlignmentTests(unittest.TestCase):
         self.assertEqual(mock_post.call_count, 1)
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload.get("submitters_order"), "random")
+
+    def test_clone_and_replace_replays_cookie_and_https_origin_for_proxy_web_base(self) -> None:
+        class _FakeResponse:
+            def __init__(self, *, status_code: int = 200, text: str = "", json_data: dict | None = None) -> None:
+                self.status_code = status_code
+                self.text = text
+                self._json_data = json_data or {}
+
+            def raise_for_status(self) -> None:
+                if self.status_code >= 400:
+                    raise requests.HTTPError(f"status={self.status_code}")
+
+            def json(self) -> dict:
+                return self._json_data
+
+        class _FakeSession:
+            def __init__(self) -> None:
+                self.cookies = requests.cookies.RequestsCookieJar()
+                self.cookies.set("_docu_seal_session", "session123")
+                self.get_calls: list[dict] = []
+                self.post_calls: list[dict] = []
+
+            def get(self, url: str, **kwargs) -> _FakeResponse:
+                self.get_calls.append({"url": url, **kwargs})
+                if url.endswith("/sign_in"):
+                    return _FakeResponse(
+                        text='<form><input type="hidden" name="authenticity_token" value="sign-in-token" /></form>'
+                    )
+                if url.endswith("/templates/2/edit"):
+                    return _FakeResponse(text='<meta name="csrf-token" content="edit-token" />')
+                raise AssertionError(f"unexpected GET {url}")
+
+            def post(self, url: str, **kwargs) -> _FakeResponse:
+                self.post_calls.append({"url": url, **kwargs})
+                if url.endswith("/sign_in"):
+                    return _FakeResponse(status_code=302)
+                if url.endswith("/clone_and_replace"):
+                    return _FakeResponse(json_data={"id": "83"})
+                raise AssertionError(f"unexpected POST {url}")
+
+        client = DocuSealClient(
+            "http://docuseal:3000",
+            "token",
+            web_base_url="http://docuseal_proxy:8080",
+            web_email="nick.craig@cwa3106.com",
+            web_password="secret",
+        )
+        fake_session = _FakeSession()
+
+        with patch("grievance_api.services.docuseal_client.requests.Session", return_value=fake_session):
+            with patch.object(client, "_apply_placeholder_field_alignment") as mock_align:
+                template_id = client._clone_and_replace_template(
+                    base_template_id="2",
+                    upload_pdf_bytes=b"%PDF",
+                    alignment_pdf_bytes=None,
+                    title="statement",
+                    form_key="statement_of_occurrence",
+                )
+
+        self.assertEqual(template_id, "83")
+        sign_in_headers = fake_session.post_calls[0]["headers"]
+        self.assertEqual(sign_in_headers["Origin"], "https://docuseal_proxy")
+        self.assertEqual(sign_in_headers["Referer"], "https://docuseal_proxy/sign_in")
+        self.assertEqual(sign_in_headers["Cookie"], "_docu_seal_session=session123")
+
+        edit_headers = fake_session.get_calls[1]["headers"]
+        self.assertEqual(edit_headers["Cookie"], "_docu_seal_session=session123")
+        self.assertEqual(edit_headers["Referer"], "https://docuseal_proxy/sign_in")
+
+        clone_headers = fake_session.post_calls[1]["headers"]
+        self.assertEqual(clone_headers["Origin"], "https://docuseal_proxy")
+        self.assertEqual(clone_headers["Referer"], "https://docuseal_proxy/templates/2/edit")
+        self.assertEqual(clone_headers["Cookie"], "_docu_seal_session=session123")
+        self.assertEqual(clone_headers["X-CSRF-Token"], "edit-token")
+        mock_align.assert_called_once()
+
+    def test_clone_and_replace_retries_alignment_when_verified_template_is_missing_named_fields(self) -> None:
+        class _FakeResponse:
+            def __init__(self, *, status_code: int = 200, text: str = "", json_data: dict | None = None) -> None:
+                self.status_code = status_code
+                self.text = text
+                self._json_data = json_data or {}
+
+            def raise_for_status(self) -> None:
+                if self.status_code >= 400:
+                    raise requests.HTTPError(f"status={self.status_code}")
+
+            def json(self) -> dict:
+                return self._json_data
+
+        class _FakeSession:
+            def __init__(self) -> None:
+                self.cookies = requests.cookies.RequestsCookieJar()
+                self.cookies.set("_docu_seal_session", "session123")
+
+            def get(self, url: str, **kwargs) -> _FakeResponse:
+                if url.endswith("/sign_in"):
+                    return _FakeResponse(
+                        text='<form><input type="hidden" name="authenticity_token" value="sign-in-token" /></form>'
+                    )
+                if url.endswith("/templates/2/edit"):
+                    return _FakeResponse(text='<meta name="csrf-token" content="edit-token" />')
+                raise AssertionError(f"unexpected GET {url}")
+
+            def post(self, url: str, **kwargs) -> _FakeResponse:
+                if url.endswith("/sign_in"):
+                    return _FakeResponse(status_code=302)
+                if url.endswith("/clone_and_replace"):
+                    return _FakeResponse(json_data={"id": "83"})
+                raise AssertionError(f"unexpected POST {url}")
+
+        client = DocuSealClient(
+            "http://docuseal:3000",
+            "token",
+            web_base_url="http://docuseal_proxy:8080",
+            web_email="nick.craig@cwa3106.com",
+            web_password="secret",
+        )
+        expected_fields = [
+            {
+                "name": "signer1_date",
+                "type": "date",
+                "submitter_uuid": "sub1",
+                "areas": [{"x": 0.63, "y": 0.76, "w": 0.18, "h": 0.02, "page": 0, "attachment_uuid": "att"}],
+            },
+            {
+                "name": "signer1_signature",
+                "type": "signature",
+                "submitter_uuid": "sub1",
+                "areas": [{"x": 0.17, "y": 0.75, "w": 0.23, "h": 0.04, "page": 0, "attachment_uuid": "att"}],
+            },
+        ]
+        invalid_template = {
+            "fields": [
+                {
+                    "name": "",
+                    "type": "signature",
+                    "submitter_uuid": "sub1",
+                    "areas": [{"x": 0.10, "y": 0.43, "w": 0.34, "h": 0.05, "page": 0, "attachment_uuid": "att"}],
+                }
+            ]
+        }
+        valid_template = {"fields": expected_fields}
+
+        with patch("grievance_api.services.docuseal_client.requests.Session", return_value=_FakeSession()):
+            with patch.object(client, "_extract_placeholder_areas", return_value={(1, "signature"): [{"page": 0}]}):
+                with patch.object(client, "_apply_placeholder_field_alignment", side_effect=[expected_fields, expected_fields]) as mock_align:
+                    with patch("grievance_api.services.docuseal_client.requests.get") as mock_get:
+                        mock_get.side_effect = [
+                            SimpleNamespace(status_code=200, json=lambda: invalid_template),
+                            SimpleNamespace(status_code=200, json=lambda: valid_template),
+                        ]
+                        template_id = client._clone_and_replace_template(
+                            base_template_id="2",
+                            upload_pdf_bytes=b"%PDF",
+                            alignment_pdf_bytes=b"%PDF",
+                            title="statement",
+                            form_key="statement_of_occurrence",
+                        )
+
+        self.assertEqual(template_id, "83")
+        self.assertEqual(mock_align.call_count, 2)
+
+    def test_clone_and_replace_raises_when_verified_template_stays_misaligned(self) -> None:
+        class _FakeResponse:
+            def __init__(self, *, status_code: int = 200, text: str = "", json_data: dict | None = None) -> None:
+                self.status_code = status_code
+                self.text = text
+                self._json_data = json_data or {}
+
+            def raise_for_status(self) -> None:
+                if self.status_code >= 400:
+                    raise requests.HTTPError(f"status={self.status_code}")
+
+            def json(self) -> dict:
+                return self._json_data
+
+        class _FakeSession:
+            def __init__(self) -> None:
+                self.cookies = requests.cookies.RequestsCookieJar()
+                self.cookies.set("_docu_seal_session", "session123")
+
+            def get(self, url: str, **kwargs) -> _FakeResponse:
+                if url.endswith("/sign_in"):
+                    return _FakeResponse(
+                        text='<form><input type="hidden" name="authenticity_token" value="sign-in-token" /></form>'
+                    )
+                if url.endswith("/templates/2/edit"):
+                    return _FakeResponse(text='<meta name="csrf-token" content="edit-token" />')
+                raise AssertionError(f"unexpected GET {url}")
+
+            def post(self, url: str, **kwargs) -> _FakeResponse:
+                if url.endswith("/sign_in"):
+                    return _FakeResponse(status_code=302)
+                if url.endswith("/clone_and_replace"):
+                    return _FakeResponse(json_data={"id": "83"})
+                raise AssertionError(f"unexpected POST {url}")
+
+        client = DocuSealClient(
+            "http://docuseal:3000",
+            "token",
+            web_base_url="http://docuseal_proxy:8080",
+            web_email="nick.craig@cwa3106.com",
+            web_password="secret",
+        )
+        expected_fields = [
+            {
+                "name": "signer1_date",
+                "type": "date",
+                "submitter_uuid": "sub1",
+                "areas": [{"x": 0.63, "y": 0.76, "w": 0.18, "h": 0.02, "page": 0, "attachment_uuid": "att"}],
+            },
+            {
+                "name": "signer1_signature",
+                "type": "signature",
+                "submitter_uuid": "sub1",
+                "areas": [{"x": 0.17, "y": 0.75, "w": 0.23, "h": 0.04, "page": 0, "attachment_uuid": "att"}],
+            },
+        ]
+        invalid_template = {
+            "fields": [
+                {
+                    "name": "",
+                    "type": "signature",
+                    "submitter_uuid": "sub1",
+                    "areas": [{"x": 0.10, "y": 0.43, "w": 0.34, "h": 0.05, "page": 0, "attachment_uuid": "att"}],
+                }
+            ]
+        }
+
+        with patch("grievance_api.services.docuseal_client.requests.Session", return_value=_FakeSession()):
+            with patch.object(client, "_extract_placeholder_areas", return_value={(1, "signature"): [{"page": 0}]}):
+                with patch.object(client, "_apply_placeholder_field_alignment", side_effect=[expected_fields, expected_fields]) as mock_align:
+                    with patch("grievance_api.services.docuseal_client.requests.get") as mock_get:
+                        mock_get.side_effect = [
+                            SimpleNamespace(status_code=200, json=lambda: invalid_template),
+                            SimpleNamespace(status_code=200, json=lambda: invalid_template),
+                        ]
+                        with self.assertRaisesRegex(RuntimeError, "alignment verification failed"):
+                            client._clone_and_replace_template(
+                                base_template_id="2",
+                                upload_pdf_bytes=b"%PDF",
+                                alignment_pdf_bytes=b"%PDF",
+                                title="statement",
+                                form_key="statement_of_occurrence",
+                            )
+
+        self.assertEqual(mock_align.call_count, 2)
 
     def test_table_trace_overrides_align_rows_and_columns(self) -> None:
         areas = {

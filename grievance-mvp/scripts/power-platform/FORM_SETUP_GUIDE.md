@@ -65,6 +65,20 @@ Use the detailed field-map docs under `grievance-mvp/docs/power-automate/` when 
 - Generate a starter payload with:
   `.\New-GrievancePayloadTemplate.ps1 -FormKey true_intent_brief -OutputPath .\output\true_intent_brief.payload.json -Overwrite`
 
+## Non-Discipline Grievance Brief
+
+- Detailed doc: `docs/power-automate/non_discipline_grievance_brief.md`
+- Compatibility pointer: `docs/power-automate/non_discipline_brief_README.md`
+- Endpoint: `POST /intake`
+- Document command: `non_discipline_brief`
+- Full command names that also work: `non_discipline_grievance_brief`, `non_disciplinary_brief`, `non_disciplinary_grievance_brief`
+- This is the first-class intake implementation of the 2010 non-discipline staff guide.
+- The repo supports this as a dedicated option and also documents how to branch to it from a shared True Intent + Non-Discipline Form/Flow.
+- Prefer `template_data.signer_email` only when you need to override the default signer behavior.
+- Use `.\New-NonDisciplineBriefPowerAutomatePack.ps1 -Overwrite` when you want the ready-to-wire Forms question sheet and flow body template in `scripts/power-platform/output/non_discipline_brief/`.
+- Generate a starter payload with:
+  `.\New-GrievancePayloadTemplate.ps1 -FormKey non_discipline_brief -OutputPath .\output\non_discipline_brief.payload.json -Overwrite`
+
 ## Disciplinary Grievance Brief
 
 - Detailed doc: `docs/power-automate/disciplinary_grievance_brief.md`

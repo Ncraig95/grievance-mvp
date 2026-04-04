@@ -31,6 +31,11 @@
       "publishedFormUrl": "",
       "flowDisplayName": "CWA 3106 - True Intent Brief Intake"
     },
+    "non_discipline_brief": {
+      "microsoftFormId": "",
+      "publishedFormUrl": "",
+      "flowDisplayName": "CWA 3106 - Non-Discipline Brief Intake"
+    },
     "disciplinary_brief": {
       "microsoftFormId": "",
       "publishedFormUrl": "",
