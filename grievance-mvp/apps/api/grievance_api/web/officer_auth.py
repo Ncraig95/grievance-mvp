@@ -884,7 +884,8 @@ async def officer_callback(request: Request):
     session = _session(request)
     flow = session.get(_SESSION_FLOW_KEY)
     if not isinstance(flow, dict):
-        raise HTTPException(status_code=400, detail="missing auth flow in session")
+        session.pop(_SESSION_NEXT_KEY, None)
+        return _login_redirect("/officers")
 
     try:
         result = _build_msal_client(cfg).acquire_token_by_auth_code_flow(flow, dict(request.query_params))

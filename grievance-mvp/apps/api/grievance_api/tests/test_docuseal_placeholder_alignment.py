@@ -946,6 +946,41 @@ class DocuSealPlaceholderAlignmentTests(unittest.TestCase):
         self.assertEqual(template_id, "83")
         self.assertEqual(mock_align.call_count, 2)
 
+    def test_template_alignment_validation_tolerates_docuseal_float_rounding(self) -> None:
+        expected_fields = [
+            {
+                "name": "signer1_date",
+                "type": "date",
+                "submitter_uuid": "sub1",
+                "areas": [
+                    {"x": 0.632190, "y": 0.247680, "w": 0.183007, "h": 0.015619, "page": 1, "attachment_uuid": "att"},
+                    {"x": 0.632190, "y": 0.348437, "w": 0.183007, "h": 0.015619, "page": 1, "attachment_uuid": "att"},
+                    {"x": 0.632190, "y": 0.382781, "w": 0.183007, "h": 0.015619, "page": 1, "attachment_uuid": "att"},
+                ],
+            }
+        ]
+        actual_template = {
+            "fields": [
+                {
+                    "name": "signer1_date",
+                    "type": "date",
+                    "submitter_uuid": "sub1",
+                    "areas": [
+                        {"x": 0.632190, "y": 0.247680, "w": 0.183007, "h": 0.015619, "page": 1, "attachment_uuid": "att"},
+                        {"x": 0.632190, "y": 0.348438, "w": 0.183007, "h": 0.015619, "page": 1, "attachment_uuid": "att"},
+                        {"x": 0.632190, "y": 0.382781, "w": 0.183007, "h": 0.015619, "page": 1, "attachment_uuid": "att"},
+                    ],
+                }
+            ]
+        }
+
+        with patch("grievance_api.services.docuseal_client.requests.get") as mock_get:
+            mock_get.return_value = SimpleNamespace(status_code=200, json=lambda: actual_template)
+            self.client._validate_template_field_alignment(
+                template_id="197",
+                expected_fields=expected_fields,
+            )
+
     def test_clone_and_replace_raises_when_verified_template_stays_misaligned(self) -> None:
         class _FakeResponse:
             def __init__(self, *, status_code: int = 200, text: str = "", json_data: dict | None = None) -> None:

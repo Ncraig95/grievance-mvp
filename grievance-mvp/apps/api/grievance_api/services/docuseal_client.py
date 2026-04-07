@@ -106,6 +106,7 @@ _MULTILINE_TEXT_PREFERENCES: dict[str, object] = {
     "valign": "top",
 }
 _CHECKBOX_GLYPHS = {"☐", "☒", "☑", "□"}
+_TEMPLATE_AREA_COMPARE_TOLERANCE = 0.00001
 
 
 class DocuSealClient:
@@ -351,6 +352,48 @@ class DocuSealClient:
             "areas": areas,
         }
 
+    @staticmethod
+    def _template_areas_match(actual: dict[str, object], expected: dict[str, object]) -> bool:
+        try:
+            if int(actual.get("page") or 0) != int(expected.get("page") or 0):
+                return False
+        except (TypeError, ValueError):
+            return False
+
+        for key in ("attachment_uuid", "option_uuid"):
+            if str(actual.get(key) or "").strip() != str(expected.get(key) or "").strip():
+                return False
+
+        for key in ("x", "y", "w", "h"):
+            try:
+                actual_value = float(actual.get(key) or 0.0)
+                expected_value = float(expected.get(key) or 0.0)
+            except (TypeError, ValueError):
+                return False
+            if abs(actual_value - expected_value) > _TEMPLATE_AREA_COMPARE_TOLERANCE:
+                return False
+
+        return True
+
+    def _template_fields_match(self, actual: dict[str, object], expected: dict[str, object]) -> bool:
+        for key in ("name", "type", "submitter_uuid"):
+            if str(actual.get(key) or "").strip() != str(expected.get(key) or "").strip():
+                return False
+
+        actual_areas = actual.get("areas")
+        expected_areas = expected.get("areas")
+        if not isinstance(actual_areas, list) or not isinstance(expected_areas, list):
+            return False
+        if len(actual_areas) != len(expected_areas):
+            return False
+
+        return all(
+            isinstance(actual_area, dict)
+            and isinstance(expected_area, dict)
+            and self._template_areas_match(actual_area, expected_area)
+            for actual_area, expected_area in zip(actual_areas, expected_areas)
+        )
+
     def _validate_template_field_alignment(
         self,
         *,
@@ -404,7 +447,7 @@ class DocuSealClient:
         mismatched = sorted(
             name
             for name in set(expected_by_name).intersection(actual_by_name)
-            if actual_by_name[name] != expected_by_name[name]
+            if not self._template_fields_match(actual_by_name[name], expected_by_name[name])
         )
         if missing or extras or mismatched:
             problems: list[str] = []

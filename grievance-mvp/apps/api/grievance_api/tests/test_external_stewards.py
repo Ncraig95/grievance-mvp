@@ -39,6 +39,7 @@ from grievance_api.web.routes_officers import (
 )
 from grievance_api.web.routes_ops import ops_page
 from grievance_api.web.routes_steward import (
+    _render_steward_page,
     assign_case_external_steward,
     case_external_stewards,
     create_external_steward_user,
@@ -275,6 +276,16 @@ class ExternalStewardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(response, RedirectResponse)
         self.assertEqual(response.status_code, 303)
         self.assertIn("/auth/steward/login?next=/steward", response.headers["location"])
+
+    async def test_render_steward_page_includes_mobile_table_layout(self) -> None:
+        html = _render_steward_page()
+
+        self.assertIn('name="viewport"', html)
+        self.assertIn('class="page-shell"', html)
+        self.assertIn('id="stewardCasesTable"', html)
+        self.assertIn("@media (max-width: 760px)", html)
+        self.assertIn("#stewardCasesTable td::before", html)
+        self.assertIn('data-label="Action Date"', html)
 
     async def test_external_callback_binds_allowlisted_user_and_stores_session(self) -> None:
         external_user_id = await self._insert_external_user(email="outside@example.org")

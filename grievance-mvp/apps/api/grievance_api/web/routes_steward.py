@@ -392,14 +392,16 @@ def _render_steward_page() -> str:
 <html>
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Steward Action Portal</title>
   <style>
-    body { font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif; margin: 20px; color: #1f2933; background: #f7fafc; }
+    body { font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; color: #1f2933; background: #f7fafc; }
     h1, h2 { margin: 0 0 12px; }
+    .page-shell { max-width: 1320px; margin: 0 auto; }
     .panel { background: #fff; border: 1px solid #dde4ea; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 10px 25px rgba(15, 23, 42, 0.05); }
     .user-panel { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
     .summary { color: #52606d; font-size: 14px; }
-    .table-wrap { overflow: auto; border-radius: 12px; }
+    .table-wrap { overflow: auto; border-radius: 12px; -webkit-overflow-scrolling: touch; }
     table { border-collapse: collapse; min-width: 1080px; width: 100%; background: white; }
     th, td { border: 1px solid #d9e2ec; padding: 10px; vertical-align: top; font-size: 14px; }
     th { background: #95cf46; color: white; text-align: left; }
@@ -410,9 +412,51 @@ def _render_steward_page() -> str:
     input[type="date"] { border: 1px solid #bfc8d2; border-radius: 8px; padding: 8px 10px; font: inherit; }
     .badge { display: inline-block; padding: 4px 10px; border-radius: 999px; background: #e7f0ff; color: #1f3a5f; font-weight: 600; }
     pre { white-space: pre-wrap; word-break: break-word; margin: 0; }
+    @media (max-width: 760px) {
+      body { padding: 12px; }
+      .panel { padding: 14px; border-radius: 14px; }
+      .user-panel { flex-direction: column; align-items: stretch; }
+      .actions { width: 100%; }
+      .actions button,
+      input[type="date"] { width: 100%; }
+      .table-wrap { overflow: visible; }
+      #stewardCasesTable { min-width: 0; }
+      #stewardCasesTable thead { display: none; }
+      #stewardCasesTable,
+      #stewardCasesTable tbody,
+      #stewardCasesTable tr,
+      #stewardCasesTable td {
+        display: block;
+        width: 100%;
+      }
+      #stewardCasesTable tr {
+        margin-bottom: 12px;
+        border: 1px solid #d9e2ec;
+        border-radius: 14px;
+        overflow: hidden;
+        background: white;
+      }
+      #stewardCasesTable td {
+        border: 0;
+        border-top: 1px solid #e5edf4;
+        padding: 10px 12px;
+      }
+      #stewardCasesTable td:first-child { border-top: 0; }
+      #stewardCasesTable td::before {
+        content: attr(data-label);
+        display: block;
+        margin-bottom: 4px;
+        font-size: 11px;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: #607181;
+      }
+    }
   </style>
 </head>
 <body>
+  <div class="page-shell">
   <h1>Steward Action Portal</h1>
   <div class="panel user-panel">
     <div>
@@ -433,7 +477,7 @@ def _render_steward_page() -> str:
 
   <div class="panel">
     <div class="table-wrap">
-      <table>
+      <table id="stewardCasesTable">
         <thead>
           <tr>
             <th>Grievance</th>
@@ -458,6 +502,7 @@ def _render_steward_page() -> str:
   <div class="panel">
     <h2>Last Response</h2>
     <pre id="out">Ready.</pre>
+  </div>
   </div>
 
   <script>
@@ -506,16 +551,16 @@ def _render_steward_page() -> str:
       }
       tableBody.innerHTML = rows.map((row) => `
         <tr>
-          <td>${esc(row.display_grievance)}<div class="summary">${esc(row.case_id)}</div></td>
-          <td>${esc(row.contract || '')}</td>
-          <td>${esc(row.member_name || '')}</td>
-          <td>${esc(row.issue_summary || '')}</td>
-          <td>${esc(row.second_level_request_sent_date || '')}</td>
-          <td>${esc(row.third_level_request_sent_date || '')}</td>
-          <td>${esc(row.fourth_level_request_sent_date || '')}</td>
-          <td><span class="badge">${esc(row.officer_status || '')}</span></td>
-          <td><input type="date" data-action-date-case="${esc(row.case_id)}" /></td>
-          <td>
+          <td data-label="Grievance">${esc(row.display_grievance)}<div class="summary">${esc(row.case_id)}</div></td>
+          <td data-label="Contract">${esc(row.contract || '')}</td>
+          <td data-label="Member">${esc(row.member_name || '')}</td>
+          <td data-label="Issue">${esc(row.issue_summary || '')}</td>
+          <td data-label="2nd Level">${esc(row.second_level_request_sent_date || '')}</td>
+          <td data-label="3rd Level">${esc(row.third_level_request_sent_date || '')}</td>
+          <td data-label="4th Level">${esc(row.fourth_level_request_sent_date || '')}</td>
+          <td data-label="Status"><span class="badge">${esc(row.officer_status || '')}</span></td>
+          <td data-label="Action Date"><input type="date" data-action-date-case="${esc(row.case_id)}" /></td>
+          <td data-label="Actions">
             <div class="actions">
               ${(row.available_actions || []).map((action) => `<button type="button" data-case-id="${esc(row.case_id)}" data-action-key="${esc(action)}">${esc(ACTION_LABELS[action] || action)}</button>`).join('')}
             </div>

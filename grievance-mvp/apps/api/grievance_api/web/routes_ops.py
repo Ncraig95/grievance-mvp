@@ -1403,7 +1403,7 @@ async def ops_page(request: Request):
       for (const item of caseDocs) {
         rows.push(`
           <tr>
-            <td>Grievance</td>
+            <td data-label="Kind">Grievance</td>
             <td data-label="Document">${esc(item.doc_type || item.template_key || '')}</td>
             <td data-label="Case / Submission">${esc(item.case_id || '')}<br><span class="muted">${esc(item.document_id || '')}</span></td>
             <td data-label="Grievance / Filing">${esc(item.grievance_id || item.grievance_number || '')}</td>
@@ -1427,7 +1427,7 @@ async def ops_page(request: Request):
       for (const item of standaloneDocs) {
         rows.push(`
           <tr>
-            <td>Standalone</td>
+            <td data-label="Kind">Standalone</td>
             <td data-label="Document">${esc(item.form_key || item.template_key || '')}</td>
             <td data-label="Case / Submission">${esc(item.submission_id || '')}<br><span class="muted">${esc(item.document_id || '')}</span></td>
             <td data-label="Grievance / Filing">${esc(item.sharepoint_folder_path || item.form_title || '')}</td>

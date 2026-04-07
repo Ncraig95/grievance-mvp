@@ -507,6 +507,19 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 303)
         self.assertEqual(response.headers["location"], "https://grievance.example.org/auth/login?next=/officers")
 
+    async def test_officer_callback_without_session_flow_redirects_back_to_login(self) -> None:
+        cfg = self._cfg(auth_enabled=True)
+        request = _Request(
+            state=SimpleNamespace(cfg=cfg, db=self.db),
+            query_params={"code": "test-code", "state": "missing"},
+        )
+
+        response = await officer_callback(request)
+
+        self.assertIsInstance(response, RedirectResponse)
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/auth/login?next=/officers")
+
     async def test_missing_group_claims_are_denied_cleanly(self) -> None:
         cfg = self._cfg(auth_enabled=True)
         request = _Request(
