@@ -18,6 +18,7 @@ from .services.notification_service import NotificationService
 from .services.sharepoint_graph import GraphUploader
 from .web.routes_approval import router as approval_router
 from .web.routes_health import router as health_router
+from .web.routes_hosted_forms import router as hosted_forms_router
 from .web.routes_intake import router as intake_router
 from .web.routes_internal_forms import router as internal_forms_router
 from .web.routes_notifications import router as notifications_router
@@ -124,6 +125,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health_router)
     app.include_router(officer_auth_router)
+    app.include_router(hosted_forms_router)
     app.include_router(intake_router)
     app.include_router(internal_forms_router)
     app.include_router(webhook_router)

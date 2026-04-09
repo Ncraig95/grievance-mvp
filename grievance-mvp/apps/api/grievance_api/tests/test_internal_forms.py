@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from grievance_api.web.routes_internal_forms import (
     NonDisciplineInternalFormSubmission,
@@ -15,6 +15,11 @@ from grievance_api.web.routes_internal_forms import (
 
 class _Request:
     def __init__(self, *, state, host: str = "127.0.0.1") -> None:  # noqa: ANN001
+        if not hasattr(state, "db"):
+            state = SimpleNamespace(
+                **state.__dict__,
+                db=SimpleNamespace(hosted_form_settings_by_key=AsyncMock(return_value={})),
+            )
         self.app = SimpleNamespace(state=state)
         self.client = SimpleNamespace(host=host)
         self.headers = {"host": host}
@@ -94,7 +99,7 @@ class InternalFormsTests(unittest.IsolatedAsyncioTestCase):
         html = response.body.decode("utf-8")
 
         self.assertIn("Non-Discipline Grievance Brief", html)
-        self.assertIn("FORM_ENDPOINT = '/internal/forms/non-discipline-brief/submissions'", html)
+        self.assertIn("/internal/forms/non-discipline-brief/submissions", html)
         self.assertIn("document command", html.lower())
         self.assertIn("non_discipline_brief", html)
         self.assertIn("issue_or_condition_involved", html)
@@ -109,19 +114,21 @@ class InternalFormsTests(unittest.IsolatedAsyncioTestCase):
             "documents": [],
         }
 
-        with patch("grievance_api.web.routes_internal_forms.requests.post") as mock_post:
-            mock_post.return_value = SimpleNamespace(status_code=200, text=json.dumps(response_payload))
+        with patch("grievance_api.web.routes_internal_forms.submit_hosted_form") as mock_submit:
+            mock_submit.return_value = {
+                "request_id": "forms-internal-test-1",
+                "form_key": "non_discipline_brief",
+                "route_type": "intake",
+                "backend_response": response_payload,
+            }
             result = await submit_non_discipline_internal_form(_submission(), request)
 
-        called_url = mock_post.call_args.args[0]
-        called_body = json.loads(mock_post.call_args.kwargs["data"].decode("utf-8"))
-        called_headers = mock_post.call_args.kwargs["headers"]
-
-        self.assertEqual(called_url, "http://127.0.0.1:8080/intake")
-        self.assertEqual(called_headers["X-Intake-Key"], "shared-secret")
+        called_form_key = mock_submit.call_args.args[0]
+        called_body = mock_submit.call_args.args[1]
+        self.assertEqual(called_form_key, "non_discipline_brief")
         self.assertEqual(called_body["request_id"], "forms-internal-test-1")
-        self.assertEqual(called_body["document_command"], "non_discipline_brief")
-        self.assertEqual(called_body["template_data"]["grievant_name"], "Taylor Jones")
+        self.assertEqual(called_body["grievant_firstname"], "Taylor")
+        self.assertEqual(called_body["recommendation"], "Advance the grievance and seek full make-whole relief.")
         self.assertEqual(result["request_id"], "forms-internal-test-1")
         self.assertEqual(result["document_command"], "non_discipline_brief")
         self.assertEqual(result["intake_response"], response_payload)

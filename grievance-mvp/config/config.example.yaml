@@ -124,6 +124,7 @@ officer_auth:
       contract_aliases:
       - COJ
       - City of Jacksonville
+      - City of Jacksonville (COJ)
     mobility:
       group_ids: []
       contract_aliases:
@@ -134,6 +135,26 @@ officer_auth:
       group_ids: []
       contract_aliases:
       - IHX
+    core_southeastern:
+      group_ids: []
+      contract_aliases:
+      - Core Southeastern
+      - Core Southeast
+      - Core Southest
+    construction:
+      group_ids: []
+      contract_aliases:
+      - Construction
+    yellow_pages_thrive:
+      group_ids: []
+      contract_aliases:
+      - Yellow Pages / Thrive
+      - Yellow Pages
+      - Thrive
+    mobility_ihx:
+      group_ids: []
+      contract_aliases:
+      - Mobility / IHX
     utilities:
       group_ids: []
       contract_aliases:

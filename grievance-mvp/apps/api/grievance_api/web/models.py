@@ -413,3 +413,26 @@ class ExternalStewardActionResponse(BaseModel):
     fourth_level_request_sent_date: str | None = None
     officer_closed_at_utc: str | None = None
     officer_closed_by: str | None = None
+
+
+class HostedFormSettingsUpdateRequest(BaseModel):
+    visibility: str | None = None
+    enabled: bool | None = None
+
+
+class HostedFormAdminRow(BaseModel):
+    form_key: str
+    title: str
+    route_type: str
+    public_path: str
+    target_path: str
+    visibility: str
+    enabled: bool
+    default_visibility: str
+    default_enabled: bool
+    updated_by: str | None = None
+    updated_at_utc: str | None = None
+
+
+class HostedFormAdminListResponse(BaseModel):
+    rows: list[HostedFormAdminRow] = Field(default_factory=list)

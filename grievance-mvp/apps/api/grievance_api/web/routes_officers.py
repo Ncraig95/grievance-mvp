@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..core.ids import new_case_id, new_grievance_id, normalize_grievance_id
 from ..db.db import Db, utcnow
+from ..services.case_folder_naming import build_case_folder_member_name
 from ..services.contract_timeline import parse_incident_date
 from .admin_common import parse_json_safely
 from .models import (
@@ -35,6 +36,9 @@ from .officer_auth import (
     OfficerUserContext,
     actor_identity,
     audit_actor_details,
+    case_scope_matches_user_scopes,
+    known_contract_scopes,
+    manual_contract_choices,
     normalize_scope_key,
     officer_auth_enabled,
     require_admin_user,
@@ -42,6 +46,8 @@ from .officer_auth import (
     require_case_edit_access,
     require_officer_page_access,
     resolve_contract_scope,
+    selectable_contract_scopes,
+    scope_display_label,
     user_can_view_case,
 )
 
@@ -269,6 +275,19 @@ def _build_officer_case_row(cfg, row: tuple[object, ...]) -> OfficerCaseRow:  # 
     )
 
 
+def _render_scope_pills(scopes: tuple[str, ...] | list[str]) -> str:
+    labels: list[str] = []
+    seen: set[str] = set()
+    for scope in scopes:
+        label = scope_display_label(scope)
+        normalized_label = label.strip().lower()
+        if not normalized_label or normalized_label in seen:
+            continue
+        seen.add(normalized_label)
+        labels.append(label)
+    return "".join(f'<span class="scope-pill">{escape(label)}</span>' for label in labels)
+
+
 def _case_matches_filters(
     row: OfficerCaseRow,
     *,
@@ -290,7 +309,7 @@ def _case_matches_filters(
         return False
     if source_text and row.officer_source != source_text:
         return False
-    if contract_scope_text and normalize_scope_key(row.contract_scope) != contract_scope_text:
+    if contract_scope_text and not case_scope_matches_user_scopes(row.contract_scope, (contract_scope_text,)):
         return False
     if not search_text:
         return True
@@ -554,12 +573,13 @@ def _user_can_select_rows(user: OfficerUserContext) -> bool:
 
 
 def _configured_contract_scopes(cfg) -> list[str]:  # noqa: ANN001
-    return sorted(str(scope_key).strip() for scope_key in cfg.officer_auth.chief_steward_contract_scopes if str(scope_key).strip())
+    _ = cfg
+    return [scope_key for scope_key, _label in selectable_contract_scopes()]
 
 
 def _normalize_contract_scope_input(cfg, value: object) -> str:  # noqa: ANN001
     normalized = normalize_scope_key(value)
-    if not normalized or normalized not in cfg.officer_auth.chief_steward_contract_scopes:
+    if not normalized or normalized not in known_contract_scopes(cfg):
         raise HTTPException(status_code=400, detail="invalid contract_scope")
     return normalized
 
@@ -912,13 +932,22 @@ async def _delete_chief_steward_assignment(db: Db, assignment_id: int) -> ChiefS
     )
 
 
-def _render_officers_page(user: OfficerUserContext) -> str:
+def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     viewer_payload = json.dumps(_build_viewer_model(user).model_dump(mode="json"), ensure_ascii=False)
     show_selection = _user_can_select_rows(user)
     show_actions = user.can_edit or user.can_delete or user.can_view_audit
     show_bulk_panel = user.can_bulk_edit or user.can_bulk_delete
     show_mutation_split = user.can_create or user.can_edit
     edit_contract_disabled_attr = "" if user.can_delete else "disabled"
+    fixed_scope_options_json = json.dumps(
+        [{"value": scope_key, "label": label} for scope_key, label in selectable_contract_scopes()],
+        ensure_ascii=False,
+    )
+    scope_label_keys = set(known_contract_scopes(cfg)).union({"mobility", "ihx", "utilities"})
+    scope_labels_json = json.dumps(
+        {scope_key: scope_display_label(scope_key) for scope_key in sorted(scope_label_keys)},
+        ensure_ascii=False,
+    )
     role_labels = {
         "admin": "Admin",
         "chief_steward": "Chief Steward",
@@ -936,10 +965,7 @@ def _render_officers_page(user: OfficerUserContext) -> str:
     else:
         hero_summary = "Review grievance activity in a read-only tracker view."
     if user.contract_scopes:
-        scope_pills = "".join(
-            f'<span class="scope-pill">{escape(str(scope).replace("_", " ").title())}</span>'
-            for scope in user.contract_scopes
-        )
+        scope_pills = _render_scope_pills(user.contract_scopes)
     elif user.role == "admin":
         scope_pills = '<span class="scope-pill scope-pill-muted">All configured scopes</span>'
     elif user.auth_enabled:
@@ -998,6 +1024,15 @@ def _render_officers_page(user: OfficerUserContext) -> str:
                 ),
             ]
         )
+    if user.role == "admin" or not user.auth_enabled:
+        admin_links.append(
+            _menu_link(
+                "Hosted Forms",
+                "/officers/forms",
+                "Manage hosted form visibility and enabled state.",
+                external=True,
+            )
+        )
     system_links: list[str] = []
     if user.role == "admin" or not user.auth_enabled:
         system_links.append(_menu_link("Ops Console", "/ops", "Open the signature and submission operations queue.", external=True))
@@ -1048,6 +1083,10 @@ def _render_officers_page(user: OfficerUserContext) -> str:
           <option value="open_at_national">Open at National</option>
           <option value="closed">Closed</option>
     """
+    manual_contract_options = '<option value="">Select scope</option>' + "".join(
+        f'<option value="{escape(value, quote=True)}">{escape(label)}</option>'
+        for value, label in manual_contract_choices()
+    )
     selection_header = (
         '<th class="main select-col"><input id="selectAllRows" type="checkbox" aria-label="Select all rows" /></th>'
         if show_selection
@@ -1276,14 +1315,13 @@ def _render_officers_page(user: OfficerUserContext) -> str:
     <div class="panel">
       <h2>Manual Paper Entry</h2>
       <div class="grid">
-        <label>Grievance Number
-          <input id="createGrievanceNumber" placeholder="Optional display number" />
+        <label>Grievance ID / Number
+          <input id="createGrievanceNumber" placeholder="Optional grievance number" />
         </label>
-        <label>Grievance ID
-          <input id="createGrievanceId" placeholder="Optional internal/reference id" />
-        </label>
-        <label>Contract / Scope
-          <input id="createContract" placeholder="Required for chief-steward scoping" />
+        <label>Scope
+          <select id="createContract">
+{manual_contract_options}
+          </select>
         </label>
         <label>Member Name
           <input id="createMemberName" placeholder="Required" />
@@ -1367,7 +1405,9 @@ def _render_officers_page(user: OfficerUserContext) -> str:
           <input id="editMemberEmail" />
         </label>
         <label>Contract / Scope
-          <input id="editContract" {edit_contract_disabled_attr} />
+          <select id="editContract" {edit_contract_disabled_attr}>
+{manual_contract_options}
+          </select>
         </label>
         <label>Department
           <input id="editDepartment" />
@@ -2167,6 +2207,8 @@ def _render_officers_page(user: OfficerUserContext) -> str:
 
   <script>
     const VIEWER = {viewer_payload};
+    const FIXED_SCOPE_OPTIONS = {fixed_scope_options_json};
+    const SCOPE_LABELS = {scope_labels_json};
     const ENABLE_SELECTION = {str(show_selection).lower()};
     const SHOW_ACTIONS = {str(show_actions).lower()};
     const EMPTY_COLSPAN = 15 + (ENABLE_SELECTION ? 1 : 0) + (SHOW_ACTIONS ? 1 : 0);
@@ -2271,7 +2313,17 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       return 'Read Only';
     }}
 
+    function normalizeScopeKey(value) {{
+      return String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+    }}
+
     function scopeLabel(value) {{
+      const normalized = normalizeScopeKey(value);
+      if (normalized && SCOPE_LABELS[normalized]) return SCOPE_LABELS[normalized];
       return String(value || '').replace(/_/g, ' ').replace(/\\b\\w/g, (ch) => ch.toUpperCase());
     }}
 
@@ -2293,38 +2345,22 @@ def _render_officers_page(user: OfficerUserContext) -> str:
     }}
 
     function populateScopeOptions(values, selectedValue) {{
-      const seen = new Set();
-      const options = [];
-      for (const value of values || []) {{
-        const text = String(value || '').trim();
-        if (!text || seen.has(text.toLowerCase())) continue;
-        seen.add(text.toLowerCase());
-        options.push(text);
-      }}
-      filterContractScope.innerHTML = '<option value="">All scopes</option>' + options
-        .sort((a, b) => a.localeCompare(b))
-        .map((value) => `<option value="${{esc(value)}}">${{esc(scopeLabel(value))}}</option>`)
+      void values;
+      filterContractScope.innerHTML = '<option value="">All scopes</option>' + FIXED_SCOPE_OPTIONS
+        .map((option) => `<option value="${{esc(option.value)}}">${{esc(option.label)}}</option>`)
         .join('');
       if (selectedValue) filterContractScope.value = selectedValue;
     }}
 
     function populateChiefAssignmentScopeOptions(values, selectedValue) {{
       if (!chiefAssignmentScope) return;
-      const seen = new Set();
-      const options = [];
-      for (const value of values || []) {{
-        const text = String(value || '').trim();
-        if (!text || seen.has(text.toLowerCase())) continue;
-        seen.add(text.toLowerCase());
-        options.push(text);
-      }}
-      if (!options.length) {{
+      void values;
+      if (!FIXED_SCOPE_OPTIONS.length) {{
         chiefAssignmentScope.innerHTML = '<option value="">No scopes configured</option>';
         return;
       }}
-      chiefAssignmentScope.innerHTML = '<option value="">Select scope</option>' + options
-        .sort((a, b) => a.localeCompare(b))
-        .map((value) => `<option value="${{esc(value)}}">${{esc(scopeLabel(value))}}</option>`)
+      chiefAssignmentScope.innerHTML = '<option value="">Select scope</option>' + FIXED_SCOPE_OPTIONS
+        .map((option) => `<option value="${{esc(option.value)}}">${{esc(option.label)}}</option>`)
         .join('');
       if (selectedValue) chiefAssignmentScope.value = selectedValue;
     }}
@@ -2550,7 +2586,7 @@ def _render_officers_page(user: OfficerUserContext) -> str:
 
     function resetCreateForm() {{
       for (const id of [
-        'createGrievanceNumber', 'createGrievanceId', 'createContract', 'createMemberName', 'createMemberEmail',
+        'createGrievanceNumber', 'createContract', 'createMemberName', 'createMemberEmail',
         'createDepartment', 'createSteward', 'createOccurrenceDate', 'createFirstLevelDate',
         'createSecondLevelDate', 'createThirdLevelDate', 'createFourthLevelDate',
         'createAssigneeManual', 'createIssueSummary', 'createOfficerNotes'
@@ -2563,9 +2599,9 @@ def _render_officers_page(user: OfficerUserContext) -> str:
     }}
 
     async function createCase() {{
+      const grievanceValue = nullableValue('createGrievanceNumber');
       const payload = {{
-        grievance_number: nullableValue('createGrievanceNumber'),
-        grievance_id: nullableValue('createGrievanceId'),
+        grievance_number: grievanceValue,
         contract: nullableValue('createContract'),
         member_name: valueOf('createMemberName'),
         member_email: nullableValue('createMemberEmail'),
@@ -2581,6 +2617,7 @@ def _render_officers_page(user: OfficerUserContext) -> str:
         officer_notes: nullableValue('createOfficerNotes'),
         officer_status: valueOf('createOfficerStatus') || 'open'
       }};
+      if (grievanceValue) payload.grievance_id = grievanceValue;
       try {{
         const data = await call('/officers/cases', {{
           method: 'POST',
@@ -2722,7 +2759,9 @@ def _render_officers_page(user: OfficerUserContext) -> str:
       document.getElementById('editGrievanceNumber').value = row.grievance_number || row.display_grievance || '';
       document.getElementById('editMemberName').value = row.member_name || '';
       document.getElementById('editMemberEmail').value = row.member_email || '';
-      if (document.getElementById('editContract')) document.getElementById('editContract').value = row.contract || '';
+      if (document.getElementById('editContract')) {{
+        document.getElementById('editContract').value = scopeLabel(row.contract_scope || row.contract || '');
+      }}
       document.getElementById('editDepartment').value = row.department || '';
       document.getElementById('editSteward').value = row.steward || '';
       document.getElementById('editOccurrenceDate').value = row.occurrence_date || '';
@@ -3249,7 +3288,7 @@ async def officers_page(request: Request):
     gate = await require_officer_page_access(request, next_path="/officers")
     if isinstance(gate, RedirectResponse):
         return gate
-    return HTMLResponse(_render_officers_page(gate))
+    return HTMLResponse(_render_officers_page(gate, request.app.state.cfg))
 
 
 @router.get("/officers/cases", response_model=OfficerCaseListResponse)
@@ -3489,10 +3528,11 @@ async def create_officer_case(body: OfficerCaseCreateRequest, request: Request):
     user = await require_admin_user(request)
     db: Db = request.app.state.db
     cfg = request.app.state.cfg
+    graph = getattr(request.app.state, "graph", None)
 
     case_id = new_case_id()
-    grievance_id = normalize_grievance_id(body.grievance_id) or new_grievance_id()
     grievance_number = _normalize_optional_text(body.grievance_number)
+    grievance_id = normalize_grievance_id(body.grievance_id or grievance_number) or new_grievance_id()
     member_name = _normalize_member_name(body.member_name)
     member_email = _normalize_optional_text(body.member_email)
     contract = _normalize_optional_text(body.contract)
@@ -3512,6 +3552,33 @@ async def create_officer_case(body: OfficerCaseCreateRequest, request: Request):
     closed_at_utc = utcnow() if officer_status == "closed" else None
     closed_by = updated_by if officer_status == "closed" else None
     contract_scope = resolve_contract_scope(cfg, contract)
+    folder_member_name = build_case_folder_member_name(member_name, contract)
+    graph_cfg = getattr(cfg, "graph", None)
+    sharepoint_case_folder: str | None = None
+    sharepoint_case_web_url: str | None = None
+    sharepoint_folder_id: str | None = None
+
+    if (
+        graph is not None
+        and graph_cfg is not None
+        and getattr(graph_cfg, "site_hostname", "")
+        and getattr(graph_cfg, "site_path", "")
+        and getattr(graph_cfg, "document_library", "")
+    ):
+        try:
+            folder_ref = graph.ensure_case_folder(
+                site_hostname=graph_cfg.site_hostname,
+                site_path=graph_cfg.site_path,
+                library=graph_cfg.document_library,
+                case_parent_folder=graph_cfg.case_parent_folder,
+                grievance_id=grievance_id,
+                member_name=folder_member_name,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="unable to create SharePoint case folder") from exc
+        sharepoint_case_folder = folder_ref.folder_name
+        sharepoint_case_web_url = folder_ref.web_url
+        sharepoint_folder_id = folder_ref.folder_id
 
     await db.exec(
         """INSERT INTO cases(
@@ -3543,8 +3610,8 @@ async def create_officer_case(body: OfficerCaseCreateRequest, request: Request):
                 member_name=member_name,
                 officer_status=officer_status,
             ),
-            None,
-            None,
+            sharepoint_case_folder,
+            sharepoint_case_web_url,
             officer_status,
             officer_assignee,
             officer_notes,
@@ -3562,6 +3629,18 @@ async def create_officer_case(body: OfficerCaseCreateRequest, request: Request):
             fourth_level_request_sent_date,
         ),
     )
+    if sharepoint_case_folder:
+        await db.add_event(
+            case_id,
+            None,
+            "sharepoint_upload_target_resolved",
+            {
+                "folder_id": sharepoint_folder_id,
+                "folder_name": sharepoint_case_folder,
+                "folder_web_url": sharepoint_case_web_url,
+                "case_parent_folder": graph_cfg.case_parent_folder if graph_cfg is not None else None,
+            },
+        )
     await db.add_event(
         case_id,
         None,
@@ -3575,6 +3654,7 @@ async def create_officer_case(body: OfficerCaseCreateRequest, request: Request):
             "grievance_number": grievance_number,
             "request_id": request_id,
             "contract": contract,
+            "sharepoint_case_folder": sharepoint_case_folder,
             **audit_actor_details(user, case_contract_scope=contract_scope, bulk=False),
         },
     )

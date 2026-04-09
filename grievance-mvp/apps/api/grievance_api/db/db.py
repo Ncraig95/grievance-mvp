@@ -146,6 +146,48 @@ class Db:
         self._table_columns_cache[table] = cols
         return cols
 
+    async def hosted_form_settings_by_key(self) -> dict[str, tuple[str, int, str | None, str | None]]:
+        rows = await self.fetchall(
+            """SELECT form_key, visibility, enabled, updated_by, updated_at_utc
+               FROM hosted_form_settings"""
+        )
+        return {
+            str(row[0]): (
+                str(row[1] or ""),
+                int(row[2] or 0),
+                str(row[3]) if row[3] is not None else None,
+                str(row[4]) if row[4] is not None else None,
+            )
+            for row in rows
+        }
+
+    async def upsert_hosted_form_setting(
+        self,
+        *,
+        form_key: str,
+        visibility: str,
+        enabled: bool,
+        updated_by: str | None,
+    ) -> None:
+        await self.exec(
+            """
+            INSERT INTO hosted_form_settings(form_key, visibility, enabled, updated_by, updated_at_utc)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(form_key) DO UPDATE SET
+              visibility=excluded.visibility,
+              enabled=excluded.enabled,
+              updated_by=excluded.updated_by,
+              updated_at_utc=excluded.updated_at_utc
+            """,
+            (
+                form_key,
+                visibility,
+                1 if enabled else 0,
+                updated_by,
+                utcnow(),
+            ),
+        )
+
     async def add_event(self, case_id: str, document_id: str | None, event_type: str, details: dict) -> None:
         cols = await self.table_columns("events")
         ts = utcnow()

@@ -62,6 +62,18 @@ def migrate(db_path: str) -> None:
 
         con.execute(
             """
+            CREATE TABLE IF NOT EXISTS hosted_form_settings (
+              form_key TEXT PRIMARY KEY,
+              visibility TEXT NOT NULL,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              updated_by TEXT,
+              updated_at_utc TEXT NOT NULL
+            )
+            """
+        )
+
+        con.execute(
+            """
             CREATE TABLE IF NOT EXISTS document_stages (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               case_id TEXT NOT NULL,
@@ -281,6 +293,12 @@ def migrate(db_path: str) -> None:
 
         _ensure_column(con, "standalone_outbound_emails", "submission_id", "TEXT")
         _ensure_column(con, "standalone_outbound_emails", "document_scope_id", "TEXT NOT NULL DEFAULT ''")
+
+        _ensure_column(con, "hosted_form_settings", "form_key", "TEXT")
+        _ensure_column(con, "hosted_form_settings", "visibility", "TEXT NOT NULL DEFAULT 'public'")
+        _ensure_column(con, "hosted_form_settings", "enabled", "INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(con, "hosted_form_settings", "updated_by", "TEXT")
+        _ensure_column(con, "hosted_form_settings", "updated_at_utc", "TEXT")
 
         doc_cols = _table_columns(con, "documents")
         if "pdf_sha256" not in doc_cols and "pdf_sa256" in doc_cols:

@@ -57,6 +57,14 @@ CREATE TABLE IF NOT EXISTS standalone_form_sequences (
   PRIMARY KEY (form_key, year)
 );
 
+CREATE TABLE IF NOT EXISTS hosted_form_settings (
+  form_key TEXT PRIMARY KEY,
+  visibility TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  updated_by TEXT,
+  updated_at_utc TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS documents (
   id TEXT PRIMARY KEY,
   case_id TEXT NOT NULL,

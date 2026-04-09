@@ -37,6 +37,34 @@ _EXTERNAL_STEWARD_STATUS_ACTIVE = "active"
 _EXTERNAL_STEWARD_STATUS_DISABLED = "disabled"
 
 _EXTERNAL_OIDC_TIMEOUT_SECONDS = 15
+_DEFAULT_CONTRACT_SCOPE_DEFINITIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("coj", "City of Jacksonville (COJ)", ("City of Jacksonville", "City of Jacksonville (COJ)", "COJ")),
+    ("wire_tech", "Wire Tech (WT)", ("Wire Tech", "Wire Tech (WT)", "WT")),
+    ("core_southeastern", "Core Southeastern", ("Core Southeastern", "Core Southeast", "Core Southest")),
+    ("construction", "Construction", ("Construction",)),
+    ("yellow_pages_thrive", "Yellow Pages / Thrive", ("Yellow Pages / Thrive", "Yellow Pages", "Thrive")),
+    ("mobility_ihx", "Mobility / IHX", ("Mobility / IHX",)),
+    ("mobility", "Mobility", ("Mobility", "AT&T Mobility", "ATT Mobility")),
+    ("ihx", "IHX", ("IHX",)),
+    ("utilities", "Utilities", ("Utilities", "Utility")),
+)
+_FIXED_SCOPE_CHOICES: tuple[tuple[str, str], ...] = (
+    ("coj", "City of Jacksonville (COJ)"),
+    ("wire_tech", "Wire Tech (WT)"),
+    ("core_southeastern", "Core Southeastern"),
+    ("construction", "Construction"),
+    ("yellow_pages_thrive", "Yellow Pages / Thrive"),
+    ("mobility_ihx", "Mobility / IHX"),
+)
+_CASE_SCOPE_COMPATIBILITY: dict[str, tuple[str, ...]] = {
+    "core_southeastern": ("core_southeastern", "utilities"),
+    "utilities": ("core_southeastern", "utilities"),
+    "mobility_ihx": ("mobility_ihx", "mobility", "ihx"),
+    "mobility": ("mobility_ihx", "mobility", "ihx"),
+    "ihx": ("mobility_ihx", "mobility", "ihx"),
+}
+
+
 @dataclass(frozen=True)
 class OfficerUserContext:
     user_id: str | None
@@ -105,6 +133,64 @@ def normalize_scope_key(value: object) -> str:
             chars.append("_")
             last_was_sep = True
     return "".join(chars).strip("_")
+
+
+def manual_contract_choices() -> tuple[tuple[str, str], ...]:
+    return (
+        ("City of Jacksonville", "City of Jacksonville (COJ)"),
+        ("Wire Tech", "Wire Tech (WT)"),
+        ("Core Southeastern", "Core Southeastern"),
+        ("Construction", "Construction"),
+        ("Yellow Pages / Thrive", "Yellow Pages / Thrive"),
+        ("Mobility / IHX", "Mobility / IHX"),
+    )
+
+
+def selectable_contract_scopes() -> tuple[tuple[str, str], ...]:
+    return _FIXED_SCOPE_CHOICES
+
+
+def scope_display_label(value: object) -> str:
+    normalized = normalize_scope_key(value)
+    for scope_key, label in _FIXED_SCOPE_CHOICES:
+        if normalized == scope_key:
+            return label
+    compatibility_label_map = {
+        "utilities": "Core Southeastern",
+        "mobility": "Mobility / IHX",
+        "ihx": "Mobility / IHX",
+    }
+    if normalized in compatibility_label_map:
+        return compatibility_label_map[normalized]
+    for scope_key, label, _aliases in _DEFAULT_CONTRACT_SCOPE_DEFINITIONS:
+        if normalized == scope_key:
+            return label
+    return str(value or "").replace("_", " ").title()
+
+
+def known_contract_scopes(cfg: AppConfig) -> tuple[str, ...]:
+    scopes = {scope_key for scope_key, _label, _aliases in _DEFAULT_CONTRACT_SCOPE_DEFINITIONS}
+    scopes.update(
+        normalize_scope_key(scope_key)
+        for scope_key in cfg.officer_auth.chief_steward_contract_scopes
+        if normalize_scope_key(scope_key)
+    )
+    return tuple(sorted(scopes))
+
+
+def case_scope_matches_user_scopes(contract_scope: str | None, user_scopes: tuple[str, ...]) -> bool:
+    normalized_scope = normalize_scope_key(contract_scope)
+    if not normalized_scope:
+        return False
+    case_scopes = set(_CASE_SCOPE_COMPATIBILITY.get(normalized_scope, (normalized_scope,)))
+    for user_scope in user_scopes:
+        normalized_user_scope = normalize_scope_key(user_scope)
+        if not normalized_user_scope:
+            continue
+        allowed_user_scopes = _CASE_SCOPE_COMPATIBILITY.get(normalized_user_scope, (normalized_user_scope,))
+        if case_scopes.intersection(allowed_user_scopes):
+            return True
+    return False
 
 
 def _session(request: Request) -> dict[str, Any]:
@@ -318,12 +404,21 @@ def _role_flags(role: str) -> tuple[bool, bool, bool, bool, bool]:
 
 def _contract_scope_lookup(cfg: AppConfig) -> dict[str, str]:
     lookup: dict[str, str] = {}
-    for scope_key, scope_cfg in cfg.officer_auth.chief_steward_contract_scopes.items():
-        lookup[normalize_scope_key(scope_key)] = scope_key
-        for alias in scope_cfg.contract_aliases:
+    for scope_key, _label, aliases in _DEFAULT_CONTRACT_SCOPE_DEFINITIONS:
+        lookup[scope_key] = scope_key
+        for alias in aliases:
             normalized = normalize_scope_key(alias)
             if normalized:
                 lookup[normalized] = scope_key
+    for scope_key, scope_cfg in cfg.officer_auth.chief_steward_contract_scopes.items():
+        normalized_scope_key = normalize_scope_key(scope_key)
+        if not normalized_scope_key:
+            continue
+        lookup[normalized_scope_key] = normalized_scope_key
+        for alias in scope_cfg.contract_aliases:
+            normalized = normalize_scope_key(alias)
+            if normalized:
+                lookup[normalized] = normalized_scope_key
     return lookup
 
 
@@ -369,11 +464,14 @@ async def _assigned_chief_scopes(db, *, user_id: str | None, email: str | None) 
 def _chief_scopes_from_groups(cfg: AppConfig, *, group_ids: set[str]) -> tuple[str, ...]:
     chief_scopes: set[str] = set()
     for scope_key, scope_cfg in cfg.officer_auth.chief_steward_contract_scopes.items():
+        normalized_scope_key = normalize_scope_key(scope_key)
+        if not normalized_scope_key:
+            continue
         scope_group_ids = {
             _normalize_group_id(value) for value in scope_cfg.group_ids if _normalize_group_id(value)
         }
         if scope_group_ids.intersection(group_ids):
-            chief_scopes.add(scope_key)
+            chief_scopes.add(normalized_scope_key)
     return tuple(sorted(chief_scopes))
 
 
@@ -401,7 +499,7 @@ def _resolve_user_context(
 
     if admin_group_ids.intersection(group_ids):
         role = _ROLE_ADMIN
-        contract_scopes = tuple(sorted(cfg.officer_auth.chief_steward_contract_scopes))
+        contract_scopes = tuple(scope_key for scope_key, _label in selectable_contract_scopes())
     elif chief_scope_set and (has_chief_steward_group or has_officer_group or not chief_steward_group_ids):
         role = _ROLE_CHIEF_STEWARD
         contract_scopes = tuple(sorted(chief_scope_set))
@@ -782,7 +880,7 @@ async def require_case_edit_access(request: Request, *, contract_scope: str | No
         return user
     if user.role != _ROLE_CHIEF_STEWARD:
         raise HTTPException(status_code=403, detail="chief steward or admin role required")
-    if not contract_scope or contract_scope not in user.contract_scopes:
+    if not case_scope_matches_user_scopes(contract_scope, user.contract_scopes):
         raise HTTPException(status_code=403, detail="case is outside this chief steward contract scope")
     return user
 
@@ -790,7 +888,7 @@ async def require_case_edit_access(request: Request, *, contract_scope: str | No
 def user_can_view_case(user: OfficerUserContext, *, contract_scope: str | None) -> bool:
     if user.role in {_ROLE_ADMIN, _ROLE_OFFICER, _ROLE_READ_ONLY}:
         return True
-    return bool(contract_scope and contract_scope in user.contract_scopes)
+    return case_scope_matches_user_scopes(contract_scope, user.contract_scopes)
 
 
 def actor_identity(user: OfficerUserContext, *, fallback: str | None = None) -> str:

@@ -20,7 +20,7 @@ from grievance_api.core.config import (
 from grievance_api.core.officer_auth import validate_officer_auth_config
 from grievance_api.db.db import Db
 from grievance_api.db.migrate import migrate
-from grievance_api.services.sharepoint_graph import DirectoryUserRef
+from grievance_api.services.sharepoint_graph import CaseFolderRef, DirectoryUserRef
 from grievance_api.web.officer_auth import officer_callback, officer_login
 from grievance_api.web.models import (
     ChiefStewardAssignmentCreateRequest,
@@ -109,6 +109,23 @@ class _FailingDirectoryGraphStub:
         raise RuntimeError(self.message)
 
 
+class _CaseFolderGraphStub:
+    def __init__(self) -> None:
+        self.ensure_calls: list[dict[str, object]] = []
+
+    def ensure_case_folder(self, **kwargs):  # noqa: ANN003
+        self.ensure_calls.append(dict(kwargs))
+        grievance_id = str(kwargs["grievance_id"])
+        member_name = str(kwargs["member_name"])
+        folder_name = f"{grievance_id} {member_name}".strip()
+        return CaseFolderRef(
+            drive_id="drive-1",
+            folder_id="folder-1",
+            folder_name=folder_name,
+            web_url=f"https://sharepoint.local/{folder_name.replace(' ', '%20')}",
+        )
+
+
 class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -152,6 +169,12 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
                 roster=("Officer A", "Officer B", "grievance@cwa3106.com"),
             ),
             officer_auth=cls._officer_auth(auth_enabled),
+            graph=SimpleNamespace(
+                site_hostname="contoso.sharepoint.com",
+                site_path="/sites/grievance",
+                document_library="Documents",
+                case_parent_folder="Grievances",
+            ),
         )
 
     @staticmethod
@@ -337,6 +360,31 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('<option value="open_at_state">Open at State</option>', edit_select)
         self.assertIn('<option value="open_at_national">Open at National</option>', edit_select)
 
+    async def test_officers_page_manual_entry_uses_single_grievance_field_and_fixed_scope_dropdown(self) -> None:
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        response = await officers_page(request)
+        html = response.body.decode("utf-8")
+
+        self.assertIn("Grievance ID / Number", html)
+        self.assertIn('<select id="createContract">', html)
+        self.assertNotIn('id="createGrievanceId"', html)
+        self.assertIn('<select id="editContract"', html)
+        self.assertIn('const FIXED_SCOPE_OPTIONS =', html)
+        for label in (
+            "City of Jacksonville (COJ)",
+            "Wire Tech (WT)",
+            "Core Southeastern",
+            "Construction",
+            "Yellow Pages / Thrive",
+            "Mobility / IHX",
+        ):
+            self.assertIn(label, html)
+
     async def test_officers_page_renders_sticky_tracker_header_css(self) -> None:
         request = _Request(
             state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
@@ -371,6 +419,27 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="metricTotalValue">0</div>', html)
         self.assertIn('id="metricEscalatedValue">0</div>', html)
         self.assertIn('href="#trackerPanel"', html)
+
+    async def test_officers_page_deduplicates_scope_pills_for_admin(self) -> None:
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        response = await officers_page(request)
+        html = response.body.decode("utf-8")
+        marker = '<div class="scope-pills">'
+        start = html.index(marker)
+        end = html.index("</div>", start)
+        scope_pills = html[start:end]
+
+        self.assertEqual(scope_pills.count("Mobility / IHX"), 1)
+        self.assertEqual(scope_pills.count("Core Southeastern"), 1)
+        self.assertEqual(scope_pills.count("City of Jacksonville (COJ)"), 1)
+        self.assertEqual(scope_pills.count("Wire Tech (WT)"), 1)
+        self.assertEqual(scope_pills.count("Construction"), 1)
+        self.assertEqual(scope_pills.count("Yellow Pages / Thrive"), 1)
 
     async def test_officers_page_renders_workspace_menu_with_ops_link_for_admin(self) -> None:
         request = _Request(
@@ -639,6 +708,30 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(exc.exception.status_code, 403)
 
+    async def test_chief_steward_mobility_scope_can_access_mobility_ihx_cases(self) -> None:
+        await self._insert_case(
+            case_id="C1",
+            grievance_id="2026211",
+            intake_request_id="forms-chief-mihx-1",
+            contract="Mobility / IHX",
+        )
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("chief_steward", email="chief@example.org", scopes=("mobility",)),
+            host="8.8.8.8",
+        )
+
+        result = await officer_cases(request)
+        self.assertEqual(result.count, 1)
+        self.assertEqual(result.rows[0].contract_scope, "mobility_ihx")
+
+        updated = await update_officer_case(
+            "C1",
+            OfficerCaseUpdateRequest(officer_status="closed"),
+            request,
+        )
+        self.assertEqual(updated.officer_status, "closed")
+
     async def test_admin_can_assign_chief_steward_scope_in_ui_and_session_picks_it_up(self) -> None:
         await self._insert_case(
             case_id="C1",
@@ -690,6 +783,22 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
 
         deleted = await delete_chief_steward_assignment(saved.assignment_id, admin_request)
         self.assertEqual(deleted.assignment_id, saved.assignment_id)
+
+    async def test_chief_assignment_ui_includes_default_manual_scopes(self) -> None:
+        admin_request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        listing = await chief_steward_assignments(admin_request)
+
+        self.assertIn("coj", listing.available_contract_scopes)
+        self.assertIn("wire_tech", listing.available_contract_scopes)
+        self.assertIn("core_southeastern", listing.available_contract_scopes)
+        self.assertIn("construction", listing.available_contract_scopes)
+        self.assertIn("yellow_pages_thrive", listing.available_contract_scopes)
+        self.assertIn("mobility_ihx", listing.available_contract_scopes)
 
     async def test_admin_can_search_directory_users_for_assignment_ui(self) -> None:
         graph = _DirectoryGraphStub(
@@ -911,6 +1020,7 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
             request,
         )
         self.assertEqual(created.workflow_status, "manual_tracking")
+        self.assertEqual(created.grievance_id, "2026-100")
         self.assertEqual(created.contract_scope, "mobility")
         self.assertEqual(created.officer_status, "open_at_state")
         self.assertEqual(created.third_level_request_sent_date, "2026-03-28")
@@ -932,6 +1042,45 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delete_result.deleted_case_count, 2)
         remaining = await self.db.fetchall("SELECT id FROM cases ORDER BY id")
         self.assertEqual(remaining, [])
+
+    async def test_manual_officer_case_creation_creates_sharepoint_folder_metadata(self) -> None:
+        graph = _CaseFolderGraphStub()
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db, graph=graph),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        created = await create_officer_case(
+            OfficerCaseCreateRequest(
+                grievance_number="2026-101",
+                contract="AT&T Mobility",
+                member_name="Pat Member",
+            ),
+            request,
+        )
+
+        self.assertEqual(len(graph.ensure_calls), 1)
+        self.assertEqual(graph.ensure_calls[0]["grievance_id"], "2026-101")
+        self.assertEqual(graph.ensure_calls[0]["member_name"], "Pat Member - AT&T Mobility")
+
+        case_row = await self.db.fetchone(
+            "SELECT sharepoint_case_folder, sharepoint_case_web_url FROM cases WHERE id=?",
+            (created.case_id,),
+        )
+        self.assertEqual(case_row[0], "2026-101 Pat Member - AT&T Mobility")
+        self.assertEqual(case_row[1], "https://sharepoint.local/2026-101%20Pat%20Member%20-%20AT&T%20Mobility")
+
+        event_rows = await self.db.fetchall(
+            "SELECT event_type, details_json FROM events WHERE case_id=? ORDER BY id",
+            (created.case_id,),
+        )
+        self.assertEqual(event_rows[0][0], "sharepoint_upload_target_resolved")
+        self.assertEqual(event_rows[1][0], "officer_case_created")
+        self.assertEqual(
+            json.loads(event_rows[1][1])["sharepoint_case_folder"],
+            "2026-101 Pat Member - AT&T Mobility",
+        )
 
     async def test_admin_audit_endpoint_returns_case_events(self) -> None:
         await self._insert_case(
