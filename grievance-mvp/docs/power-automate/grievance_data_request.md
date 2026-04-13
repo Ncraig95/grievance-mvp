@@ -9,6 +9,7 @@
 
 Core fields:
 - Request ID source -> `request_id`
+- Existing grievance number/id -> `grievance_id`
 - Contract -> `contract`
 - Grievant first name -> `grievant_firstname`
 - Grievant last name -> `grievant_lastname`
@@ -33,7 +34,8 @@ Template-specific (`template_data`):
 {
   "request_id": "forms-<responseId>",
   "document_command": "grievance_data_request",
-  "contract": "CWA",
+  "grievance_id": "<existing grievance id>",
+  "contract": "<contract>",
   "grievant_firstname": "<first>",
   "grievant_lastname": "<last>",
   "grievant_email": "<email>",
@@ -52,6 +54,12 @@ Template-specific (`template_data`):
   }
 }
 ```
+
+## Existing-folder behavior
+
+- This document now targets an existing grievance folder.
+- `grievance_id` is required.
+- `grievance_number` and `grievance_id` are treated as the same identifier for this flow.
 
 ## Signer behavior
 

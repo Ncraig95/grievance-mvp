@@ -193,6 +193,22 @@ ON chief_steward_assignments(principal_email, contract_scope);
 CREATE INDEX IF NOT EXISTS idx_chief_steward_assignments_principal_id
 ON chief_steward_assignments(principal_id);
 
+CREATE TABLE IF NOT EXISTS officer_profiles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  principal_id TEXT,
+  principal_email TEXT NOT NULL,
+  principal_display_name TEXT,
+  officer_title TEXT,
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_officer_profiles_email
+ON officer_profiles(principal_email);
+
+CREATE INDEX IF NOT EXISTS idx_officer_profiles_principal_id
+ON officer_profiles(principal_id);
+
 CREATE TABLE IF NOT EXISTS external_steward_users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   email TEXT NOT NULL,

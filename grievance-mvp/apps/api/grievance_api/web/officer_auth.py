@@ -70,6 +70,7 @@ class OfficerUserContext:
     user_id: str | None
     email: str | None
     display_name: str | None
+    officer_title: str | None
     role: str
     contract_scopes: tuple[str, ...]
     group_ids: tuple[str, ...]
@@ -361,6 +362,7 @@ def _local_read_only_user() -> OfficerUserContext:
         user_id=None,
         email=None,
         display_name="Local Read Only",
+        officer_title=None,
         role=_ROLE_READ_ONLY,
         contract_scopes=(),
         group_ids=(),
@@ -380,6 +382,7 @@ def _local_ops_admin_user() -> OfficerUserContext:
         user_id=None,
         email=None,
         display_name="Local Admin",
+        officer_title=None,
         role=_ROLE_ADMIN,
         contract_scopes=(),
         group_ids=(),
@@ -400,6 +403,37 @@ def _role_flags(role: str) -> tuple[bool, bool, bool, bool, bool]:
     if role == _ROLE_CHIEF_STEWARD:
         return False, True, False, True, False
     return False, False, False, False, False
+
+
+async def _officer_profile_title(db, *, user_id: str | None, email: str | None) -> str | None:  # noqa: ANN001
+    normalized_email = _normalize_email(email)
+    clauses: list[str] = []
+    params: list[object] = []
+    if normalized_email:
+        clauses.append("lower(COALESCE(principal_email, '')) = lower(?)")
+        params.append(normalized_email)
+    if user_id:
+        clauses.append("lower(COALESCE(principal_id, '')) = lower(?)")
+        params.append(user_id)
+    if not clauses:
+        return None
+
+    row = await db.fetchone(
+        f"""
+        SELECT officer_title
+        FROM officer_profiles
+        WHERE {' OR '.join(clauses)}
+        ORDER BY CASE
+          WHEN lower(COALESCE(principal_email, '')) = lower(?) THEN 0
+          ELSE 1
+        END,
+        id DESC
+        LIMIT 1
+        """,
+        tuple(params + [normalized_email or ""]),
+    )
+    title = str(row[0] or "").strip() if row else ""
+    return title or None
 
 
 def _contract_scope_lookup(cfg: AppConfig) -> dict[str, str]:
@@ -481,6 +515,7 @@ def _resolve_user_context(
     user_id: str | None,
     email: str | None,
     display_name: str | None,
+    officer_title: str | None,
     group_ids: set[str],
     assigned_chief_scopes: tuple[str, ...],
 ) -> OfficerUserContext:
@@ -514,6 +549,7 @@ def _resolve_user_context(
         user_id=user_id,
         email=email,
         display_name=display_name,
+        officer_title=officer_title,
         role=role,
         contract_scopes=contract_scopes,
         group_ids=tuple(sorted(group_ids)),
@@ -549,11 +585,13 @@ async def _resolve_user_context_from_claims(request: Request, *, claims: dict[st
     )
     display_name = str(claims.get("name") or "").strip() or email
     assigned_chief_scopes = await _assigned_chief_scopes(request.app.state.db, user_id=user_id, email=email)
+    officer_title = await _officer_profile_title(request.app.state.db, user_id=user_id, email=email)
     return _resolve_user_context(
         cfg,
         user_id=user_id,
         email=email,
         display_name=display_name,
+        officer_title=officer_title,
         group_ids=group_ids,
         assigned_chief_scopes=assigned_chief_scopes,
     )
@@ -564,6 +602,7 @@ def _session_user_payload(user: OfficerUserContext, *, exp: int | None) -> dict[
         "user_id": user.user_id,
         "email": user.email,
         "display_name": user.display_name,
+        "officer_title": user.officer_title,
         "role": user.role,
         "contract_scopes": list(user.contract_scopes),
         "group_ids": list(user.group_ids),
@@ -670,6 +709,7 @@ async def current_officer_user(request: Request) -> OfficerUserContext | None:
     email = str(payload.get("email") or "").strip() or None
     display_name = str(payload.get("display_name") or "").strip() or None
     user_id = str(payload.get("user_id") or "").strip() or None
+    officer_title = await _officer_profile_title(request.app.state.db, user_id=user_id, email=email)
     session_group_ids = {
         _normalize_group_id(value)
         for value in payload.get("group_ids", [])
@@ -682,6 +722,7 @@ async def current_officer_user(request: Request) -> OfficerUserContext | None:
             user_id=user_id,
             email=email,
             display_name=display_name,
+            officer_title=officer_title,
             group_ids=session_group_ids,
             assigned_chief_scopes=assigned_chief_scopes,
         )
@@ -702,6 +743,7 @@ async def current_officer_user(request: Request) -> OfficerUserContext | None:
         user_id=user_id,
         email=email,
         display_name=display_name,
+        officer_title=officer_title or str(payload.get("officer_title") or "").strip() or None,
         role=role,
         contract_scopes=scopes,
         group_ids=tuple(sorted(session_group_ids)),
@@ -907,6 +949,7 @@ def audit_actor_details(
     return {
         "actor_email": user.email,
         "actor_display_name": user.display_name,
+        "actor_officer_title": user.officer_title,
         "actor_role": user.role,
         "actor_contract_scopes": list(user.contract_scopes),
         "case_contract_scope": case_contract_scope,

@@ -137,6 +137,15 @@ class AssignGrievanceNumberRequest(BaseModel):
     assigned_by: str | None = None
 
 
+class GrievanceNumberPreviewResponse(BaseModel):
+    grievance_id: str
+    grievance_number: str
+    year: int
+    sequence: int
+    sharepoint_max_seq: int
+    db_last_seq: int
+
+
 class OfficerCaseCreateRequest(BaseModel):
     grievance_id: str | None = None
     grievance_number: str | None = None
@@ -196,6 +205,7 @@ class OfficerCaseRow(BaseModel):
     department: str | None = None
     steward: str | None = None
     occurrence_date: str | None = None
+    articles: str | None = None
     issue_summary: str | None = None
     first_level_request_sent_date: str | None = None
     second_level_request_sent_date: str | None = None
@@ -215,6 +225,7 @@ class OfficerCaseRow(BaseModel):
 class OfficerViewerContext(BaseModel):
     email: str | None = None
     display_name: str | None = None
+    officer_title: str | None = None
     role: str
     contract_scopes: list[str] = Field(default_factory=list)
     auth_enabled: bool
@@ -248,6 +259,40 @@ class OfficerCaseDeleteResponse(BaseModel):
     deleted_stage_field_value_count: int
     deleted_event_count: int
     deleted_outbound_email_count: int
+
+
+class OfficerAutoDataRequestDocument(BaseModel):
+    document_id: str
+    doc_type: str
+    status: str
+    signing_link: str | None = None
+    generated_link: str | None = None
+
+
+class OfficerAutoDataRequestCreateRequest(BaseModel):
+    articles: str | None = None
+
+
+class OfficerAutoDataRequestResponse(BaseModel):
+    case_id: str
+    grievance_id: str
+    grievance_number: str | None = None
+    display_grievance: str
+    request_id: str
+    officer_email: str | None = None
+    officer_title: str | None = None
+    articles: str
+    documents: list[OfficerAutoDataRequestDocument]
+
+
+class OfficerProfileUpdateRequest(BaseModel):
+    officer_title: str | None = None
+
+
+class OfficerProfileResponse(BaseModel):
+    email: str | None = None
+    display_name: str | None = None
+    officer_title: str | None = None
 
 
 class OfficerCaseBulkUpdateResponse(BaseModel):

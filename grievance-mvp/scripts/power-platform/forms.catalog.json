@@ -147,7 +147,8 @@
       "requestIdPattern": "forms-<Response Id>",
       "detailedGuide": "docs/power-automate/grievance_data_request.md",
       "topLevelFields": {
-        "contract": "CWA",
+        "grievance_id": "<Existing grievance id>",
+        "contract": "<Contract>",
         "grievant_firstname": "<Grievant first name>",
         "grievant_lastname": "<Grievant last name>",
         "grievant_email": "<Grievant email>",
@@ -167,8 +168,45 @@
         "signer_email": "<Optional signer email override>"
       },
       "notes": [
+        "This flow requires an existing SharePoint grievance folder.",
+        "grievance_number and grievance_id are the same identifier for this flow.",
         "Use documents[].signers when you want explicit signer control.",
         "If documents[].signers is omitted, the API falls back to template_data.signer_email and then grievant_email."
+      ]
+    },
+    {
+      "key": "data_request_letterhead",
+      "title": "Data Request Letterhead",
+      "routeType": "intake",
+      "endpointPath": "/intake",
+      "documentCommand": "data_request_letterhead",
+      "requestIdPattern": "forms-<Response Id>",
+      "detailedGuide": "docs/power-automate/data_request_letterhead.md",
+      "topLevelFields": {
+        "grievance_id": "<Existing grievance id>",
+        "contract": "<Contract>",
+        "grievant_firstname": "<Grievant first name>",
+        "grievant_lastname": "<Grievant last name>",
+        "grievant_email": "<Grievant email>",
+        "narrative": "Data request cover letter generated from intake"
+      },
+      "templateDataFields": {
+        "grievance_number": "<Existing grievance id>",
+        "grievant_name": "<Grievant display name>",
+        "today_date": "<yyyy-mm-dd>",
+        "company_rep_name": "<Company representative name>",
+        "company_rep_title": "<Company representative title>",
+        "company_rep_email": "<Company representative email>",
+        "data_requested": "<Requested information list>",
+        "preferred_format": "<Preferred delivery format>",
+        "steward_name": "<Union representative name>",
+        "steward_email": "<Union representative email>",
+        "approver_block": "<Optional approval block>"
+      },
+      "notes": [
+        "This flow requires an existing SharePoint grievance folder.",
+        "grievance_number and grievance_id are the same identifier for this flow.",
+        "Use this alongside grievance_data_request when you want the cover letter stored with the signed request packet."
       ]
     },
     {

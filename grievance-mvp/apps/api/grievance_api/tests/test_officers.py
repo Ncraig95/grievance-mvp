@@ -7,7 +7,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 from fastapi.responses import RedirectResponse
@@ -28,8 +28,10 @@ from grievance_api.web.models import (
     OfficerCaseBulkUpdateRequest,
     OfficerCaseCreateRequest,
     OfficerCaseUpdateRequest,
+    OfficerAutoDataRequestDocument,
 )
 from grievance_api.web.routes_officers import (
+    _build_auto_data_request_payload,
     bulk_delete_officer_cases,
     bulk_update_officer_cases,
     chief_steward_assignments,
@@ -37,9 +39,11 @@ from grievance_api.web.routes_officers import (
     create_chief_steward_assignment,
     delete_officer_case,
     delete_chief_steward_assignment,
+    officer_auto_data_request,
     officer_directory_users,
     officer_case_events,
     officer_cases,
+    officer_next_grievance_number,
     officers_page,
     update_officer_case,
 )
@@ -110,8 +114,9 @@ class _FailingDirectoryGraphStub:
 
 
 class _CaseFolderGraphStub:
-    def __init__(self) -> None:
+    def __init__(self, case_folder_names: list[str] | None = None) -> None:
         self.ensure_calls: list[dict[str, object]] = []
+        self.case_folder_names = list(case_folder_names or [])
 
     def ensure_case_folder(self, **kwargs):  # noqa: ANN003
         self.ensure_calls.append(dict(kwargs))
@@ -124,6 +129,10 @@ class _CaseFolderGraphStub:
             folder_name=folder_name,
             web_url=f"https://sharepoint.local/{folder_name.replace(' ', '%20')}",
         )
+
+    def list_case_folder_names(self, **kwargs):  # noqa: ANN003
+        _ = kwargs
+        return list(self.case_folder_names)
 
 
 class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
@@ -167,6 +176,12 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         return SimpleNamespace(
             officer_tracking=OfficerTrackingConfig(
                 roster=("Officer A", "Officer B", "grievance@cwa3106.com"),
+            ),
+            grievance_id=SimpleNamespace(
+                mode="auto",
+                timezone="America/New_York",
+                min_width=3,
+                separator="",
             ),
             officer_auth=cls._officer_auth(auth_enabled),
             graph=SimpleNamespace(
@@ -360,6 +375,20 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('<option value="open_at_state">Open at State</option>', edit_select)
         self.assertIn('<option value="open_at_national">Open at National</option>', edit_select)
 
+    async def test_officers_page_renders_auto_data_request_action_for_editors(self) -> None:
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        response = await officers_page(request)
+        html = response.body.decode("utf-8")
+
+        self.assertIn("Auto Data Request", html)
+        self.assertIn("async function autoDataRequest(caseId)", html)
+        self.assertIn("data-action=\"auto-data-request\"", html)
+
     async def test_officers_page_manual_entry_uses_single_grievance_field_and_fixed_scope_dropdown(self) -> None:
         request = _Request(
             state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
@@ -384,6 +413,45 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
             "Mobility / IHX",
         ):
             self.assertIn(label, html)
+
+    async def test_officers_page_manual_entry_prefills_next_grievance_number_softly(self) -> None:
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        response = await officers_page(request)
+        html = response.body.decode("utf-8")
+
+        self.assertIn("async function loadNextGrievanceNumber()", html)
+        self.assertIn("await call('/officers/grievance-number/next')", html)
+        self.assertIn("if (!VIEWER.can_create || !input || input.value.trim()) return;", html)
+        self.assertIn("void loadNextGrievanceNumber();", html)
+
+    async def test_admin_can_preview_next_grievance_number(self) -> None:
+        graph = _CaseFolderGraphStub(case_folder_names=["2026009 Existing Person"])
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db, graph=graph, logger=SimpleNamespace()),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+        await self.db.exec(
+            """
+            INSERT INTO grievance_id_sequences(year, last_seq, updated_at_utc)
+            VALUES(?,?,?)
+            """,
+            (2026, 11, "2026-04-13T00:00:00+00:00"),
+        )
+
+        with patch("grievance_api.services.grievance_id_allocator.current_year_in_timezone", return_value=2026):
+            response = await officer_next_grievance_number(request)
+
+        self.assertEqual(response.grievance_id, "2026012")
+        self.assertEqual(response.grievance_number, "2026012")
+        self.assertEqual(response.sequence, 12)
+        self.assertEqual(response.sharepoint_max_seq, 9)
+        self.assertEqual(response.db_last_seq, 11)
 
     async def test_officers_page_renders_sticky_tracker_header_css(self) -> None:
         request = _Request(
@@ -998,6 +1066,96 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         details = json.loads(event_row[0])
         self.assertTrue(details["bulk_update"])
         self.assertEqual(details["actor_role"], "chief_steward")
+
+    async def test_officer_auto_data_request_uses_statement_fields_and_updates_case_status(self) -> None:
+        await self.db.exec(
+            """INSERT INTO cases(
+                 id, grievance_id, created_at_utc, status, approval_status, grievance_number,
+                 member_name, member_email, intake_request_id, intake_payload_json,
+                 tracking_contract, tracking_steward, tracking_occurrence_date
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "C1",
+                "2026301",
+                "2026-03-27T15:00:00+00:00",
+                "approved",
+                "approved",
+                None,
+                "Taylor Jones",
+                "taylor@example.org",
+                "forms-auto-1",
+                json.dumps(
+                    {
+                        "request_id": "forms-auto-1",
+                        "contract": "AT&T Mobility",
+                        "grievant_firstname": "Taylor",
+                        "grievant_lastname": "Jones",
+                        "grievant_email": "taylor@example.org",
+                        "incident_date": "2026-03-20",
+                        "supervisor": "Pat Supervisor",
+                        "supervisor_email": "pat.supervisor@example.org",
+                        "documents": [],
+                        "template_data": {
+                            "article": "Article 12",
+                            "union_phone": "904-555-0100",
+                        },
+                    }
+                ),
+                "AT&T Mobility",
+                "Steward Smith",
+                "2026-03-20",
+            ),
+        )
+        request = _Request(
+            state=SimpleNamespace(
+                cfg=self._cfg(auth_enabled=True),
+                db=self.db,
+                logger=SimpleNamespace(),
+                docuseal=SimpleNamespace(),
+                notifications=SimpleNamespace(),
+            ),
+            session=self._session_user("admin", email="officer@example.org"),
+            host="8.8.8.8",
+        )
+
+        with patch(
+            "grievance_api.web.routes_officers._ensure_officer_case_sharepoint_folder",
+            new=AsyncMock(return_value=(None, None)),
+        ), patch(
+            "grievance_api.web.routes_officers._append_officer_case_document",
+            new=AsyncMock(
+                side_effect=[
+                    OfficerAutoDataRequestDocument(
+                        document_id="D1",
+                        doc_type="data_request_letterhead",
+                        status="uploaded",
+                        generated_link="https://sharepoint.local/generated/D1.pdf",
+                    ),
+                    OfficerAutoDataRequestDocument(
+                        document_id="D2",
+                        doc_type="grievance_data_request_form",
+                        status="sent_for_signature",
+                        signing_link="https://docuseal.local/sign/D2",
+                        generated_link="https://sharepoint.local/generated/D2.pdf",
+                    ),
+                ]
+            ),
+        ) as mock_append:
+            response = await officer_auto_data_request("C1", request)
+
+        payload = mock_append.await_args_list[0].kwargs["payload"]
+        self.assertEqual(payload.grievance_id, "2026301")
+        self.assertEqual(payload.grievance_number, "2026301")
+        self.assertEqual(payload.template_data["articles"], "Article 12")
+        self.assertEqual(payload.template_data["company_rep_name"], "Pat Supervisor")
+        self.assertEqual(payload.template_data["company_rep_email"], "pat.supervisor@example.org")
+        self.assertEqual(payload.template_data["union_phone"], "904-555-0100")
+        self.assertEqual(payload.template_data["union_rep_name"], "officer@example.org")
+        self.assertEqual(payload.template_data["signer_email"], "officer@example.org")
+        self.assertEqual(response.documents[1].signing_link, "https://docuseal.local/sign/D2")
+
+        case_status = await self.db.fetchone("SELECT status FROM cases WHERE id=?", ("C1",))
+        self.assertEqual(case_status[0], "awaiting_signatures")
 
     async def test_admin_can_create_delete_bulk_delete_and_access_ops(self) -> None:
         request = _Request(

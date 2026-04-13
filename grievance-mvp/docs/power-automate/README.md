@@ -9,6 +9,7 @@ Supported guides:
 - `bellsouth_meeting_request.md`
 - `mobility_meeting_request.md`
 - `grievance_data_request.md`
+- `data_request_letterhead.md`
 - `true_intent_grievance_brief.md`
 - `non_discipline_grievance_brief.md`
 - `non_discipline_brief_README.md`
@@ -61,7 +62,7 @@ Use `template_data` for document-specific placeholders.
 
 ## Notes
 
-- Do not send `grievance_id` when system is in auto ID mode, except for docs that intentionally target an existing case folder (BellSouth/Mobility meeting requests).
+- Do not send `grievance_id` when system is in auto ID mode, except for docs that intentionally target an existing case folder (BellSouth/Mobility meeting requests, grievance data request, and data request letterhead).
 - Signature tags in DOCX (for example `Sig_es_:signer1:signature`) are template anchors; do not create Forms questions for those.
 - For 3-step sequential signature flows (like 3G3A or `mobility_record_of_grievance`), pass explicit signer order in `documents[0].signers`.
 - For signed documents, completion emails to signers include the signed PDF attachment when the file is within `email.max_attachment_bytes`.

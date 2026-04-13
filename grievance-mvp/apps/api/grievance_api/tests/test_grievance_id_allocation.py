@@ -181,6 +181,238 @@ class AllocatorIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(graph.last_reserved_id, expected_id)
         self.assertEqual(allocation.case_folder_name, f"{expected_id} John Doe")
 
+    async def test_preview_returns_first_id_from_empty_state(self) -> None:
+        year = current_year_in_timezone("America/New_York")
+
+        class FakeGraph:
+            def list_case_folder_names(self, **kwargs):  # noqa: ANN003
+                _ = kwargs
+                return []
+
+        cfg = AppConfig(
+            hmac_shared_secret="x",
+            db_path=self.tmp.name,
+            data_root="/tmp",
+            docx_template_path="/tmp/template.docx",
+            doc_templates={},
+            libreoffice_timeout_seconds=45,
+            graph=GraphConfig(
+                tenant_id="tenant",
+                client_id="client",
+                cert_pem_path="/tmp/cert.pem",
+                cert_thumbprint="thumb",
+                site_hostname="contoso.sharepoint.com",
+                site_path="/sites/Grievances",
+                document_library="Documents",
+                case_parent_folder="Grievances",
+                generated_subfolder="Generated",
+                signed_subfolder="Signed",
+                audit_subfolder="Audit",
+                audit_backup_subfolders=(),
+                audit_local_backup_roots=(),
+                client_supplied_subfolder="Client supplied data",
+                failed_processes_folder="config files/failed",
+            ),
+            docuseal=DocuSealConfig(
+                base_url="http://docuseal",
+                api_token="token",
+                webhook_secret="secret",
+                public_base_url=None,
+                web_base_url=None,
+                web_email=None,
+                web_password=None,
+                default_template_id=None,
+                template_ids={},
+            ),
+            email=EmailConfig(
+                enabled=False,
+                sender_user_id="",
+                templates_dir="/tmp/templates",
+                internal_recipients=(),
+                derek_email=None,
+                approval_request_url_base=None,
+                allow_signer_copy_link=False,
+                artifact_delivery_mode="sharepoint_link",
+                max_attachment_bytes=2_000_000,
+                resend_cooldown_seconds=300,
+                dry_run=False,
+            ),
+            grievance_id=GrievanceIdConfig(mode="auto", timezone="America/New_York", min_width=3, separator=""),
+        )
+        allocator = GrievanceIdAllocator(
+            cfg=cfg,
+            db=self.db,
+            graph=FakeGraph(),  # type: ignore[arg-type]
+            logger=logging.getLogger("test"),
+        )
+
+        preview = await allocator.preview_next_grievance_id()
+
+        self.assertEqual(preview.grievance_id, f"{year}001")
+        self.assertEqual(preview.sequence, 1)
+        self.assertEqual(preview.sharepoint_max_seq, 0)
+        self.assertEqual(preview.db_last_seq, 0)
+
+    async def test_preview_uses_higher_db_sequence_without_reserving(self) -> None:
+        year = current_year_in_timezone("America/New_York")
+
+        class FakeGraph:
+            def list_case_folder_names(self, **kwargs):  # noqa: ANN003
+                _ = kwargs
+                return [f"{year}004 Existing Person"]
+
+        cfg = AppConfig(
+            hmac_shared_secret="x",
+            db_path=self.tmp.name,
+            data_root="/tmp",
+            docx_template_path="/tmp/template.docx",
+            doc_templates={},
+            libreoffice_timeout_seconds=45,
+            graph=GraphConfig(
+                tenant_id="tenant",
+                client_id="client",
+                cert_pem_path="/tmp/cert.pem",
+                cert_thumbprint="thumb",
+                site_hostname="contoso.sharepoint.com",
+                site_path="/sites/Grievances",
+                document_library="Documents",
+                case_parent_folder="Grievances",
+                generated_subfolder="Generated",
+                signed_subfolder="Signed",
+                audit_subfolder="Audit",
+                audit_backup_subfolders=(),
+                audit_local_backup_roots=(),
+                client_supplied_subfolder="Client supplied data",
+                failed_processes_folder="config files/failed",
+            ),
+            docuseal=DocuSealConfig(
+                base_url="http://docuseal",
+                api_token="token",
+                webhook_secret="secret",
+                public_base_url=None,
+                web_base_url=None,
+                web_email=None,
+                web_password=None,
+                default_template_id=None,
+                template_ids={},
+            ),
+            email=EmailConfig(
+                enabled=False,
+                sender_user_id="",
+                templates_dir="/tmp/templates",
+                internal_recipients=(),
+                derek_email=None,
+                approval_request_url_base=None,
+                allow_signer_copy_link=False,
+                artifact_delivery_mode="sharepoint_link",
+                max_attachment_bytes=2_000_000,
+                resend_cooldown_seconds=300,
+                dry_run=False,
+            ),
+            grievance_id=GrievanceIdConfig(mode="auto", timezone="America/New_York", min_width=3, separator=""),
+        )
+        await self.db.exec(
+            """
+            INSERT INTO grievance_id_sequences(year, last_seq, updated_at_utc)
+            VALUES(?,?,?)
+            """,
+            (year, 8, "2026-04-13T00:00:00+00:00"),
+        )
+        allocator = GrievanceIdAllocator(
+            cfg=cfg,
+            db=self.db,
+            graph=FakeGraph(),  # type: ignore[arg-type]
+            logger=logging.getLogger("test"),
+        )
+
+        preview = await allocator.preview_next_grievance_id()
+        stored = await self.db.fetchone("SELECT last_seq FROM grievance_id_sequences WHERE year=?", (year,))
+
+        self.assertEqual(preview.grievance_id, f"{year}009")
+        self.assertEqual(preview.sequence, 9)
+        self.assertEqual(preview.sharepoint_max_seq, 4)
+        self.assertEqual(preview.db_last_seq, 8)
+        self.assertEqual(int(stored[0]), 8)
+
+    async def test_preview_respects_higher_sharepoint_sequence(self) -> None:
+        year = current_year_in_timezone("America/New_York")
+
+        class FakeGraph:
+            def list_case_folder_names(self, **kwargs):  # noqa: ANN003
+                _ = kwargs
+                return [f"{year}015 Existing Person"]
+
+        cfg = AppConfig(
+            hmac_shared_secret="x",
+            db_path=self.tmp.name,
+            data_root="/tmp",
+            docx_template_path="/tmp/template.docx",
+            doc_templates={},
+            libreoffice_timeout_seconds=45,
+            graph=GraphConfig(
+                tenant_id="tenant",
+                client_id="client",
+                cert_pem_path="/tmp/cert.pem",
+                cert_thumbprint="thumb",
+                site_hostname="contoso.sharepoint.com",
+                site_path="/sites/Grievances",
+                document_library="Documents",
+                case_parent_folder="Grievances",
+                generated_subfolder="Generated",
+                signed_subfolder="Signed",
+                audit_subfolder="Audit",
+                audit_backup_subfolders=(),
+                audit_local_backup_roots=(),
+                client_supplied_subfolder="Client supplied data",
+                failed_processes_folder="config files/failed",
+            ),
+            docuseal=DocuSealConfig(
+                base_url="http://docuseal",
+                api_token="token",
+                webhook_secret="secret",
+                public_base_url=None,
+                web_base_url=None,
+                web_email=None,
+                web_password=None,
+                default_template_id=None,
+                template_ids={},
+            ),
+            email=EmailConfig(
+                enabled=False,
+                sender_user_id="",
+                templates_dir="/tmp/templates",
+                internal_recipients=(),
+                derek_email=None,
+                approval_request_url_base=None,
+                allow_signer_copy_link=False,
+                artifact_delivery_mode="sharepoint_link",
+                max_attachment_bytes=2_000_000,
+                resend_cooldown_seconds=300,
+                dry_run=False,
+            ),
+            grievance_id=GrievanceIdConfig(mode="auto", timezone="America/New_York", min_width=3, separator=""),
+        )
+        await self.db.exec(
+            """
+            INSERT INTO grievance_id_sequences(year, last_seq, updated_at_utc)
+            VALUES(?,?,?)
+            """,
+            (year, 8, "2026-04-13T00:00:00+00:00"),
+        )
+        allocator = GrievanceIdAllocator(
+            cfg=cfg,
+            db=self.db,
+            graph=FakeGraph(),  # type: ignore[arg-type]
+            logger=logging.getLogger("test"),
+        )
+
+        preview = await allocator.preview_next_grievance_id()
+
+        self.assertEqual(preview.grievance_id, f"{year}016")
+        self.assertEqual(preview.sequence, 16)
+        self.assertEqual(preview.sharepoint_max_seq, 15)
+        self.assertEqual(preview.db_last_seq, 8)
+
 
 class IntakeModeValidationTests(unittest.TestCase):
     def test_auto_mode_rejects_incoming_grievance_id(self) -> None:

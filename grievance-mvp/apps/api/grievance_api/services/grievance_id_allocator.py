@@ -28,6 +28,15 @@ class GrievanceIdAllocation:
     case_folder_web_url: str | None
 
 
+@dataclass(frozen=True)
+class GrievanceIdPreview:
+    grievance_id: str
+    year: int
+    sequence: int
+    sharepoint_max_seq: int
+    db_last_seq: int
+
+
 def parse_case_folder_identifier(folder_name: str) -> tuple[int, int] | None:
     match = _FOLDER_NAME_RE.match(folder_name.strip())
     if not match:
@@ -77,16 +86,12 @@ class GrievanceIdAllocator:
         self.graph = graph
         self.logger = logger
 
-    async def allocate_and_reserve_folder(
-        self,
-        *,
-        member_name: str,
-        correlation_id: str,
-    ) -> GrievanceIdAllocation:
-        year = current_year_in_timezone(self.cfg.grievance_id.timezone)
+    def _current_year(self) -> int:
+        return current_year_in_timezone(self.cfg.grievance_id.timezone)
 
+    def _list_case_folder_names(self) -> list[str]:
         try:
-            folder_names = self.graph.list_case_folder_names(
+            return self.graph.list_case_folder_names(
                 site_hostname=self.cfg.graph.site_hostname,
                 site_path=self.cfg.graph.site_path,
                 library=self.cfg.graph.document_library,
@@ -95,7 +100,39 @@ class GrievanceIdAllocator:
         except Exception as exc:
             raise GrievanceIdAllocationError("sharepoint folder listing unavailable") from exc
 
+    async def preview_next_grievance_id(self) -> GrievanceIdPreview:
+        year = self._current_year()
+        folder_names = self._list_case_folder_names()
         sharepoint_max_seq = max_sequence_for_year(folder_names, year=year)
+        row = await self.db.fetchone(
+            "SELECT last_seq FROM grievance_id_sequences WHERE year=?",
+            (year,),
+        )
+        db_last_seq = int(row[0]) if row else 0
+        next_seq = max(sharepoint_max_seq, db_last_seq) + 1
+        grievance_id = format_grievance_id(
+            year=year,
+            sequence=next_seq,
+            min_width=self.cfg.grievance_id.min_width,
+            separator=self.cfg.grievance_id.separator,
+        )
+        return GrievanceIdPreview(
+            grievance_id=grievance_id,
+            year=year,
+            sequence=next_seq,
+            sharepoint_max_seq=sharepoint_max_seq,
+            db_last_seq=db_last_seq,
+        )
+
+    async def allocate_and_reserve_folder(
+        self,
+        *,
+        member_name: str,
+        correlation_id: str,
+    ) -> GrievanceIdAllocation:
+        preview = await self.preview_next_grievance_id()
+        year = preview.year
+        sharepoint_max_seq = preview.sharepoint_max_seq
         next_seq = await self.db.reserve_next_grievance_seq(year=year, floor_seq=sharepoint_max_seq)
         grievance_id = format_grievance_id(
             year=year,

@@ -231,6 +231,13 @@ def migrate(db_path: str) -> None:
         _ensure_column(con, "chief_steward_assignments", "updated_at_utc", "TEXT")
         _ensure_column(con, "chief_steward_assignments", "assigned_by", "TEXT")
 
+        _ensure_column(con, "officer_profiles", "principal_id", "TEXT")
+        _ensure_column(con, "officer_profiles", "principal_email", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "officer_profiles", "principal_display_name", "TEXT")
+        _ensure_column(con, "officer_profiles", "officer_title", "TEXT")
+        _ensure_column(con, "officer_profiles", "created_at_utc", "TEXT")
+        _ensure_column(con, "officer_profiles", "updated_at_utc", "TEXT")
+
         _ensure_column(con, "external_steward_users", "email", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(con, "external_steward_users", "display_name", "TEXT")
         _ensure_column(con, "external_steward_users", "status", "TEXT NOT NULL DEFAULT 'active'")
@@ -360,6 +367,8 @@ def migrate(db_path: str) -> None:
             "CREATE INDEX IF NOT EXISTS idx_document_stages_document_id ON document_stages(document_id)",
             "CREATE INDEX IF NOT EXISTS idx_document_stage_artifacts_stage_type ON document_stage_artifacts(document_stage_id, artifact_type)",
             "CREATE INDEX IF NOT EXISTS idx_document_stage_field_values_stage ON document_stage_field_values(document_stage_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_officer_profiles_email ON officer_profiles(principal_email)",
+            "CREATE INDEX IF NOT EXISTS idx_officer_profiles_principal_id ON officer_profiles(principal_id)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_external_steward_users_email ON external_steward_users(email)",
             (
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_external_steward_users_subject "

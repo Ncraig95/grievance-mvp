@@ -179,6 +179,7 @@ _STAGE_SIGNATURE_PLACEHOLDER_RE = re.compile(
 _DOC_COMMAND_ALIASES: dict[str, str] = {
     "bellsouth_formal_grievance_meeting_request": "bellsouth_meeting_request",
     "mobility_meeting_request": "mobility_formal_grievance_meeting_request",
+    "data_request_letterhead": "data_request_letterhead",
     "grievance_data_request": "grievance_data_request_form",
     "true_intent_brief": "true_intent_grievance_brief",
     "non_discipline_brief": "non_discipline_grievance_brief",
@@ -195,6 +196,9 @@ _DOC_TEMPLATE_FALLBACKS: dict[str, tuple[str, ...]] = {
     ),
     "mobility_formal_grievance_meeting_request": (
         "mobility_formal_grievance_meeting_request",
+    ),
+    "data_request_letterhead": (
+        "data_request_letterhead",
     ),
     "grievance_data_request_form": (
         "grievance_data_request_form",
@@ -303,6 +307,8 @@ def _build_document_basename(*, doc_type: str, grievance_id: str, member_name: s
         return f"{grievance_id} - {member} - bellsouth meeting request"
     if normalized_type == "mobility_formal_grievance_meeting_request":
         return f"{grievance_id} - {member} - mobility meeting request"
+    if normalized_type == "data_request_letterhead":
+        return f"{grievance_id} - {member} - data request letterhead"
     if normalized_type == "grievance_data_request_form":
         return f"{grievance_id} - {member} - grievance data request"
     if normalized_type == "true_intent_grievance_brief":

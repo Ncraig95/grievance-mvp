@@ -13,6 +13,12 @@ router = APIRouter()
 _NON_DISCIPLINE_FORM_KEY = "non_discipline_brief"
 _NON_DISCIPLINE_ALIAS_PATH = "/internal/forms/non-discipline-brief"
 _NON_DISCIPLINE_ALIAS_SUBMIT_PATH = "/internal/forms/non-discipline-brief/submissions"
+_GRIEVANCE_DATA_REQUEST_FORM_KEY = "grievance_data_request"
+_GRIEVANCE_DATA_REQUEST_ALIAS_PATH = "/internal/forms/grievance-data-request"
+_GRIEVANCE_DATA_REQUEST_ALIAS_SUBMIT_PATH = "/internal/forms/grievance-data-request/submissions"
+_DATA_REQUEST_LETTERHEAD_FORM_KEY = "data_request_letterhead"
+_DATA_REQUEST_LETTERHEAD_ALIAS_PATH = "/internal/forms/data-request-letterhead"
+_DATA_REQUEST_LETTERHEAD_ALIAS_SUBMIT_PATH = "/internal/forms/data-request-letterhead/submissions"
 
 
 class NonDisciplineInternalFormSubmission(BaseModel):
@@ -57,12 +63,47 @@ def _build_non_discipline_intake_payload(body: NonDisciplineInternalFormSubmissi
     return definition.build_payload(body.model_dump())
 
 
-@router.get(_NON_DISCIPLINE_ALIAS_PATH)
-async def non_discipline_internal_form_page(request: Request):
-    gate = await require_officer_page_access(request, next_path=_NON_DISCIPLINE_ALIAS_PATH)
+async def _render_internal_alias_page(
+    *,
+    form_key: str,
+    submit_path: str,
+    request: Request,
+    next_path: str,
+):
+    gate = await require_officer_page_access(request, next_path=next_path)
     if isinstance(gate, RedirectResponse):
         return gate
     return await render_hosted_form_alias_page(
+        form_key=form_key,
+        submit_path=submit_path,
+        request=request,
+        next_path=next_path,
+    )
+
+
+async def _submit_internal_alias_form(
+    *,
+    form_key: str,
+    body: dict[str, object],
+    request: Request,
+):
+    await require_authenticated_officer(request)
+    result = await submit_hosted_form(
+        form_key,
+        body,
+        request,
+        bypass_visibility=True,
+    )
+    return {
+        "request_id": result["request_id"],
+        "document_command": form_key,
+        "intake_response": result["backend_response"],
+    }
+
+
+@router.get(_NON_DISCIPLINE_ALIAS_PATH)
+async def non_discipline_internal_form_page(request: Request):
+    return await _render_internal_alias_page(
         form_key=_NON_DISCIPLINE_FORM_KEY,
         submit_path=_NON_DISCIPLINE_ALIAS_SUBMIT_PATH,
         request=request,
@@ -75,15 +116,52 @@ async def submit_non_discipline_internal_form(
     body: NonDisciplineInternalFormSubmission,
     request: Request,
 ):
-    await require_authenticated_officer(request)
-    result = await submit_hosted_form(
-        _NON_DISCIPLINE_FORM_KEY,
-        body.model_dump(),
-        request,
-        bypass_visibility=True,
+    return await _submit_internal_alias_form(
+        form_key=_NON_DISCIPLINE_FORM_KEY,
+        body=body.model_dump(),
+        request=request,
     )
-    return {
-        "request_id": result["request_id"],
-        "document_command": _NON_DISCIPLINE_FORM_KEY,
-        "intake_response": result["backend_response"],
-    }
+
+
+@router.get(_GRIEVANCE_DATA_REQUEST_ALIAS_PATH)
+async def grievance_data_request_internal_form_page(request: Request):
+    return await _render_internal_alias_page(
+        form_key=_GRIEVANCE_DATA_REQUEST_FORM_KEY,
+        submit_path=_GRIEVANCE_DATA_REQUEST_ALIAS_SUBMIT_PATH,
+        request=request,
+        next_path=_GRIEVANCE_DATA_REQUEST_ALIAS_PATH,
+    )
+
+
+@router.post(_GRIEVANCE_DATA_REQUEST_ALIAS_SUBMIT_PATH)
+async def submit_grievance_data_request_internal_form(
+    body: dict[str, object],
+    request: Request,
+):
+    return await _submit_internal_alias_form(
+        form_key=_GRIEVANCE_DATA_REQUEST_FORM_KEY,
+        body=body,
+        request=request,
+    )
+
+
+@router.get(_DATA_REQUEST_LETTERHEAD_ALIAS_PATH)
+async def data_request_letterhead_internal_form_page(request: Request):
+    return await _render_internal_alias_page(
+        form_key=_DATA_REQUEST_LETTERHEAD_FORM_KEY,
+        submit_path=_DATA_REQUEST_LETTERHEAD_ALIAS_SUBMIT_PATH,
+        request=request,
+        next_path=_DATA_REQUEST_LETTERHEAD_ALIAS_PATH,
+    )
+
+
+@router.post(_DATA_REQUEST_LETTERHEAD_ALIAS_SUBMIT_PATH)
+async def submit_data_request_letterhead_internal_form(
+    body: dict[str, object],
+    request: Request,
+):
+    return await _submit_internal_alias_form(
+        form_key=_DATA_REQUEST_LETTERHEAD_FORM_KEY,
+        body=body,
+        request=request,
+    )

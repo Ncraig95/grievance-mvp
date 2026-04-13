@@ -77,6 +77,7 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         "bellsouth_meeting_request",
         "mobility_meeting_request",
         "grievance_data_request",
+        "data_request_letterhead",
         "true_intent_brief",
         "non_discipline_brief",
         "disciplinary_brief",
@@ -293,6 +294,53 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["contract"], "BellSouth")
         self.assertEqual(payload["document_command"], "bellsouth_meeting_request")
         self.assertEqual(payload["template_data"]["request_date"], date.today().isoformat())
+
+    def test_grievance_data_request_payload_uses_existing_grievance_id(self) -> None:
+        definition = get_hosted_form_definition("grievance_data_request")
+        assert definition is not None
+        payload = definition.build_payload(
+            _values_for_definition(
+                "grievance_data_request",
+                grievance_id="2026111",
+                contract="AT&T Mobility",
+                grievant_firstname="Avery",
+                grievant_lastname="Smith",
+                grievant_email="avery@example.org",
+                signer_email="chief@example.org",
+            )
+        )
+
+        self.assertEqual(payload["grievance_id"], "2026111")
+        self.assertEqual(payload["contract"], "AT&T Mobility")
+        self.assertEqual(payload["document_command"], "grievance_data_request")
+        self.assertEqual(payload["template_data"]["grievant_name"], "Avery Smith")
+        self.assertEqual(payload["template_data"]["today_date"], date.today().isoformat())
+        self.assertEqual(payload["template_data"]["signer_email"], "chief@example.org")
+
+    def test_data_request_letterhead_derives_grievance_number_and_today_date(self) -> None:
+        definition = get_hosted_form_definition("data_request_letterhead")
+        assert definition is not None
+        payload = definition.build_payload(
+            _values_for_definition(
+                "data_request_letterhead",
+                grievance_id="2026444",
+                contract="AT&T Mobility",
+                grievant_firstname="Jordan",
+                grievant_lastname="Lee",
+                grievant_email="jordan@example.org",
+                company_rep_name="Pat Supervisor",
+                data_requested="Personnel file and discipline notes",
+                preferred_format="PDF",
+                steward_name="Chief Steward",
+                steward_email="chief@example.org",
+            )
+        )
+
+        self.assertEqual(payload["grievance_id"], "2026444")
+        self.assertEqual(payload["document_command"], "data_request_letterhead")
+        self.assertEqual(payload["template_data"]["grievance_number"], "2026444")
+        self.assertEqual(payload["template_data"]["grievant_name"], "Jordan Lee")
+        self.assertEqual(payload["template_data"]["today_date"], date.today().isoformat())
 
     def test_builds_standalone_payload(self) -> None:
         definition = get_hosted_form_definition("att_mobility_bargaining_suggestion")

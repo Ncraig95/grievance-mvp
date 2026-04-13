@@ -19,6 +19,7 @@ doc_templates:
   mobility_formal_grievance_meeting_request: /app/templates/docx/mobility-formal-grievance-meeting-request.docx
   bellsouth_meeting_request: /app/templates/docx/Bellsouth-Telecommunications-formal-grievance-meeting-request.docx
   bellsouth_formal_grievance_meeting_request: /app/templates/docx/Bellsouth-Telecommunications-formal-grievance-meeting-request.docx
+  data_request_letterhead: /app/templates/docx/Data Request LetterHead.docx
   grievance_data_request_form: /app/templates/docx/grievance_data_request_form.docx
   statement_of_occurrence: /app/templates/docx/statement_of_occurrence fixed.docx
   settlement_form_3106: /app/templates/docx/Settlement Form 3106.docx
@@ -44,6 +45,14 @@ document_policies:
   mobility_formal_grievance_meeting_request:
     folder_resolution: existing_exact_grievance_id
     default_signer_field: union_rep_email
+    default_requires_signature: true
+  data_request_letterhead:
+    folder_resolution: existing_exact_grievance_id
+    default_signer_field: ""
+    default_requires_signature: false
+  grievance_data_request_form:
+    folder_resolution: existing_exact_grievance_id
+    default_signer_field: signer_email
     default_requires_signature: true
   mobility_record_of_grievance:
     folder_resolution: existing_exact_grievance_id

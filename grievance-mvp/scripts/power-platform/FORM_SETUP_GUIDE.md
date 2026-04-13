@@ -48,10 +48,22 @@ Use the detailed field-map docs under `grievance-mvp/docs/power-automate/` when 
 - Detailed doc: `docs/power-automate/grievance_data_request.md`
 - Endpoint: `POST /intake`
 - Document command: `grievance_data_request`
-- This is mostly a straightforward intake form plus `template_data`.
+- This form requires an existing `grievance_id`.
+- `grievance_number` and `grievance_id` are the same identifier for this flow.
 - If you need exact signer control, send `documents[].signers`; otherwise the app can fall back to `template_data.signer_email`.
 - Generate a starter payload with:
   `.\New-GrievancePayloadTemplate.ps1 -FormKey grievance_data_request -OutputPath .\output\grievance_data_request.payload.json -Overwrite`
+
+## Data Request Letterhead
+
+- Detailed doc: `docs/power-automate/data_request_letterhead.md`
+- Endpoint: `POST /intake`
+- Document command: `data_request_letterhead`
+- This form requires an existing `grievance_id`.
+- `grievance_number` and `grievance_id` are the same identifier for this flow.
+- Use this for the unsigned cover letter that pairs with the signed grievance data request.
+- Generate a starter payload with:
+  `.\New-GrievancePayloadTemplate.ps1 -FormKey data_request_letterhead -OutputPath .\output\data_request_letterhead.payload.json -Overwrite`
 
 ## True Intent Grievance Brief
 

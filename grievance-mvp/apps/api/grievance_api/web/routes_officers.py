@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
+from datetime import date, timedelta
 from html import escape
+from pathlib import Path
 
 import aiosqlite
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from ..core.ids import new_case_id, new_grievance_id, normalize_grievance_id
+from ..core.ids import new_case_id, new_document_id, new_grievance_id, normalize_grievance_id
 from ..db.db import Db, utcnow
 from ..services.case_folder_naming import build_case_folder_member_name
 from ..services.contract_timeline import parse_incident_date
+from ..services.doc_render import render_docx
+from ..services.grievance_id_allocator import GrievanceIdAllocationError, GrievanceIdAllocator
+from ..services.notification_service import NotificationService
+from ..services.pdf_convert import docx_to_pdf
 from .admin_common import parse_json_safely
 from .models import (
     ChiefStewardAssignmentCreateRequest,
@@ -19,6 +26,10 @@ from .models import (
     ChiefStewardAssignmentRow,
     DirectoryUserRow,
     DirectoryUserSearchResponse,
+    DocumentRequest,
+    GrievanceNumberPreviewResponse,
+    IntakeRequest,
+    OfficerAutoDataRequestCreateRequest,
     OfficerCaseBulkDeleteRequest,
     OfficerCaseBulkDeleteResponse,
     OfficerCaseBulkUpdateRequest,
@@ -30,6 +41,10 @@ from .models import (
     OfficerCaseListResponse,
     OfficerCaseRow,
     OfficerCaseUpdateRequest,
+    OfficerAutoDataRequestDocument,
+    OfficerAutoDataRequestResponse,
+    OfficerProfileResponse,
+    OfficerProfileUpdateRequest,
     OfficerViewerContext,
 )
 from .officer_auth import (
@@ -50,6 +65,7 @@ from .officer_auth import (
     scope_display_label,
     user_can_view_case,
 )
+from .routes_intake import _build_document_basename, _build_template_context, _resolve_template_path
 
 router = APIRouter()
 
@@ -77,6 +93,22 @@ _CASE_SELECT_SQL = """
            tracking_third_level_request_sent_date, tracking_fourth_level_request_sent_date
     FROM cases
 """
+_DATA_REQUEST_LETTERHEAD_DOC_TYPE = "data_request_letterhead"
+_GRIEVANCE_DATA_REQUEST_DOC_TYPE = "grievance_data_request_form"
+_DEFAULT_DATA_REQUEST_PREFERRED_FORMAT = "PDF / electronic"
+_DEFAULT_DATA_REQUEST_DUE_DAYS = 14
+_DEFAULT_DATA_REQUEST_ITEMS_TEXT = "\n".join(
+    (
+        "- Complete personnel file",
+        "- Attendance and punctuality record from date of hire",
+        "- All disciplinary action and personnel record entries",
+        "- Job evaluations and employee observations",
+        "- Employee appraisals",
+        "- Training records",
+        "- Supervisory notes",
+        "- All documents relied on for the disciplinary action",
+    )
+)
 
 
 def _normalize_optional_text(value: object) -> str | None:
@@ -192,6 +224,7 @@ def _build_viewer_model(user: OfficerUserContext) -> OfficerViewerContext:
     return OfficerViewerContext(
         email=user.email,
         display_name=user.display_name,
+        officer_title=user.officer_title,
         role=user.role,
         contract_scopes=list(user.contract_scopes),
         auth_enabled=user.auth_enabled,
@@ -224,6 +257,15 @@ def _build_officer_case_row(cfg, row: tuple[object, ...]) -> OfficerCaseRow:  # 
     steward = _normalize_optional_text(row[17]) or _fallback_steward(payload)
     occurrence_date = _normalize_optional_text(row[18]) or _normalize_date_text(
         _payload_pick(payload, "incident_date", "q1_occurred_date", "date_grievance_occurred")
+    )
+    articles = _normalize_optional_text(
+        _payload_pick(
+            payload,
+            "articles",
+            "article",
+            "issue_contract_section",
+            "contract_articles",
+        )
     )
     issue_summary = _normalize_optional_text(row[19]) or _payload_pick(
         payload,
@@ -258,6 +300,7 @@ def _build_officer_case_row(cfg, row: tuple[object, ...]) -> OfficerCaseRow:  # 
         department=department,
         steward=steward,
         occurrence_date=occurrence_date,
+        articles=articles,
         issue_summary=issue_summary,
         first_level_request_sent_date=first_level_request_sent_date,
         second_level_request_sent_date=second_level_request_sent_date,
@@ -327,6 +370,7 @@ def _case_matches_filters(
             row.member_email or "",
             row.department or "",
             row.steward or "",
+            row.articles or "",
             row.issue_summary or "",
             row.officer_assignee or "",
             row.officer_status,
@@ -348,6 +392,34 @@ async def _load_officer_case_row(db: Db, *, cfg, case_id: str) -> OfficerCaseRow
     if not row:
         raise HTTPException(status_code=404, detail="case_id not found")
     return _build_officer_case_row(cfg, row)
+
+
+async def _preview_officer_grievance_number(request: Request) -> GrievanceNumberPreviewResponse:
+    cfg = request.app.state.cfg
+    db: Db = request.app.state.db
+    graph = getattr(request.app.state, "graph", None)
+    if graph is None:
+        raise HTTPException(status_code=503, detail="grievance number preview unavailable")
+
+    allocator = GrievanceIdAllocator(
+        cfg=cfg,
+        db=db,
+        graph=graph,
+        logger=request.app.state.logger,
+    )
+    try:
+        preview = await allocator.preview_next_grievance_id()
+    except GrievanceIdAllocationError as exc:
+        raise HTTPException(status_code=503, detail="unable to preview grievance number") from exc
+
+    return GrievanceNumberPreviewResponse(
+        grievance_id=preview.grievance_id,
+        grievance_number=preview.grievance_id,
+        year=preview.year,
+        sequence=preview.sequence,
+        sharepoint_max_seq=preview.sharepoint_max_seq,
+        db_last_seq=preview.db_last_seq,
+    )
 
 
 async def _load_officer_case_rows_by_id(db: Db, case_ids: list[str]) -> dict[str, tuple[object, ...]]:
@@ -526,6 +598,442 @@ def _split_member_name(member_name: str) -> tuple[str, str]:
     return parts[0], " ".join(parts[1:])
 
 
+def _officer_union_title(user: OfficerUserContext) -> str:
+    custom_title = _normalize_optional_text(user.officer_title)
+    if custom_title:
+        return custom_title
+    if user.role == "chief_steward":
+        return "Chief Steward"
+    if user.role in {"admin", "officer"}:
+        return "Officer"
+    return "Union Representative"
+
+
+def _default_company_name(contract: str | None) -> str:
+    text = _normalize_optional_text(contract)
+    if text:
+        return text
+    return "AT&T"
+
+
+def _build_auto_data_request_payload(
+    *,
+    current_case: OfficerCaseRow,
+    current_row: tuple[object, ...],
+    user: OfficerUserContext,
+    request_id: str,
+    requested_articles: str | None = None,
+) -> IntakeRequest:
+    stored_payload = _payload_dict(current_row[8])
+    template_data = _template_data(stored_payload)
+    grievant_firstname = _payload_pick(stored_payload, "grievant_firstname")
+    grievant_lastname = _payload_pick(stored_payload, "grievant_lastname")
+    if not grievant_firstname or not grievant_lastname:
+        fallback_first, fallback_last = _split_member_name(current_case.member_name)
+        grievant_firstname = grievant_firstname or fallback_first
+        grievant_lastname = grievant_lastname or fallback_last or "Member"
+
+    officer_name = (
+        _normalize_optional_text(user.display_name)
+        or _normalize_optional_text(current_case.steward)
+        or _normalize_optional_text(user.email)
+        or "Union Representative"
+    )
+    officer_email = _normalize_optional_text(user.email) or ""
+    today_iso = date.today().isoformat()
+    due_date = (date.today() + timedelta(days=_DEFAULT_DATA_REQUEST_DUE_DAYS)).isoformat()
+    grievance_number = current_case.grievance_number or current_case.grievance_id
+    company_rep_name = _payload_pick(
+        stored_payload,
+        "company_rep_name",
+        "supervisor",
+        "manager_name",
+    )
+    company_rep_title = (
+        _payload_pick(
+            stored_payload,
+            "company_rep_title",
+            "supervisor_title",
+            "manager_title",
+        )
+        or ("Supervisor" if company_rep_name else "")
+    )
+    company_rep_email = _payload_pick(
+        stored_payload,
+        "company_rep_email",
+        "supervisor_email",
+        "manager_email",
+    )
+    data_requested = (
+        _payload_pick(stored_payload, "data_requested")
+        or _normalize_optional_text(template_data.get("data_requested"))
+        or _DEFAULT_DATA_REQUEST_ITEMS_TEXT
+    )
+    preferred_format = (
+        _payload_pick(stored_payload, "preferred_format")
+        or _normalize_optional_text(template_data.get("preferred_format"))
+        or _DEFAULT_DATA_REQUEST_PREFERRED_FORMAT
+    )
+    articles = (
+        _normalize_optional_text(requested_articles)
+        or _payload_pick(
+            stored_payload,
+            "articles",
+            "article",
+            "issue_contract_section",
+            "contract_articles",
+        )
+        or ""
+    )
+    if not articles:
+        raise HTTPException(status_code=400, detail="articles is required for auto data request")
+
+    request_template_data: dict[str, object] = {
+        "articles": articles,
+        "company_name": (
+            _payload_pick(stored_payload, "company_name")
+            or _default_company_name(current_case.contract)
+        ),
+        "company_rep_name": company_rep_name or "",
+        "company_rep_title": company_rep_title,
+        "company_rep_email": company_rep_email or "",
+        "due_date": due_date,
+        "grievant_name": current_case.member_name,
+        "grievance_number": grievance_number,
+        "today_date": today_iso,
+        "union_phone": (
+            _payload_pick(stored_payload, "union_phone", "local_phone")
+            or _normalize_optional_text(template_data.get("union_phone"))
+            or ""
+        ),
+        "union_rep_name": officer_name,
+        "union_rep_title": _officer_union_title(user),
+        "data_requested": data_requested,
+        "preferred_format": preferred_format,
+        "steward_name": officer_name,
+        "steward_email": officer_email,
+        "approver_block": _normalize_optional_text(template_data.get("approver_block")) or "",
+    }
+
+    return IntakeRequest.model_validate(
+        {
+            "request_id": request_id,
+            "grievance_id": current_case.grievance_id,
+            "grievance_number": grievance_number,
+            "contract": current_case.contract or _payload_pick(stored_payload, "contract") or "CWA",
+            "grievant_firstname": grievant_firstname,
+            "grievant_lastname": grievant_lastname,
+            "grievant_email": current_case.member_email or _payload_pick(stored_payload, "grievant_email"),
+            "grievant_phone": _payload_pick(stored_payload, "grievant_phone"),
+            "work_location": _payload_pick(stored_payload, "work_location"),
+            "supervisor": _payload_pick(stored_payload, "supervisor"),
+            "incident_date": current_case.occurrence_date or _payload_pick(stored_payload, "incident_date"),
+            "narrative": "Auto data request generated from officer panel",
+            "template_data": request_template_data,
+            "documents": [
+                {
+                    "doc_type": _DATA_REQUEST_LETTERHEAD_DOC_TYPE,
+                    "template_key": _DATA_REQUEST_LETTERHEAD_DOC_TYPE,
+                    "requires_signature": False,
+                },
+                {
+                    "doc_type": _GRIEVANCE_DATA_REQUEST_DOC_TYPE,
+                    "template_key": _GRIEVANCE_DATA_REQUEST_DOC_TYPE,
+                    "requires_signature": False,
+                },
+            ],
+        }
+    )
+
+
+async def _ensure_officer_case_sharepoint_folder(
+    *,
+    db: Db,
+    cfg,  # noqa: ANN001
+    graph,  # noqa: ANN001
+    case_id: str,
+    grievance_id: str,
+    member_name: str,
+    contract: str | None,
+    sharepoint_case_folder: str | None,
+    sharepoint_case_web_url: str | None,
+) -> tuple[str | None, str | None]:
+    graph_cfg = getattr(cfg, "graph", None)
+    if (
+        graph is None
+        or graph_cfg is None
+        or not getattr(graph_cfg, "site_hostname", "")
+        or not getattr(graph_cfg, "site_path", "")
+        or not getattr(graph_cfg, "document_library", "")
+    ):
+        return sharepoint_case_folder, sharepoint_case_web_url
+    if sharepoint_case_folder:
+        return sharepoint_case_folder, sharepoint_case_web_url
+
+    folder_ref = graph.ensure_case_folder(
+        site_hostname=graph_cfg.site_hostname,
+        site_path=graph_cfg.site_path,
+        library=graph_cfg.document_library,
+        case_parent_folder=graph_cfg.case_parent_folder,
+        grievance_id=grievance_id,
+        member_name=build_case_folder_member_name(member_name, contract),
+    )
+    await db.exec(
+        "UPDATE cases SET sharepoint_case_folder=?, sharepoint_case_web_url=? WHERE id=?",
+        (folder_ref.folder_name, folder_ref.web_url, case_id),
+    )
+    await db.add_event(
+        case_id,
+        None,
+        "sharepoint_upload_target_resolved",
+        {
+            "folder_id": folder_ref.folder_id,
+            "folder_name": folder_ref.folder_name,
+            "folder_web_url": folder_ref.web_url,
+            "case_parent_folder": graph_cfg.case_parent_folder,
+        },
+    )
+    return folder_ref.folder_name, folder_ref.web_url
+
+
+async def _upload_officer_generated_pdf(
+    *,
+    db: Db,
+    cfg,  # noqa: ANN001
+    graph,  # noqa: ANN001
+    case_id: str,
+    document_id: str,
+    doc_type: str,
+    sharepoint_case_folder: str | None,
+    pdf_path: str,
+) -> str | None:
+    graph_cfg = getattr(cfg, "graph", None)
+    if (
+        graph is None
+        or graph_cfg is None
+        or not sharepoint_case_folder
+        or not getattr(graph_cfg, "site_hostname", "")
+        or not getattr(graph_cfg, "site_path", "")
+        or not getattr(graph_cfg, "document_library", "")
+        or not Path(pdf_path).exists()
+    ):
+        return None
+
+    uploaded = graph.upload_to_case_subfolder(
+        site_hostname=graph_cfg.site_hostname,
+        site_path=graph_cfg.site_path,
+        library=graph_cfg.document_library,
+        case_folder_name=sharepoint_case_folder,
+        case_parent_folder=graph_cfg.case_parent_folder,
+        subfolder=graph_cfg.generated_subfolder,
+        filename=f"{doc_type}_{document_id}.pdf",
+        file_bytes=Path(pdf_path).read_bytes(),
+    )
+    await db.add_event(
+        case_id,
+        document_id,
+        "sharepoint_generated_uploaded",
+        {
+            "filename": f"{doc_type}_{document_id}.pdf",
+            "subfolder": graph_cfg.generated_subfolder,
+            "path": uploaded.path,
+            "web_url": uploaded.web_url,
+        },
+    )
+    return uploaded.web_url
+
+
+async def _append_officer_case_document(
+    *,
+    db: Db,
+    cfg,  # noqa: ANN001
+    logger,  # noqa: ANN001
+    docuseal,  # noqa: ANN001
+    graph,  # noqa: ANN001
+    notifications: NotificationService,
+    payload: IntakeRequest,
+    case_id: str,
+    grievance_id: str,
+    grievance_number: str,
+    member_name: str,
+    sharepoint_case_folder: str | None,
+    doc_req: DocumentRequest,
+    correlation_id: str,
+) -> OfficerAutoDataRequestDocument:
+    document_id = new_document_id()
+    doc_type = doc_req.doc_type.strip() or "document"
+    template_path = _resolve_template_path(cfg, doc_req)
+    doc_name = _build_document_basename(
+        doc_type=doc_type,
+        grievance_id=grievance_id,
+        member_name=member_name,
+    )
+    doc_dir = Path(cfg.data_root) / case_id / document_id
+    doc_dir.mkdir(parents=True, exist_ok=True)
+    docx_path = str(doc_dir / f"{doc_name}.docx")
+    pdf_path = str(doc_dir / f"{doc_name}.pdf")
+    alignment_pdf_bytes: bytes | None = None
+
+    try:
+        context, _layout_meta = _build_template_context(
+            cfg=cfg,
+            payload=payload,
+            case_id=case_id,
+            grievance_id=grievance_id,
+            document_id=document_id,
+            doc_type=doc_type,
+            grievance_number=grievance_number,
+        )
+        if doc_req.requires_signature:
+            anchor_docx_path = str(doc_dir / f"{doc_name}.anchor.docx")
+            anchor_pdf_path: str | None = None
+            try:
+                render_docx(
+                    template_path,
+                    context,
+                    anchor_docx_path,
+                    strip_signature_placeholders=False,
+                    normalize_split_placeholders=cfg.rendering.normalize_split_placeholders,
+                )
+                anchor_pdf_path = docx_to_pdf(
+                    anchor_docx_path,
+                    str(doc_dir),
+                    cfg.libreoffice_timeout_seconds,
+                    engine=cfg.docx_pdf_engine,
+                    graph_uploader=graph,
+                    graph_site_hostname=cfg.graph.site_hostname,
+                    graph_site_path=cfg.graph.site_path,
+                    graph_library=cfg.graph.document_library,
+                    graph_temp_folder_path=cfg.docx_pdf_graph_temp_folder,
+                )
+                alignment_pdf_bytes = Path(anchor_pdf_path).read_bytes()
+            finally:
+                Path(anchor_docx_path).unlink(missing_ok=True)
+                if anchor_pdf_path:
+                    Path(anchor_pdf_path).unlink(missing_ok=True)
+            render_docx(
+                template_path,
+                context,
+                docx_path,
+                strip_signature_placeholders=True,
+                normalize_split_placeholders=cfg.rendering.normalize_split_placeholders,
+            )
+        else:
+            render_docx(
+                template_path,
+                context,
+                docx_path,
+                strip_signature_placeholders=True,
+                normalize_split_placeholders=cfg.rendering.normalize_split_placeholders,
+            )
+        pdf_path = docx_to_pdf(
+            docx_path,
+            str(doc_dir),
+            cfg.libreoffice_timeout_seconds,
+            engine=cfg.docx_pdf_engine,
+            graph_uploader=graph,
+            graph_site_hostname=cfg.graph.site_hostname,
+            graph_site_path=cfg.graph.site_path,
+            graph_library=cfg.graph.document_library,
+            graph_temp_folder_path=cfg.docx_pdf_graph_temp_folder,
+        )
+        pdf_sha = hashlib.sha256(Path(pdf_path).read_bytes()).hexdigest()
+    except Exception as exc:
+        logger.exception(
+            "officer_auto_data_request_render_failed",
+            extra={"case_id": case_id, "document_id": document_id, "doc_type": doc_type},
+        )
+        await db.exec(
+            """INSERT INTO documents(
+                 id, case_id, created_at_utc, doc_type, template_key, status,
+                 requires_signature, docx_path, pdf_path, pdf_sha256
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                document_id,
+                case_id,
+                utcnow(),
+                doc_type,
+                doc_req.template_key,
+                "failed",
+                1 if doc_req.requires_signature else 0,
+                docx_path,
+                pdf_path,
+                "",
+            ),
+        )
+        await db.add_event(
+            case_id,
+            document_id,
+            "officer_auto_data_request_render_failed",
+            {"doc_type": doc_type, "error": str(exc)},
+        )
+        return OfficerAutoDataRequestDocument(document_id=document_id, doc_type=doc_type, status="failed")
+
+    await db.exec(
+        """INSERT INTO documents(
+             id, case_id, created_at_utc, doc_type, template_key, status,
+             requires_signature, docx_path, pdf_path, pdf_sha256
+           ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (
+            document_id,
+            case_id,
+            utcnow(),
+            doc_type,
+            doc_req.template_key,
+            "created",
+            1 if doc_req.requires_signature else 0,
+            docx_path,
+            pdf_path,
+            pdf_sha,
+        ),
+    )
+    await db.add_event(
+        case_id,
+        document_id,
+        "officer_auto_data_request_document_created",
+        {"doc_type": doc_type, "template_path": template_path},
+    )
+
+    generated_link: str | None = None
+    try:
+        generated_link = await _upload_officer_generated_pdf(
+            db=db,
+            cfg=cfg,
+            graph=graph,
+            case_id=case_id,
+            document_id=document_id,
+            doc_type=doc_type,
+            sharepoint_case_folder=sharepoint_case_folder,
+            pdf_path=pdf_path,
+        )
+    except Exception as exc:
+        logger.exception(
+            "officer_auto_data_request_generated_upload_failed",
+            extra={"case_id": case_id, "document_id": document_id, "doc_type": doc_type},
+        )
+        await db.add_event(
+            case_id,
+            document_id,
+            "officer_auto_data_request_generated_upload_failed",
+            {"doc_type": doc_type, "error": str(exc)},
+        )
+
+    signing_link: str | None = None
+    status = "uploaded" if generated_link else "created"
+    await db.exec(
+        "UPDATE documents SET status=?, sharepoint_generated_url=? WHERE id=?",
+        (status, generated_link, document_id),
+    )
+
+    return OfficerAutoDataRequestDocument(
+        document_id=document_id,
+        doc_type=doc_type,
+        status=status,
+        signing_link=signing_link,
+        generated_link=generated_link,
+    )
+
+
 def _build_manual_payload_snapshot(
     body: OfficerCaseCreateRequest,
     *,
@@ -589,6 +1097,69 @@ def _normalize_email(value: object, *, field_name: str = "principal_email") -> s
     if not text or "@" not in text:
         raise HTTPException(status_code=400, detail=f"{field_name} must be a valid email address")
     return text
+
+
+def _normalize_officer_title_input(value: object) -> str | None:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return None
+    if len(text) > 120:
+        raise HTTPException(status_code=400, detail="officer_title must be 120 characters or fewer")
+    return text
+
+
+async def _save_officer_profile(
+    db: Db,
+    *,
+    user: OfficerUserContext,
+    officer_title: str | None,
+) -> OfficerProfileResponse:
+    normalized_email = _normalize_email(user.email, field_name="officer email")
+    normalized_title = _normalize_officer_title_input(officer_title)
+    now = utcnow()
+    existing = await db.fetchone(
+        "SELECT id, created_at_utc FROM officer_profiles WHERE principal_email=?",
+        (normalized_email,),
+    )
+    if existing:
+        created_at_utc = str(existing[1] or "").strip() or now
+        await db.exec(
+            """
+            UPDATE officer_profiles
+            SET principal_id=?, principal_display_name=?, officer_title=?, created_at_utc=?, updated_at_utc=?
+            WHERE id=?
+            """,
+            (
+                _normalize_optional_text(user.user_id),
+                _normalize_optional_text(user.display_name),
+                normalized_title,
+                created_at_utc,
+                now,
+                int(existing[0]),
+            ),
+        )
+    else:
+        await db.exec(
+            """
+            INSERT INTO officer_profiles(
+              principal_id, principal_email, principal_display_name,
+              officer_title, created_at_utc, updated_at_utc
+            ) VALUES(?,?,?,?,?,?)
+            """,
+            (
+                _normalize_optional_text(user.user_id),
+                normalized_email,
+                _normalize_optional_text(user.display_name),
+                normalized_title,
+                now,
+                now,
+            ),
+        )
+    return OfficerProfileResponse(
+        email=normalized_email,
+        display_name=_normalize_optional_text(user.display_name) or normalized_email,
+        officer_title=normalized_title,
+    )
 
 
 async def _load_chief_steward_assignments(db: Db) -> list[ChiefStewardAssignmentRow]:
@@ -967,7 +1538,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     if user.contract_scopes:
         scope_pills = _render_scope_pills(user.contract_scopes)
     elif user.role == "admin":
-        scope_pills = '<span class="scope-pill scope-pill-muted">All configured scopes</span>'
+        scope_pills = _render_scope_pills([scope_key for scope_key, _label in selectable_contract_scopes()])
     elif user.auth_enabled:
         scope_pills = '<span class="scope-pill scope-pill-muted">All contract scopes</span>'
     else:
@@ -976,6 +1547,8 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
         '<a class="link-chip" href="#filtersPanel">Filters</a>',
         '<a class="link-chip" href="#trackerPanel">Tracker</a>',
     ]
+    if user.auth_enabled:
+        hero_links.append('<a class="link-chip" href="#officerProfilePanel">Profile</a>')
     if show_mutation_split:
         hero_links.append('<a class="link-chip" href="#mutationSplit">Edit Workspace</a>')
     if user.can_manage_chief_assignments:
@@ -1253,6 +1826,29 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     </div>
   </div>
 """
+    )
+    profile_panel = (
+        f"""
+  <div class="panel" id="officerProfilePanel">
+    <h2>Officer Profile</h2>
+    <div class="summary">Set the title used on generated grievance data request documents.</div>
+    <div class="grid" style="margin-top:12px;">
+      <label>Officer Title
+        <input
+          id="officerTitleInput"
+          placeholder="Chief Steward, Vice President, Steward, etc."
+          value="{escape(user.officer_title or '', quote=True)}"
+        />
+      </label>
+    </div>
+    <div class="actions">
+      <button id="saveOfficerTitleBtn" type="button">Save Title</button>
+    </div>
+    <div id="officerTitleStatus" class="summary"></div>
+  </div>
+"""
+        if user.auth_enabled
+        else ""
     )
     bulk_panel = (
         """
@@ -2075,6 +2671,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     </div>
   </div>
   {auth_panel}
+  {profile_panel}
   {chief_assignment_panel}
   {external_steward_panel}
   {case_external_assignment_panel}
@@ -2313,6 +2910,46 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       return 'Read Only';
     }}
 
+    function defaultOfficerTitle(role) {{
+      if (role === 'chief_steward') return 'Chief Steward';
+      if (role === 'admin' || role === 'officer') return 'Officer';
+      return 'Union Representative';
+    }}
+
+    function viewerIdentityText(viewer) {{
+      const name = viewer.display_name || viewer.email || 'Unknown';
+      const roleLabel = labelForRole(viewer.role);
+      const customTitle = String(viewer.officer_title || '').trim();
+      const parts = [name, roleLabel];
+      if (customTitle && customTitle.toLowerCase() !== roleLabel.toLowerCase()) {{
+        parts.push(customTitle);
+      }}
+      return parts.join(' · ');
+    }}
+
+    function updateOfficerTitleStatus(viewer) {{
+      const statusEl = document.getElementById('officerTitleStatus');
+      if (!statusEl) return;
+      const customTitle = String((viewer && viewer.officer_title) || '').trim();
+      statusEl.textContent = customTitle
+        ? `Current document title: ${{customTitle}}.`
+        : `No custom title saved. Generated documents currently use "${{defaultOfficerTitle((viewer && viewer.role) || VIEWER.role)}}"."`;
+    }}
+
+    function applyViewerContext(viewer) {{
+      if (!viewer) return;
+      VIEWER.officer_title = viewer.officer_title || '';
+      if (viewer.display_name) VIEWER.display_name = viewer.display_name;
+      if (viewer.email) VIEWER.email = viewer.email;
+      const viewerLabel = document.getElementById('viewerLabel');
+      if (viewerLabel) viewerLabel.textContent = viewerIdentityText({{ ...VIEWER, ...viewer }});
+      const officerTitleInput = document.getElementById('officerTitleInput');
+      if (officerTitleInput && document.activeElement !== officerTitleInput) {{
+        officerTitleInput.value = String(viewer.officer_title || '');
+      }}
+      updateOfficerTitleStatus({{ ...VIEWER, ...viewer }});
+    }}
+
     function normalizeScopeKey(value) {{
       return String(value || '')
         .trim()
@@ -2542,6 +3179,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
             <td class="actions-col" data-label="Actions">
               <div class="row-actions">
                 ${{VIEWER.can_edit ? `<button type="button" data-action="edit" data-case-id="${{esc(row.case_id)}}">Edit</button>` : ''}}
+                ${{VIEWER.can_edit ? `<button type="button" class="secondary" data-action="auto-data-request" data-case-id="${{esc(row.case_id)}}">Auto Data Request</button>` : ''}}
                 ${{VIEWER.can_view_audit ? `<button type="button" class="secondary" data-action="audit" data-case-id="${{esc(row.case_id)}}">Audit</button>` : ''}}
                 ${{VIEWER.can_delete ? `<button type="button" class="danger" data-action="delete" data-case-id="${{esc(row.case_id)}}">Delete</button>` : ''}}
               </div>
@@ -2573,12 +3211,21 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
         const data = await call(`/officers/cases${{queryString()}}`);
         currentRoster = Array.isArray(data.roster) ? data.roster : [];
         populateScopeOptions(data.available_contract_scopes || [], valueOf('filterContractScope'));
-        if (data.viewer) {{
-          document.getElementById('viewerLabel') && (document.getElementById('viewerLabel').textContent =
-            `${{data.viewer.display_name || data.viewer.email || 'Unknown'}} · ${{labelForRole(data.viewer.role)}}`);
-        }}
+        if (data.viewer) applyViewerContext(data.viewer);
         renderRows(Array.isArray(data.rows) ? data.rows : []);
         show(data);
+      }} catch (e) {{
+        show(e);
+      }}
+    }}
+
+    async function loadNextGrievanceNumber() {{
+      const input = document.getElementById('createGrievanceNumber');
+      if (!VIEWER.can_create || !input || input.value.trim()) return;
+      try {{
+        const data = await call('/officers/grievance-number/next');
+        if (input.value.trim()) return;
+        input.value = String(data.grievance_number || data.grievance_id || '').trim();
       }} catch (e) {{
         show(e);
       }}
@@ -2596,6 +3243,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       }}
       if (document.getElementById('createOfficerStatus')) document.getElementById('createOfficerStatus').value = 'open';
       if (document.getElementById('createAssigneeSelect')) document.getElementById('createAssigneeSelect').value = '';
+      void loadNextGrievanceNumber();
     }}
 
     async function createCase() {{
@@ -2657,6 +3305,49 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     async function loadAudit(caseId) {{
       try {{
         const data = await call(`/officers/cases/${{encodeURIComponent(caseId)}}/events`);
+        show(data);
+      }} catch (e) {{
+        show(e);
+      }}
+    }}
+
+    async function autoDataRequest(caseId) {{
+      const row = currentRows.get(caseId);
+      if (!row) {{
+        return show({{ error: 'Case not found in current table view.' }});
+      }}
+      const suggestedArticles = String(row.articles || '').trim();
+      const articles = window.prompt(
+        `Articles that apply for ${{row.display_grievance}}:`,
+        suggestedArticles,
+      );
+      if (articles == null) return;
+      if (!String(articles).trim()) {{
+        return show({{ error: 'Articles are required before creating the data request.' }});
+      }}
+      try {{
+        const data = await call(`/officers/cases/${{encodeURIComponent(caseId)}}/auto-data-request`, {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ articles: String(articles).trim() }})
+        }});
+        show(data);
+        await loadCases();
+      }} catch (e) {{
+        show(e);
+      }}
+    }}
+
+    async function saveOfficerTitle() {{
+      const officerTitleInput = document.getElementById('officerTitleInput');
+      if (!officerTitleInput) return;
+      try {{
+        const data = await call('/officers/profile', {{
+          method: 'PUT',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ officer_title: officerTitleInput.value.trim() || null }})
+        }});
+        applyViewerContext({{ ...VIEWER, ...data }});
         show(data);
       }} catch (e) {{
         show(e);
@@ -3140,6 +3831,10 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
         void loadAudit(caseId);
         return;
       }}
+      if (button.dataset.action === 'auto-data-request') {{
+        void autoDataRequest(caseId);
+        return;
+      }}
       startEdit(caseId);
     }});
     chiefAssignmentsBody && chiefAssignmentsBody.addEventListener('click', (event) => {{
@@ -3197,6 +3892,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     document.getElementById('createBtn') && document.getElementById('createBtn').addEventListener('click', () => {{ void createCase(); }});
     document.getElementById('saveEditBtn') && document.getElementById('saveEditBtn').addEventListener('click', () => {{ void saveEdit(); }});
     document.getElementById('clearEditBtn') && document.getElementById('clearEditBtn').addEventListener('click', clearEditSelection);
+    document.getElementById('saveOfficerTitleBtn') && document.getElementById('saveOfficerTitleBtn').addEventListener('click', () => {{ void saveOfficerTitle(); }});
     document.getElementById('searchDirectoryBtn') && document.getElementById('searchDirectoryBtn').addEventListener('click', () => {{ void searchDirectoryUsers(); }});
     document.getElementById('saveExternalStewardBtn') && document.getElementById('saveExternalStewardBtn').addEventListener('click', () => {{ void saveExternalSteward(); }});
     document.getElementById('assignCaseExternalStewardBtn') && document.getElementById('assignCaseExternalStewardBtn').addEventListener('click', () => {{ void assignExternalStewardToCase(); }});
@@ -3242,8 +3938,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       updateSelectionUi();
     }});
     window.addEventListener('DOMContentLoaded', () => {{
-      document.getElementById('viewerLabel') && (document.getElementById('viewerLabel').textContent =
-        `${{VIEWER.display_name || VIEWER.email || 'Unknown'}} · ${{labelForRole(VIEWER.role)}}`);
+      applyViewerContext(VIEWER);
       populateAssigneeOptions(filterAssignee, [], '', 'All assignees');
       populateAssigneeOptions(createAssigneeSelect, [], '', 'Roster assignee');
       populateAssigneeOptions(editAssigneeSelect, [], '', 'Roster assignee');
@@ -3252,6 +3947,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       populateExternalStewardSelect('');
       updateSelectionUi();
       syncTrackerScrollbarMetrics();
+      void loadNextGrievanceNumber();
       void loadCases();
       if (VIEWER.can_manage_chief_assignments) {{
         void loadChiefAssignments();
@@ -3289,6 +3985,27 @@ async def officers_page(request: Request):
     if isinstance(gate, RedirectResponse):
         return gate
     return HTMLResponse(_render_officers_page(gate, request.app.state.cfg))
+
+
+@router.get("/officers/profile", response_model=OfficerProfileResponse)
+async def officer_profile(request: Request):
+    user = await require_authenticated_officer(request)
+    return OfficerProfileResponse(
+        email=user.email,
+        display_name=user.display_name,
+        officer_title=user.officer_title,
+    )
+
+
+@router.put("/officers/profile", response_model=OfficerProfileResponse)
+async def update_officer_profile(body: OfficerProfileUpdateRequest, request: Request):
+    user = await require_authenticated_officer(request)
+    db: Db = request.app.state.db
+    return await _save_officer_profile(
+        db,
+        user=user,
+        officer_title=body.officer_title,
+    )
 
 
 @router.get("/officers/cases", response_model=OfficerCaseListResponse)
@@ -3332,6 +4049,12 @@ async def officer_cases(
         available_contract_scopes=available_contract_scopes,
         count=len(filtered),
     )
+
+
+@router.get("/officers/grievance-number/next", response_model=GrievanceNumberPreviewResponse)
+async def officer_next_grievance_number(request: Request):
+    await require_admin_user(request)
+    return await _preview_officer_grievance_number(request)
 
 
 @router.get("/officers/chief-assignments", response_model=ChiefStewardAssignmentListResponse)
@@ -3415,6 +4138,125 @@ async def officer_case_events(case_id: str, request: Request):
         display_grievance=case_row.display_grievance,
         event_count=len(events),
         events=events,
+    )
+
+
+@router.post("/officers/cases/{case_id}/auto-data-request", response_model=OfficerAutoDataRequestResponse)
+async def officer_auto_data_request(
+    case_id: str,
+    request: Request,
+    body: OfficerAutoDataRequestCreateRequest | None = None,
+):
+    cfg = request.app.state.cfg
+    if not officer_auth_enabled(cfg):
+        raise HTTPException(status_code=423, detail="officer changes are disabled until officer auth is enabled")
+
+    db: Db = request.app.state.db
+    logger = request.app.state.logger
+    docuseal = request.app.state.docuseal
+    graph = getattr(request.app.state, "graph", None)
+    notifications: NotificationService = request.app.state.notifications
+
+    current_row = await db.fetchone(f"{_CASE_SELECT_SQL} WHERE id=?", (case_id,))
+    if not current_row:
+        raise HTTPException(status_code=404, detail="case_id not found")
+
+    current_case = _build_officer_case_row(cfg, current_row)
+    user = await require_case_edit_access(request, contract_scope=current_case.contract_scope)
+    request_id = f"officer-auto-data-request-{case_id}-{time.time_ns()}"
+    payload = _build_auto_data_request_payload(
+        current_case=current_case,
+        current_row=current_row,
+        user=user,
+        request_id=request_id,
+        requested_articles=body.articles if body is not None else None,
+    )
+
+    case_storage = await db.fetchone(
+        "SELECT sharepoint_case_folder, sharepoint_case_web_url FROM cases WHERE id=?",
+        (case_id,),
+    )
+    sharepoint_case_folder = _normalize_optional_text(case_storage[0]) if case_storage else None
+    sharepoint_case_web_url = _normalize_optional_text(case_storage[1]) if case_storage else None
+    sharepoint_case_folder, sharepoint_case_web_url = await _ensure_officer_case_sharepoint_folder(
+        db=db,
+        cfg=cfg,
+        graph=graph,
+        case_id=case_id,
+        grievance_id=current_case.grievance_id,
+        member_name=current_case.member_name,
+        contract=current_case.contract,
+        sharepoint_case_folder=sharepoint_case_folder,
+        sharepoint_case_web_url=sharepoint_case_web_url,
+    )
+
+    await db.add_event(
+        case_id,
+        None,
+        "officer_auto_data_request_started",
+        {
+            "request_id": request_id,
+            "articles": payload.template_data.get("articles", ""),
+            "officer_email": user.email,
+            "officer_title": _officer_union_title(user),
+            "requested_by": actor_identity(user, fallback="officer-ui"),
+            **audit_actor_details(user, case_contract_scope=current_case.contract_scope, bulk=False),
+        },
+    )
+
+    documents: list[OfficerAutoDataRequestDocument] = []
+    for doc_req in payload.documents:
+        documents.append(
+            await _append_officer_case_document(
+                db=db,
+                cfg=cfg,
+                logger=logger,
+                docuseal=docuseal,
+                graph=graph,
+                notifications=notifications,
+                payload=payload,
+                case_id=case_id,
+                grievance_id=current_case.grievance_id,
+                grievance_number=current_case.grievance_number or current_case.grievance_id,
+                member_name=current_case.member_name,
+                sharepoint_case_folder=sharepoint_case_folder,
+                doc_req=doc_req,
+                correlation_id=request_id,
+            )
+        )
+
+    statuses = {document.status for document in documents}
+    next_case_status = current_case.workflow_status
+    if "failed" in statuses:
+        next_case_status = "failed"
+
+    if next_case_status != current_case.workflow_status:
+        await db.exec("UPDATE cases SET status=? WHERE id=?", (next_case_status, case_id))
+
+    await db.add_event(
+        case_id,
+        None,
+        "officer_auto_data_request_completed",
+        {
+            "request_id": request_id,
+            "articles": payload.template_data.get("articles", ""),
+            "document_count": len(documents),
+            "statuses": sorted(statuses),
+            "sharepoint_case_folder": sharepoint_case_folder,
+            "sharepoint_case_web_url": sharepoint_case_web_url,
+        },
+    )
+
+    return OfficerAutoDataRequestResponse(
+        case_id=case_id,
+        grievance_id=current_case.grievance_id,
+        grievance_number=current_case.grievance_number,
+        display_grievance=current_case.display_grievance,
+        request_id=request_id,
+        officer_email=_normalize_optional_text(user.email),
+        officer_title=_officer_union_title(user),
+        articles=str(payload.template_data.get("articles", "") or ""),
+        documents=documents,
     )
 
 
