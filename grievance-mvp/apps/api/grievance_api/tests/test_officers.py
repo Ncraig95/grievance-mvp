@@ -24,11 +24,13 @@ from grievance_api.services.sharepoint_graph import CaseFolderRef, DirectoryUser
 from grievance_api.web.officer_auth import officer_callback, officer_login
 from grievance_api.web.models import (
     ChiefStewardAssignmentCreateRequest,
+    OfficerAutoDataRequestCreateRequest,
     OfficerCaseBulkDeleteRequest,
     OfficerCaseBulkUpdateRequest,
     OfficerCaseCreateRequest,
     OfficerCaseUpdateRequest,
     OfficerAutoDataRequestDocument,
+    OfficerProfileUpdateRequest,
 )
 from grievance_api.web.routes_officers import (
     _build_auto_data_request_payload,
@@ -43,8 +45,10 @@ from grievance_api.web.routes_officers import (
     officer_directory_users,
     officer_case_events,
     officer_cases,
+    officer_profile,
     officer_next_grievance_number,
     officers_page,
+    update_officer_profile,
     update_officer_case,
 )
 from grievance_api.web.routes_ops import ops_page
@@ -388,6 +392,23 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Auto Data Request", html)
         self.assertIn("async function autoDataRequest(caseId)", html)
         self.assertIn("data-action=\"auto-data-request\"", html)
+        self.assertIn("window.prompt(", html)
+        self.assertIn("Articles that apply for", html)
+
+    async def test_officers_page_renders_officer_profile_title_controls(self) -> None:
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        response = await officers_page(request)
+        html = response.body.decode("utf-8")
+
+        self.assertIn("Officer Profile", html)
+        self.assertIn('id="officerTitleInput"', html)
+        self.assertIn('id="saveOfficerTitleBtn"', html)
+        self.assertIn("async function saveOfficerTitle()", html)
 
     async def test_officers_page_manual_entry_uses_single_grievance_field_and_fixed_scope_dropdown(self) -> None:
         request = _Request(
@@ -730,6 +751,31 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(exc.exception.status_code, 403)
 
+    async def test_officer_can_save_profile_title_and_case_view_reflects_it(self) -> None:
+        await self._insert_case(
+            case_id="C1",
+            grievance_id="2026103",
+            intake_request_id="forms-C3",
+            contract="Mobility",
+        )
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("officer", email="officer@example.org"),
+            host="8.8.8.8",
+        )
+
+        saved = await update_officer_profile(
+            OfficerProfileUpdateRequest(officer_title="Vice President"),
+            request,
+        )
+        self.assertEqual(saved.officer_title, "Vice President")
+
+        profile = await officer_profile(request)
+        self.assertEqual(profile.officer_title, "Vice President")
+
+        result = await officer_cases(request)
+        self.assertEqual(result.viewer.officer_title, "Vice President")
+
     async def test_chief_steward_only_sees_in_scope_cases_and_can_edit_in_scope(self) -> None:
         await self._insert_case(
             case_id="C1",
@@ -1067,7 +1113,7 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(details["bulk_update"])
         self.assertEqual(details["actor_role"], "chief_steward")
 
-    async def test_officer_auto_data_request_uses_statement_fields_and_updates_case_status(self) -> None:
+    async def test_officer_auto_data_request_uses_statement_fields_and_generates_unsigned_files(self) -> None:
         await self.db.exec(
             """INSERT INTO cases(
                  id, grievance_id, created_at_utc, status, approval_status, grievance_number,
@@ -1134,28 +1180,106 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
                     OfficerAutoDataRequestDocument(
                         document_id="D2",
                         doc_type="grievance_data_request_form",
-                        status="sent_for_signature",
-                        signing_link="https://docuseal.local/sign/D2",
+                        status="uploaded",
                         generated_link="https://sharepoint.local/generated/D2.pdf",
                     ),
                 ]
             ),
         ) as mock_append:
-            response = await officer_auto_data_request("C1", request)
+            response = await officer_auto_data_request(
+                "C1",
+                request,
+                OfficerAutoDataRequestCreateRequest(articles="Article 12, Article 19"),
+            )
 
         payload = mock_append.await_args_list[0].kwargs["payload"]
         self.assertEqual(payload.grievance_id, "2026301")
         self.assertEqual(payload.grievance_number, "2026301")
-        self.assertEqual(payload.template_data["articles"], "Article 12")
+        self.assertEqual(payload.template_data["articles"], "Article 12, Article 19")
         self.assertEqual(payload.template_data["company_rep_name"], "Pat Supervisor")
         self.assertEqual(payload.template_data["company_rep_email"], "pat.supervisor@example.org")
         self.assertEqual(payload.template_data["union_phone"], "904-555-0100")
         self.assertEqual(payload.template_data["union_rep_name"], "officer@example.org")
-        self.assertEqual(payload.template_data["signer_email"], "officer@example.org")
-        self.assertEqual(response.documents[1].signing_link, "https://docuseal.local/sign/D2")
+        self.assertEqual(payload.template_data["union_rep_title"], "Officer")
+        self.assertEqual(payload.documents[0].requires_signature, False)
+        self.assertEqual(payload.documents[1].requires_signature, False)
+        self.assertIsNone(response.documents[1].signing_link)
+        self.assertEqual(response.articles, "Article 12, Article 19")
+        self.assertEqual(response.officer_title, "Officer")
 
         case_status = await self.db.fetchone("SELECT status FROM cases WHERE id=?", ("C1",))
-        self.assertEqual(case_status[0], "awaiting_signatures")
+        self.assertEqual(case_status[0], "approved")
+
+    async def test_auto_data_request_uses_saved_officer_title_for_union_rep_title(self) -> None:
+        await self.db.exec(
+            """INSERT INTO cases(
+                 id, grievance_id, created_at_utc, status, approval_status, grievance_number,
+                 member_name, member_email, intake_request_id, intake_payload_json,
+                 tracking_contract, tracking_steward, tracking_occurrence_date
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "C2",
+                "2026302",
+                "2026-03-27T15:00:00+00:00",
+                "approved",
+                "approved",
+                None,
+                "Taylor Jones",
+                "taylor@example.org",
+                "forms-auto-2",
+                json.dumps(
+                    {
+                        "request_id": "forms-auto-2",
+                        "contract": "AT&T Mobility",
+                        "grievant_firstname": "Taylor",
+                        "grievant_lastname": "Jones",
+                        "grievant_email": "taylor@example.org",
+                        "documents": [],
+                        "template_data": {},
+                    }
+                ),
+                "AT&T Mobility",
+                "Steward Smith",
+                "2026-03-20",
+            ),
+        )
+        request = _Request(
+            state=SimpleNamespace(
+                cfg=self._cfg(auth_enabled=True),
+                db=self.db,
+                logger=SimpleNamespace(),
+                docuseal=SimpleNamespace(),
+                notifications=SimpleNamespace(),
+            ),
+            session=self._session_user("admin", email="officer@example.org"),
+            host="8.8.8.8",
+        )
+        await update_officer_profile(
+            OfficerProfileUpdateRequest(officer_title="Vice President"),
+            request,
+        )
+
+        with patch(
+            "grievance_api.web.routes_officers._ensure_officer_case_sharepoint_folder",
+            new=AsyncMock(return_value=(None, None)),
+        ), patch(
+            "grievance_api.web.routes_officers._append_officer_case_document",
+            new=AsyncMock(return_value=OfficerAutoDataRequestDocument(
+                document_id="D3",
+                doc_type="grievance_data_request_form",
+                status="created",
+                generated_link=None,
+            )),
+        ) as mock_append:
+            response = await officer_auto_data_request(
+                "C2",
+                request,
+                OfficerAutoDataRequestCreateRequest(articles="Article 4"),
+            )
+
+        payload = mock_append.await_args_list[0].kwargs["payload"]
+        self.assertEqual(payload.template_data["union_rep_title"], "Vice President")
+        self.assertEqual(response.officer_title, "Vice President")
 
     async def test_admin_can_create_delete_bulk_delete_and_access_ops(self) -> None:
         request = _Request(

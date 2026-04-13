@@ -50,7 +50,7 @@ Use the detailed field-map docs under `grievance-mvp/docs/power-automate/` when 
 - Document command: `grievance_data_request`
 - This form requires an existing `grievance_id`.
 - `grievance_number` and `grievance_id` are the same identifier for this flow.
-- If you need exact signer control, send `documents[].signers`; otherwise the app can fall back to `template_data.signer_email`.
+- This form is generated as a regular file and does not use signature routing.
 - Generate a starter payload with:
   `.\New-GrievancePayloadTemplate.ps1 -FormKey grievance_data_request -OutputPath .\output\grievance_data_request.payload.json -Overwrite`
 

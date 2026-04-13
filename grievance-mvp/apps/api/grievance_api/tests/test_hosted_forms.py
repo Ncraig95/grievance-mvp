@@ -306,7 +306,6 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
                 grievant_firstname="Avery",
                 grievant_lastname="Smith",
                 grievant_email="avery@example.org",
-                signer_email="chief@example.org",
             )
         )
 
@@ -315,7 +314,7 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["document_command"], "grievance_data_request")
         self.assertEqual(payload["template_data"]["grievant_name"], "Avery Smith")
         self.assertEqual(payload["template_data"]["today_date"], date.today().isoformat())
-        self.assertEqual(payload["template_data"]["signer_email"], "chief@example.org")
+        self.assertNotIn("signer_email", payload["template_data"])
 
     def test_data_request_letterhead_derives_grievance_number_and_today_date(self) -> None:
         definition = get_hosted_form_definition("data_request_letterhead")

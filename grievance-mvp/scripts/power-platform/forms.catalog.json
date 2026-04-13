@@ -164,14 +164,12 @@
         "today_date": "<yyyy-mm-dd>",
         "union_phone": "<Union phone>",
         "union_rep_name": "<Union representative name>",
-        "union_rep_title": "<Union representative title>",
-        "signer_email": "<Optional signer email override>"
+        "union_rep_title": "<Union representative title>"
       },
       "notes": [
         "This flow requires an existing SharePoint grievance folder.",
         "grievance_number and grievance_id are the same identifier for this flow.",
-        "Use documents[].signers when you want explicit signer control.",
-        "If documents[].signers is omitted, the API falls back to template_data.signer_email and then grievant_email."
+        "This form is generated as a regular file and does not go through signature routing."
       ]
     },
     {
@@ -206,7 +204,7 @@
       "notes": [
         "This flow requires an existing SharePoint grievance folder.",
         "grievance_number and grievance_id are the same identifier for this flow.",
-        "Use this alongside grievance_data_request when you want the cover letter stored with the signed request packet."
+        "Use this alongside grievance_data_request when you want the cover letter stored with the generated request packet."
       ]
     },
     {

@@ -61,9 +61,7 @@ Template-specific (`template_data`):
 - `grievance_id` is required.
 - `grievance_number` and `grievance_id` are treated as the same identifier for this flow.
 
-## Signer behavior
+## Routing behavior
 
-If this doc needs signature routing, include one of:
-- `documents[].signers` (preferred explicit)
-- `template_data.signer_email`
-- fallback is `grievant_email`
+- This form is generated as a regular file.
+- It does not require signature routing.

@@ -52,8 +52,8 @@ document_policies:
     default_requires_signature: false
   grievance_data_request_form:
     folder_resolution: existing_exact_grievance_id
-    default_signer_field: signer_email
-    default_requires_signature: true
+    default_signer_field: ""
+    default_requires_signature: false
   mobility_record_of_grievance:
     folder_resolution: existing_exact_grievance_id
     default_signer_field: ""
