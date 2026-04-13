@@ -10,7 +10,7 @@
       "requestIdPattern": "forms-<Response Id>",
       "detailedGuide": "docs/power-automate/statement_of_occurrence.md",
       "topLevelFields": {
-        "contract": "City of Jacksonville",
+        "contract": "<Contract>",
         "grievant_firstname": "<Grievant first name>",
         "grievant_lastname": "<Grievant last name>",
         "grievant_email": "<Grievant email>",

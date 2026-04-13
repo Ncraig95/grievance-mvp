@@ -42,7 +42,7 @@ Template-specific (`template_data`):
 {
   "request_id": "forms-<responseId>",
   "document_command": "statement_of_occurrence",
-  "contract": "City of Jacksonville",
+  "contract": "<contract choice>",
   "grievant_firstname": "<first>",
   "grievant_lastname": "<last>",
   "grievant_email": "<email>",

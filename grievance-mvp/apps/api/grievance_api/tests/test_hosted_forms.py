@@ -127,6 +127,7 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         payload = definition.build_payload(
             _values_for_definition(
                 "statement_of_occurrence",
+                contract="Wire Tech",
                 grievant_firstname="Taylor",
                 grievant_lastname="Jones",
                 article="Article 1",
@@ -134,10 +135,123 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(payload["document_command"], "statement_of_occurrence")
-        self.assertEqual(payload["contract"], "City of Jacksonville")
+        self.assertEqual(payload["contract"], "Wire Tech")
         self.assertEqual(payload["grievant_firstname"], "Taylor")
         self.assertEqual(payload["template_data"]["article"], "Article 1")
         self.assertEqual(payload["template_data"]["witness_1_name"], "")
+
+    def test_statement_contract_field_uses_supported_contract_dropdown(self) -> None:
+        definition = get_hosted_form_definition("statement_of_occurrence")
+        assert definition is not None
+        contract_field = next(field for field in definition.fields if field.source_key == "contract")
+
+        self.assertEqual(contract_field.type, "select")
+        self.assertIn("City of Jacksonville", contract_field.options)
+        self.assertIn("Wire Tech", contract_field.options)
+        self.assertIn("BellSouth", contract_field.options)
+        self.assertIn("AT&T Mobility", contract_field.options)
+        self.assertIn("IHX", contract_field.options)
+        self.assertIn("BST", contract_field.options)
+        self.assertIn("Utilities", contract_field.options)
+
+    def test_true_intent_field_order_matches_form_sections(self) -> None:
+        definition = get_hosted_form_definition("true_intent_brief")
+        assert definition is not None
+        names = [field.name for field in definition.fields]
+
+        self.assertEqual(
+            names[:10],
+            [
+                "grievant_firstname",
+                "grievant_lastname",
+                "grievant_email",
+                "grievant_phone",
+                "grievant_street",
+                "grievant_city",
+                "grievant_state",
+                "grievant_zip",
+                "title",
+                "department",
+            ],
+        )
+        self.assertEqual(
+            names[-11:],
+            [
+                "attachment_1",
+                "attachment_2",
+                "attachment_3",
+                "attachment_4",
+                "attachment_5",
+                "attachment_6",
+                "attachment_7",
+                "attachment_8",
+                "attachment_9",
+                "attachment_10",
+                "signer_email",
+            ],
+        )
+
+    def test_non_discipline_attachment_order_is_natural(self) -> None:
+        definition = get_hosted_form_definition("non_discipline_brief")
+        assert definition is not None
+        names = [field.name for field in definition.fields]
+
+        self.assertLess(names.index("attachment_2"), names.index("attachment_10"))
+        self.assertEqual(
+            names[-11:],
+            [
+                "attachment_1",
+                "attachment_2",
+                "attachment_3",
+                "attachment_4",
+                "attachment_5",
+                "attachment_6",
+                "attachment_7",
+                "attachment_8",
+                "attachment_9",
+                "attachment_10",
+                "signer_email",
+            ],
+        )
+
+    def test_settlement_signer_questions_render_before_case_details(self) -> None:
+        definition = get_hosted_form_definition("settlement_form")
+        assert definition is not None
+        names = [field.name for field in definition.fields]
+
+        self.assertEqual(
+            names[:6],
+            [
+                "grievance_id",
+                "manager_signer_email",
+                "steward_signer_email",
+                "grievant_firstname",
+                "grievant_lastname",
+                "grievant_email",
+            ],
+        )
+
+    def test_bargaining_suggestion_override_is_last(self) -> None:
+        definition = get_hosted_form_definition("att_mobility_bargaining_suggestion")
+        assert definition is not None
+        names = [field.name for field in definition.fields]
+
+        self.assertEqual(
+            names,
+            [
+                "local_number",
+                "demand_from_local",
+                "submitting_member_title",
+                "submitting_member_name",
+                "demand_text",
+                "reason_text",
+                "specific_examples_text",
+                "work_phone",
+                "home_phone",
+                "non_work_email",
+                "local_president_signer_email",
+            ],
+        )
 
     def test_builds_intake_payload_with_explicit_signers(self) -> None:
         definition = get_hosted_form_definition("settlement_form")
