@@ -308,3 +308,24 @@ These items are outside repo code and still need to exist in Microsoft 365 / Clo
 - automation and prefetch detection is heuristic, not perfect
 - the live config file is not versioned in git
 - the outreach UI is improved, but more workflow-specific simplification is still possible if desired
+
+## Post-Launch Hardening (2026-04-15)
+A follow-up fix was applied after validating the outreach compose screen against the live app.
+
+### Problem observed
+- the browser could reload and still post invalid or empty `stop_id` / `template_id` values
+- that produced `404` responses from outreach preview/test-send routes even though the actual backend mailer path was functioning
+- the quick-send and one-off flows were especially sensitive to stale page state after reloads
+
+### Fixes applied
+- added backend fallback resolution for stop/template selection in `outreach_service.py`
+  - if the UI posts `0`, empty, or an invalid missing selection, outreach now falls back to the first available stop/template instead of failing immediately
+- added `no-store` cache headers to the outreach page response in `routes_outreach.py`
+  - this reduces stale browser page reuse and makes fresh compose code load more reliably after deploys
+- added stronger client-side required-value checks in the compose UI
+  - clearer errors now appear when a required stop/template selection is missing instead of silently posting invalid IDs
+- improved select refresh logic in the outreach compose UI
+  - current selections are re-applied when possible and valid defaults are chosen when not
+
+### Operational takeaway
+The outreach send path itself was verified server-side against the live config and sender mailbox. The remaining issue was browser form state and cache behavior, not Graph delivery.

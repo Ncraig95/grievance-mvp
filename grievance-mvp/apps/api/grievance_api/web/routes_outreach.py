@@ -75,7 +75,14 @@ async def outreach_page(request: Request):
     gate = await require_ops_page_access(request, next_path="/officers/outreach")
     if isinstance(gate, RedirectResponse):
         return gate
-    return HTMLResponse(_render_outreach_page())
+    return HTMLResponse(
+        _render_outreach_page(),
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0, private",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @router.get("/officers/outreach/bootstrap", response_model=OutreachPageBootstrap)
@@ -1038,6 +1045,23 @@ Thank you,
       try { return text.trim() ? JSON.parse(text) : {}; } catch (err) { throw new Error('Extra fields JSON must be valid JSON'); }
     }
 
+    function setSelectValueIfPresent(id, desiredValue, fallbackValue = '') {
+      const select = document.getElementById(id);
+      if (!select) return;
+      const values = Array.from(select.options || []).map((option) => option.value);
+      if (desiredValue !== null && desiredValue !== undefined && values.includes(String(desiredValue))) {
+        select.value = String(desiredValue);
+        return;
+      }
+      if (values.includes(String(fallbackValue))) {
+        select.value = String(fallbackValue);
+        return;
+      }
+      if (values.length > 0) {
+        select.value = values[0];
+      }
+    }
+
     function showSection(sectionName) {
       state.currentSection = sectionName;
       document.querySelectorAll('[data-target-section]').forEach((button) => {
@@ -1080,6 +1104,15 @@ Thank you,
       });
       const rendered = params.toString();
       return rendered ? `?${rendered}` : '';
+    }
+
+    function requiredNumericValue(id, label) {
+      const raw = String(document.getElementById(id).value || '').trim();
+      const parsed = Number(raw);
+      if (!raw || !Number.isFinite(parsed) || parsed <= 0) {
+        throw new Error(`${label} is required.`);
+      }
+      return parsed;
     }
 
     function renderAnalytics() {
@@ -1295,6 +1328,15 @@ Thank you,
       document.getElementById('analyticsTemplateId').innerHTML = '<option value="">All templates</option>' + templateOptions;
       document.getElementById('analyticsStopId').innerHTML = '<option value="">All stops</option>' + stopOptions;
       document.getElementById('placeholderList').textContent = 'Available placeholders: ' + (state.placeholder_catalog || []).join(', ');
+      setSelectValueIfPresent('previewContactId', state.selectedContactId, '');
+      setSelectValueIfPresent('oneOffContactId', state.selectedContactId, '');
+      setSelectValueIfPresent('previewTemplateId', state.selectedTemplateId);
+      setSelectValueIfPresent('oneOffTemplateId', state.selectedTemplateId);
+      setSelectValueIfPresent('previewStopId', state.selectedStopId);
+      setSelectValueIfPresent('oneOffStopId', state.selectedStopId);
+      setSelectValueIfPresent('quickMessageStopId', state.selectedStopId);
+      setSelectValueIfPresent('analyticsTemplateId', '', '');
+      setSelectValueIfPresent('analyticsStopId', '', '');
     }
 
     function selectContact(contactId) {
@@ -1519,8 +1561,8 @@ Thank you,
       const preview = await call('/officers/outreach/preview', {
         method: 'POST',
         body: JSON.stringify({
-          template_id: Number(document.getElementById('previewTemplateId').value),
-          stop_id: Number(document.getElementById('previewStopId').value),
+          template_id: requiredNumericValue('previewTemplateId', 'Template'),
+          stop_id: requiredNumericValue('previewStopId', 'Stop'),
           contact_id: document.getElementById('previewContactId').value ? Number(document.getElementById('previewContactId').value) : null,
           recipient_email: document.getElementById('previewRecipientEmail').value || null,
         }),
@@ -1537,8 +1579,8 @@ Thank you,
       const result = await call('/officers/outreach/test-send', {
         method: 'POST',
         body: JSON.stringify({
-          template_id: Number(document.getElementById('previewTemplateId').value),
-          stop_id: Number(document.getElementById('previewStopId').value),
+          template_id: requiredNumericValue('previewTemplateId', 'Template'),
+          stop_id: requiredNumericValue('previewStopId', 'Stop'),
           contact_id: document.getElementById('previewContactId').value ? Number(document.getElementById('previewContactId').value) : null,
           recipient_email: document.getElementById('previewRecipientEmail').value,
         }),
@@ -1551,7 +1593,7 @@ Thank you,
       const preview = await call('/officers/outreach/quick-preview', {
         method: 'POST',
         body: JSON.stringify({
-          stop_id: Number(document.getElementById('quickMessageStopId').value),
+          stop_id: requiredNumericValue('quickMessageStopId', 'Stop'),
           recipient_email: document.getElementById('quickMessageRecipientEmail').value,
           subject_template: document.getElementById('quickMessageSubject').value,
           body_template: document.getElementById('quickMessageBody').value,
@@ -1569,7 +1611,7 @@ Thank you,
       const result = await call('/officers/outreach/quick-test-send', {
         method: 'POST',
         body: JSON.stringify({
-          stop_id: Number(document.getElementById('quickMessageStopId').value),
+          stop_id: requiredNumericValue('quickMessageStopId', 'Stop'),
           recipient_email: document.getElementById('quickMessageRecipientEmail').value,
           subject_template: document.getElementById('quickMessageSubject').value,
           body_template: document.getElementById('quickMessageBody').value,
@@ -1584,8 +1626,8 @@ Thank you,
       const preview = await call('/officers/outreach/preview', {
         method: 'POST',
         body: JSON.stringify({
-          template_id: Number(document.getElementById('oneOffTemplateId').value),
-          stop_id: Number(document.getElementById('oneOffStopId').value),
+          template_id: requiredNumericValue('oneOffTemplateId', 'Template'),
+          stop_id: requiredNumericValue('oneOffStopId', 'Stop'),
           contact_id: document.getElementById('oneOffContactId').value ? Number(document.getElementById('oneOffContactId').value) : null,
           recipient_email: document.getElementById('oneOffRecipientEmail').value,
           manual_contact: oneOffManualContactPayload(),
@@ -1603,8 +1645,8 @@ Thank you,
       const result = await call('/officers/outreach/one-off-send', {
         method: 'POST',
         body: JSON.stringify({
-          template_id: Number(document.getElementById('oneOffTemplateId').value),
-          stop_id: Number(document.getElementById('oneOffStopId').value),
+          template_id: requiredNumericValue('oneOffTemplateId', 'Template'),
+          stop_id: requiredNumericValue('oneOffStopId', 'Stop'),
           contact_id: document.getElementById('oneOffContactId').value ? Number(document.getElementById('oneOffContactId').value) : null,
           recipient_email: document.getElementById('oneOffRecipientEmail').value,
           manual_contact: oneOffManualContactPayload(),

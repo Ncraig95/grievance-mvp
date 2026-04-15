@@ -1131,8 +1131,8 @@ class OutreachService:
         return out.getvalue()
 
     async def preview(self, *, template_id: int, stop_id: int, contact_id: int | None, recipient_email: str | None) -> OutreachRenderedMessage:
-        template_row = await self.get_template(template_id)
-        stop_row = await self.get_stop(stop_id)
+        template_row = await self._resolve_template_row(template_id)
+        stop_row = await self._resolve_stop_row(stop_id)
         contact_row = await self.get_contact(contact_id) if contact_id is not None else None
         return self._render_message(
             template_row=template_row,
@@ -1151,8 +1151,8 @@ class OutreachService:
         contact_id: int | None = None,
         manual_contact: dict[str, Any] | None = None,
     ) -> OutreachRenderedMessage:
-        template_row = await self.get_template(template_id)
-        stop_row = await self.get_stop(stop_id)
+        template_row = await self._resolve_template_row(template_id)
+        stop_row = await self._resolve_stop_row(stop_id)
         contact_row = await self._resolve_contact_row(
             contact_id=contact_id,
             recipient_email=recipient_email,
@@ -1176,7 +1176,7 @@ class OutreachService:
         contact_id: int | None = None,
         manual_contact: dict[str, Any] | None = None,
     ) -> OutreachRenderedMessage:
-        stop_row = await self.get_stop(stop_id)
+        stop_row = await self._resolve_stop_row(stop_id)
         contact_row = await self._resolve_contact_row(
             contact_id=contact_id,
             recipient_email=recipient_email,
@@ -1205,8 +1205,8 @@ class OutreachService:
         contact_id: int | None,
         recipient_email: str,
     ) -> OutreachSendSummary:
-        template_row = await self.get_template(template_id)
-        stop_row = await self.get_stop(stop_id)
+        template_row = await self._resolve_template_row(template_id)
+        stop_row = await self._resolve_stop_row(stop_id)
         contact_row = await self.get_contact(contact_id) if contact_id is not None else None
         return await self._send(
             template_row=template_row,
@@ -1227,7 +1227,7 @@ class OutreachService:
         contact_id: int | None = None,
         manual_contact: dict[str, Any] | None = None,
     ) -> OutreachSendSummary:
-        stop_row = await self.get_stop(stop_id)
+        stop_row = await self._resolve_stop_row(stop_id)
         contact_row = await self._resolve_contact_row(
             contact_id=contact_id,
             recipient_email=recipient_email,
@@ -1258,8 +1258,8 @@ class OutreachService:
         contact_id: int | None = None,
         manual_contact: dict[str, Any] | None = None,
     ) -> OutreachSendSummary:
-        template_row = await self.get_template(template_id)
-        stop_row = await self.get_stop(stop_id)
+        template_row = await self._resolve_template_row(template_id)
+        stop_row = await self._resolve_stop_row(stop_id)
         contact_row = await self._resolve_contact_row(
             contact_id=contact_id,
             recipient_email=recipient_email,
@@ -1283,8 +1283,8 @@ class OutreachService:
         contact_id: int | None = None,
         manual_contact: dict[str, Any] | None = None,
     ) -> OutreachSendSummary:
-        template_row = await self.get_template(template_id)
-        stop_row = await self.get_stop(stop_id)
+        template_row = await self._resolve_template_row(template_id)
+        stop_row = await self._resolve_stop_row(stop_id)
         contact_row = await self._resolve_contact_row(
             contact_id=contact_id,
             recipient_email=recipient_email,
@@ -1978,6 +1978,22 @@ class OutreachService:
         if extra_fields:
             merged["extra_fields"] = extra_fields
         return merged
+
+    async def _resolve_stop_row(self, stop_id: int | None) -> dict[str, Any]:
+        if stop_id is not None and int(stop_id) > 0:
+            return await self.get_stop(int(stop_id))
+        rows = await self.list_stops()
+        if not rows:
+            raise RuntimeError("no outreach stops are available")
+        return rows[0]
+
+    async def _resolve_template_row(self, template_id: int | None) -> dict[str, Any]:
+        if template_id is not None and int(template_id) > 0:
+            return await self.get_template(int(template_id))
+        rows = await self.list_templates()
+        if not rows:
+            raise RuntimeError("no outreach templates are available")
+        return rows[0]
 
     async def _send(
         self,
