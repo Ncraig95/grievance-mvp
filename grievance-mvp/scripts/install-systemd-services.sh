@@ -21,10 +21,13 @@ SYSTEMD_DIR="/etc/systemd/system"
 UP_WRAPPER="/usr/local/bin/${SERVICE_NAME}-up"
 DOWN_WRAPPER="/usr/local/bin/${SERVICE_NAME}-down"
 WATCHDOG_WRAPPER="/usr/local/bin/${SERVICE_NAME}-watchdog"
+OUTREACH_WRAPPER="/usr/local/bin/${SERVICE_NAME}-outreach-due"
 
 SERVICE_FILE="${SYSTEMD_DIR}/${SERVICE_NAME}.service"
 WATCHDOG_SERVICE_FILE="${SYSTEMD_DIR}/${SERVICE_NAME}-watchdog.service"
 WATCHDOG_TIMER_FILE="${SYSTEMD_DIR}/${SERVICE_NAME}-watchdog.timer"
+OUTREACH_SERVICE_FILE="${SYSTEMD_DIR}/${SERVICE_NAME}-outreach-due.service"
+OUTREACH_TIMER_FILE="${SYSTEMD_DIR}/${SERVICE_NAME}-outreach-due.timer"
 
 cat >"${UP_WRAPPER}" <<EOF
 #!/usr/bin/env bash
@@ -47,7 +50,14 @@ cd "${PROJECT_DIR}"
 exec "${PROJECT_DIR}/scripts/watchdog-restart.sh"
 EOF
 
-chmod 0755 "${UP_WRAPPER}" "${DOWN_WRAPPER}" "${WATCHDOG_WRAPPER}"
+cat >"${OUTREACH_WRAPPER}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd "${PROJECT_DIR}"
+exec "${PROJECT_DIR}/scripts/run-outreach-due.sh"
+EOF
+
+chmod 0755 "${UP_WRAPPER}" "${DOWN_WRAPPER}" "${WATCHDOG_WRAPPER}" "${OUTREACH_WRAPPER}"
 
 cat >"${SERVICE_FILE}" <<EOF
 [Unit]
@@ -98,15 +108,47 @@ Unit=${SERVICE_NAME}-watchdog.service
 WantedBy=timers.target
 EOF
 
+cat >"${OUTREACH_SERVICE_FILE}" <<EOF
+[Unit]
+Description=Run due outreach sends for Grievance MVP
+After=${SERVICE_NAME}.service
+Requires=${SERVICE_NAME}.service
+
+[Service]
+Type=oneshot
+User=${RUN_USER}
+Group=${RUN_GROUP}
+ExecStart=${OUTREACH_WRAPPER}
+EOF
+
+cat >"${OUTREACH_TIMER_FILE}" <<EOF
+[Unit]
+Description=Process due outreach sends every 5 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+RandomizedDelaySec=15s
+Persistent=true
+Unit=${SERVICE_NAME}-outreach-due.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
 systemctl daemon-reload
 systemctl enable --now "${SERVICE_NAME}.service"
 systemctl enable --now "${SERVICE_NAME}-watchdog.timer"
+systemctl enable --now "${SERVICE_NAME}-outreach-due.timer"
 
 echo "Installed:"
 echo "  - ${SERVICE_FILE}"
 echo "  - ${WATCHDOG_SERVICE_FILE}"
 echo "  - ${WATCHDOG_TIMER_FILE}"
+echo "  - ${OUTREACH_SERVICE_FILE}"
+echo "  - ${OUTREACH_TIMER_FILE}"
 echo
 echo "Current status:"
 systemctl --no-pager --full status "${SERVICE_NAME}.service" || true
 systemctl --no-pager --full status "${SERVICE_NAME}-watchdog.timer" || true
+systemctl --no-pager --full status "${SERVICE_NAME}-outreach-due.timer" || true

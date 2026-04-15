@@ -300,6 +300,7 @@ def migrate(db_path: str) -> None:
 
         _ensure_column(con, "standalone_outbound_emails", "submission_id", "TEXT")
         _ensure_column(con, "standalone_outbound_emails", "document_scope_id", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "outreach_send_log", "open_token_hash", "TEXT")
 
         _ensure_column(con, "hosted_form_settings", "form_key", "TEXT")
         _ensure_column(con, "hosted_form_settings", "visibility", "TEXT NOT NULL DEFAULT 'public'")

@@ -304,6 +304,173 @@ ON standalone_outbound_emails(submission_id, document_scope_id, template_key, re
 CREATE INDEX IF NOT EXISTS idx_standalone_outbound_emails_submission
 ON standalone_outbound_emails(submission_id);
 
+CREATE TABLE IF NOT EXISTS outreach_contacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL,
+  first_name TEXT,
+  last_name TEXT,
+  full_name TEXT,
+  work_location TEXT,
+  work_group TEXT,
+  department TEXT,
+  bargaining_unit TEXT,
+  local_number TEXT,
+  steward_name TEXT,
+  rep_name TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  notes TEXT,
+  source TEXT NOT NULL DEFAULT 'manual',
+  extra_fields_json TEXT NOT NULL DEFAULT '{}',
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outreach_contacts_email
+ON outreach_contacts(email);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_contacts_location
+ON outreach_contacts(work_location);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_contacts_work_group
+ON outreach_contacts(work_group);
+
+CREATE TABLE IF NOT EXISTS outreach_templates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  template_key TEXT NOT NULL,
+  name TEXT NOT NULL,
+  template_type TEXT NOT NULL,
+  subject_template TEXT NOT NULL,
+  body_template TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  seeded INTEGER NOT NULL DEFAULT 0,
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outreach_templates_key
+ON outreach_templates(template_key);
+
+CREATE TABLE IF NOT EXISTS outreach_stops (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  location_name TEXT NOT NULL,
+  visit_date_local TEXT NOT NULL,
+  start_time_local TEXT NOT NULL,
+  end_time_local TEXT NOT NULL,
+  timezone TEXT NOT NULL,
+  audience_location TEXT,
+  audience_work_group TEXT,
+  notice_subject TEXT,
+  reminder_subject TEXT,
+  notice_send_at_utc TEXT NOT NULL,
+  reminder_send_at_utc TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outreach_stops_unique
+ON outreach_stops(location_name, visit_date_local);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_stops_status_notice
+ON outreach_stops(status, notice_send_at_utc);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_stops_status_reminder
+ON outreach_stops(status, reminder_send_at_utc);
+
+CREATE TABLE IF NOT EXISTS outreach_suppressions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL,
+  contact_id INTEGER,
+  reason TEXT NOT NULL DEFAULT 'unsubscribe',
+  created_at_utc TEXT NOT NULL,
+  FOREIGN KEY (contact_id) REFERENCES outreach_contacts (id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outreach_suppressions_email
+ON outreach_suppressions(email);
+
+CREATE TABLE IF NOT EXISTS outreach_send_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  stop_id INTEGER,
+  template_id INTEGER,
+  contact_id INTEGER,
+  recipient_email TEXT NOT NULL,
+  email_type TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  text_body TEXT NOT NULL,
+  html_body TEXT,
+  merge_data_json TEXT NOT NULL DEFAULT '{}',
+  scheduled_for_utc TEXT,
+  attempted_at_utc TEXT,
+  sent_at_utc TEXT,
+  failed_at_utc TEXT,
+  status TEXT NOT NULL,
+  graph_message_id TEXT,
+  internet_message_id TEXT,
+  error_text TEXT,
+  unsubscribe_token_hash TEXT,
+  open_token_hash TEXT,
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL,
+  FOREIGN KEY (stop_id) REFERENCES outreach_stops (id),
+  FOREIGN KEY (template_id) REFERENCES outreach_templates (id),
+  FOREIGN KEY (contact_id) REFERENCES outreach_contacts (id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outreach_send_log_unique_delivery
+ON outreach_send_log(stop_id, email_type, recipient_email)
+WHERE email_type IN ('notice', 'reminder');
+
+CREATE INDEX IF NOT EXISTS idx_outreach_send_log_stop
+ON outreach_send_log(stop_id, created_at_utc);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_send_log_contact
+ON outreach_send_log(contact_id, created_at_utc);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_send_log_open_token
+ON outreach_send_log(open_token_hash);
+
+CREATE TABLE IF NOT EXISTS outreach_tracked_links (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  send_log_id INTEGER NOT NULL,
+  destination_url TEXT NOT NULL,
+  tracking_token_hash TEXT NOT NULL,
+  link_label TEXT,
+  created_at_utc TEXT NOT NULL,
+  FOREIGN KEY (send_log_id) REFERENCES outreach_send_log (id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outreach_tracked_links_token
+ON outreach_tracked_links(tracking_token_hash);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_tracked_links_send
+ON outreach_tracked_links(send_log_id, created_at_utc);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_tracked_links_destination
+ON outreach_tracked_links(destination_url);
+
+CREATE TABLE IF NOT EXISTS outreach_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  send_log_id INTEGER NOT NULL,
+  tracked_link_id INTEGER,
+  event_type TEXT NOT NULL,
+  occurred_at_utc TEXT NOT NULL,
+  ip_hash TEXT,
+  user_agent_hash TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  FOREIGN KEY (send_log_id) REFERENCES outreach_send_log (id),
+  FOREIGN KEY (tracked_link_id) REFERENCES outreach_tracked_links (id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_events_send
+ON outreach_events(send_log_id, occurred_at_utc);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_events_type
+ON outreach_events(event_type, occurred_at_utc);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_events_link
+ON outreach_events(tracked_link_id, occurred_at_utc);
+
 CREATE TABLE IF NOT EXISTS document_stages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   case_id TEXT NOT NULL,

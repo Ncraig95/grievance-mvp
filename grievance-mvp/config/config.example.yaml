@@ -274,6 +274,17 @@ email:
   max_attachment_bytes: 2000000
   resend_cooldown_seconds: 300
   dry_run: false
+outreach:
+  enabled: false
+  sender_user_id: organizing@members.REPLACE.org
+  sender_display_name: CWA Local 3106
+  public_base_url: https://grievance.REPLACE.org
+  reply_to_address: grievances@REPLACE.org
+  reply_to_name: CWA Local 3106
+  timezone: America/New_York
+  min_seconds_between_sends: 0.5
+  max_parallel_sends: 1
+  max_sends_per_run: 200
 standalone_forms:
   att_mobility_bargaining_suggestion:
     template_path: /app/templates/docx/AT&TMobility2023BargainingSuggestion_Form.docx

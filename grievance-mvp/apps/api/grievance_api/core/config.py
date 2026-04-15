@@ -88,6 +88,20 @@ class EmailConfig:
 
 
 @dataclass(frozen=True)
+class OutreachConfig:
+    enabled: bool = False
+    sender_user_id: str = ""
+    sender_display_name: str = ""
+    public_base_url: str = ""
+    reply_to_address: str = ""
+    reply_to_name: str = ""
+    timezone: str = "America/New_York"
+    min_seconds_between_sends: float = 0.5
+    max_parallel_sends: int = 1
+    max_sends_per_run: int = 200
+
+
+@dataclass(frozen=True)
 class GrievanceIdConfig:
     mode: str
     timezone: str
@@ -228,6 +242,7 @@ class AppConfig:
     docuseal: DocuSealConfig
     email: EmailConfig
     grievance_id: GrievanceIdConfig
+    outreach: OutreachConfig = field(default_factory=OutreachConfig)
     intake_auth: IntakeAuthConfig = field(default_factory=_default_intake_auth)
     rendering: RenderingConfig = field(default_factory=_default_rendering)
     officer_tracking: OfficerTrackingConfig = field(default_factory=_default_officer_tracking)
@@ -610,6 +625,7 @@ def load_config(path: str) -> AppConfig:
     docuseal_raw = raw.get("docuseal", {}) or {}
     graph_raw = raw.get("graph", {}) or {}
     email_raw = raw.get("email", {}) or {}
+    outreach_raw = raw.get("outreach", {}) or {}
     grievance_raw = raw.get("grievance_id", {}) or {}
     intake_auth_raw = raw.get("intake_auth", {}) or {}
     rendering_raw = raw.get("rendering", {}) or {}
@@ -620,6 +636,7 @@ def load_config(path: str) -> AppConfig:
     standalone_forms_raw = raw.get("standalone_forms", {}) or {}
 
     sender_user_id = str(email_raw.get("sender_user_id", "")).strip()
+    outreach_sender_user_id = str(outreach_raw.get("sender_user_id", "")).strip()
     raw_layout_policies = rendering_raw.get("layout_policies", {})
     parsed_layout_policies: dict[str, LayoutPolicyConfig] = {}
     if isinstance(raw_layout_policies, dict):
@@ -754,6 +771,24 @@ def load_config(path: str) -> AppConfig:
             dry_run=bool(email_raw.get("dry_run", False)),
             test_mode=bool(email_raw.get("test_mode", False)),
             test_mode_by_form=_as_bool_mapping(email_raw.get("test_mode_by_form")),
+        ),
+        outreach=OutreachConfig(
+            enabled=bool(outreach_raw.get("enabled", bool(outreach_sender_user_id))),
+            sender_user_id=outreach_sender_user_id,
+            sender_display_name=str(outreach_raw.get("sender_display_name", "")).strip(),
+            public_base_url=str(outreach_raw.get("public_base_url", "")).strip(),
+            reply_to_address=str(outreach_raw.get("reply_to_address", "")).strip(),
+            reply_to_name=str(outreach_raw.get("reply_to_name", "")).strip(),
+            timezone=(
+                str(outreach_raw.get("timezone", grievance_raw.get("timezone", "America/New_York"))).strip()
+                or "America/New_York"
+            ),
+            min_seconds_between_sends=max(
+                0.0,
+                _as_float(outreach_raw.get("min_seconds_between_sends", 0.5), 0.5),
+            ),
+            max_parallel_sends=max(1, int(outreach_raw.get("max_parallel_sends", 1))),
+            max_sends_per_run=max(1, int(outreach_raw.get("max_sends_per_run", 200))),
         ),
         grievance_id=GrievanceIdConfig(
             mode=_normalize_grievance_mode(grievance_raw.get("mode")),

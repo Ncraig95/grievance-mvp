@@ -1606,6 +1606,14 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
                 external=True,
             )
         )
+        admin_links.append(
+            _menu_link(
+                "Outreach Mail",
+                "/officers/outreach",
+                "Open the outreach mail console for contacts, templates, stops, and send history.",
+                external=True,
+            )
+        )
     system_links: list[str] = []
     if user.role == "admin" or not user.auth_enabled:
         system_links.append(_menu_link("Ops Console", "/ops", "Open the signature and submission operations queue.", external=True))

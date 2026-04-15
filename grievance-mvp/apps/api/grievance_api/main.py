@@ -15,6 +15,7 @@ from .services.docuseal_client import DocuSealClient
 from .services.email_templates import EmailTemplateStore
 from .services.graph_mail import GraphMailer
 from .services.notification_service import NotificationService
+from .services.outreach_service import OutreachService
 from .services.sharepoint_graph import GraphUploader
 from .web.routes_approval import router as approval_router
 from .web.routes_health import router as health_router
@@ -25,6 +26,7 @@ from .web.routes_notifications import router as notifications_router
 from .web.officer_auth import router as officer_auth_router
 from .web.routes_officers import router as officers_router
 from .web.routes_ops import router as ops_router
+from .web.routes_outreach import router as outreach_router
 from .web.routes_steward import router as steward_router
 from .web.routes_standalone import router as standalone_router
 from .web.routes_webhook import router as webhook_router
@@ -122,6 +124,30 @@ def create_app() -> FastAPI:
         template_store=app.state.email_templates,
         email_cfg=cfg.email,
     )
+    app.state.outreach_mailer = None
+    if cfg.outreach.enabled:
+        if not cfg.outreach.sender_user_id:
+            raise RuntimeError("outreach.sender_user_id must be set when outreach.enabled=true")
+        app.state.outreach_mailer = GraphMailer(
+            tenant_id=cfg.graph.tenant_id,
+            client_id=cfg.graph.client_id,
+            cert_thumbprint=cfg.graph.cert_thumbprint,
+            cert_pem_path=cfg.graph.cert_pem_path,
+            sender_user_id=cfg.outreach.sender_user_id,
+            dry_run=cfg.email.dry_run,
+        )
+    app.state.outreach = OutreachService(
+        db=app.state.db,
+        logger=app.state.logger,
+        outreach_cfg=cfg.outreach,
+        email_cfg=cfg.email,
+        officer_auth_cfg=cfg.officer_auth,
+        mailer=app.state.outreach_mailer,
+    )
+
+    @app.on_event("startup")
+    async def _seed_outreach_data() -> None:
+        await app.state.outreach.ensure_seed_data()
 
     app.include_router(health_router)
     app.include_router(officer_auth_router)
@@ -133,6 +159,7 @@ def create_app() -> FastAPI:
     app.include_router(approval_router)
     app.include_router(ops_router)
     app.include_router(officers_router)
+    app.include_router(outreach_router)
     app.include_router(steward_router)
     app.include_router(standalone_router)
 
