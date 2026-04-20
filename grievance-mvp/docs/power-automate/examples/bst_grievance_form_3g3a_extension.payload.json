@@ -1,0 +1,41 @@
+{
+  "request_id": "forms-3g3a-extension-12345",
+  "document_command": "bst_grievance_form_3g3a_extension",
+  "grievance_id": "2026001",
+  "contract": "BST",
+  "grievant_firstname": "",
+  "grievant_lastname": "",
+  "grievant_email": "",
+  "incident_date": "2026-04-09",
+  "narrative": "Extension requested for grievance timeout.",
+  "documents": [
+    {
+      "doc_type": "bst_grievance_form_3g3a_extension",
+      "template_key": "bst_grievance_form_3g3a_extension",
+      "requires_signature": true,
+      "signers": [
+        "union-stage1@example.org",
+        "manager-stage2@example.org",
+        "union-stage3@example.org"
+      ]
+    }
+  ],
+  "template_data": {
+    "q1_occurred_date": "2026-04-09",
+    "q1_city_state": "Atlanta, GA",
+    "local_number": "3106",
+    "q2_employee_name": "Taylor Jones",
+    "q2_employee_attuid": "TJ1234",
+    "q2_department": "Billing",
+    "q2_job_title": "Service Representative",
+    "q2_payroll_id": "00123456",
+    "q2_seniority_date": "2021-07-15",
+    "q2a_job_title_requested": "Service Representative",
+    "q2a_requisition_number": "REQ-7788",
+    "q3_union_statement": "The union requests an extension on the grievance timeout while the matter is reviewed.",
+    "q4_contract_basis": "Extension requested for grievance timeout handling.",
+    "q5_informal_meeting_date": "2026-04-10",
+    "q5_3g3r_issued_date": "2026-04-12",
+    "q5_union_rep_name_attuid": "Rep Name / ATTUID"
+  }
+}

@@ -23,6 +23,7 @@ Replace each placeholder URL with the published Microsoft Form link for that loc
 | Local 3106 | Settlement Form 3106 | `settlement_form` | `https://forms.office.com/Pages/ResponsePage.aspx?id=Gm8hRgwHT0uKp3F4_OjDLETN-f9DdKFBsB6MNcKlT95UQzY4TVFaSUJPMVk0T1RUODhGVU0yQTE5UC4u` |
 | Local 3106 | Mobility Record of Grievance | `mobility_record_of_grievance` | `https://forms.office.com/r/REPLACE-MOBILITY-RECORD-3106` |
 | Local 3106 | BST Grievance Form 3G3A | `bst_grievance_form_3g3a` | `https://forms.office.com/r/REPLACE-3G3A-3106` |
+| Local 3106 | 3G3A Extension Request | `bst_grievance_form_3g3a_extension` | `https://forms.office.com/r/REPLACE-3G3A-EXTENSION-3106` |
 | Standalone | AT&T Mobility Bargaining Suggestion | `att_mobility_bargaining_suggestion` | `https://forms.office.com/r/REPLACE-ATT-MOBILITY-BARGAINING` |
 | Local (add rows) | Any additional local-specific form | `<document_command>` | `https://forms.office.com/r/REPLACE-LINK` |
 
@@ -490,6 +491,10 @@ Equivalent full command names also work:
 - `docs/power-automate/bst_grievance_form_3g3a.md`
 - `docs/power-automate/examples/bst_grievance_form_3g3a.payload.json`
 
+`bst_grievance_form_3g3a_extension` now has a separate extension-only guide:
+- `docs/power-automate/bst_grievance_form_3g3a_extension.md`
+- `docs/power-automate/examples/bst_grievance_form_3g3a_extension.payload.json`
+
 3G3A staged flow behavior:
 - Enabled only when `document_policies.bst_grievance_form_3g3a.staged_flow_enabled=true`.
 - Requires explicit `documents[0].signers` with 3 emails in order:
@@ -498,6 +503,17 @@ Equivalent full command names also work:
   3. union final disposition
 - Intake sends stage 1 only; webhook completion auto-advances stages 2 and 3.
 - Q6-Q10 are DocuSeal-owned fill fields in stages 2/3 (`Txt_es_` tags), not Power Automate prefill fields.
+
+3G3A extension staged flow behavior:
+- Enabled only when `document_policies.bst_grievance_form_3g3a_extension.staged_flow_enabled=true`.
+- Uses a separate route and document command so the current 3G3A workflow is unchanged.
+- Requires explicit `documents[0].signers` with 3 emails in order:
+  1. local union
+  2. second-level manager
+  3. union final disposition
+- Intake sends stage 1 only; webhook completion auto-advances stages 2 and 3.
+- Question 17 from the current 3G3A questionnaire is not collected in the extension intake.
+- `q3_union_statement` is entered by the user for the extension flow.
 
 Mobility record staged flow behavior:
 - Enabled only when `document_policies.mobility_record_of_grievance.staged_flow_enabled=true`.

@@ -107,6 +107,10 @@ _MULTILINE_TEXT_PREFERENCES: dict[str, object] = {
 }
 _CHECKBOX_GLYPHS = {"☐", "☒", "☑", "□"}
 _TEMPLATE_AREA_COMPARE_TOLERANCE = 0.00001
+_THREE_G_THREE_A_FORM_KEYS = {
+    "bst_grievance_form_3g3a",
+    "bst_grievance_form_3g3a_extension",
+}
 
 
 class DocuSealClient:
@@ -1176,7 +1180,7 @@ class DocuSealClient:
     @staticmethod
     def _is_3g3a_form(form_key: str | None) -> bool:
         key = str(form_key or "").strip().lower()
-        return key == "bst_grievance_form_3g3a"
+        return key in _THREE_G_THREE_A_FORM_KEYS
 
     @staticmethod
     def _inject_3g3a_missing_date_anchors(

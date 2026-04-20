@@ -37,6 +37,43 @@ class StagedSignatureWorkflowTests(unittest.TestCase):
             )
         )
 
+    def test_extension_is_3g3a_staged_true_when_policy_enabled(self) -> None:
+        cfg = SimpleNamespace(
+            document_policies={
+                "bst_grievance_form_3g3a_extension": DocumentPolicyConfig(
+                    folder_resolution="existing_exact_grievance_id",
+                    default_signer_field="",
+                    default_requires_signature=True,
+                    staged_flow_enabled=True,
+                    auto_advance=True,
+                    store_all_stage_artifacts=True,
+                    input_source="docuseal_fill_fields",
+                )
+            }
+        )
+        self.assertTrue(
+            is_3g3a_staged(
+                cfg=cfg,
+                doc_type="bst_grievance_form_3g3a_extension",
+                template_key="bst_grievance_form_3g3a_extension",
+            )
+        )
+        self.assertTrue(
+            is_staged_document(
+                cfg=cfg,
+                doc_type="bst_grievance_form_3g3a_extension",
+                template_key="bst_grievance_form_3g3a_extension",
+            )
+        )
+        self.assertEqual(
+            resolve_staged_form_key(
+                cfg=cfg,
+                doc_type="bst_grievance_form_3g3a_extension",
+                template_key="bst_grievance_form_3g3a_extension",
+            ),
+            "bst_grievance_form_3g3a_extension",
+        )
+
     def test_is_3g3a_staged_false_for_other_docs(self) -> None:
         cfg = SimpleNamespace(
             document_policies={
@@ -113,6 +150,7 @@ class StagedSignatureWorkflowTests(unittest.TestCase):
         self.assertEqual(stage_key_for(1), "stage1_union")
         self.assertEqual(stage_key_for(2), "stage2_manager")
         self.assertEqual(stage_key_for(3), "stage3_union_final")
+        self.assertEqual(stage_key_for(2, form_key="bst_grievance_form_3g3a_extension"), "stage2_manager")
         self.assertEqual(stage_key_for(2, form_key="mobility_record_of_grievance"), "stage2_company")
         self.assertEqual(stage_key_for(3, form_key="mobility_record_of_grievance"), "stage3_union_appeal")
 

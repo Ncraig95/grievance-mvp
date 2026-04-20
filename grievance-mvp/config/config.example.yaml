@@ -29,6 +29,7 @@ doc_templates:
   disciplinary_grievance_brief: /app/templates/docx/form_disciplinary_grievance_brief_revised_05.19.21.docx
   mobility_record_of_grievance: /app/templates/docx/mobility_record_of_grievance_revised.docx
   bst_grievance_form_3g3a: /app/templates/docx/bst_grievance_form_3g3a.docx
+  bst_grievance_form_3g3a_extension: /app/templates/docx/3g3a-extension.docx
 document_policies:
   non_discipline_grievance_brief:
     folder_resolution: default
@@ -63,6 +64,13 @@ document_policies:
     input_source: docuseal_fill_fields
     default_requires_signature: true
   bst_grievance_form_3g3a:
+    staged_flow_enabled: true
+    auto_advance: true
+    store_all_stage_artifacts: true
+    input_source: docuseal_fill_fields
+    default_requires_signature: true
+  bst_grievance_form_3g3a_extension:
+    folder_resolution: existing_exact_grievance_id
     staged_flow_enabled: true
     auto_advance: true
     store_all_stage_artifacts: true

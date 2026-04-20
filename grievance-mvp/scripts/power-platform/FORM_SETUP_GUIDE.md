@@ -137,6 +137,18 @@ Use the detailed field-map docs under `grievance-mvp/docs/power-automate/` when 
 - Generate a starter payload with:
   `.\New-GrievancePayloadTemplate.ps1 -FormKey bst_grievance_form_3g3a -OutputPath .\output\bst_grievance_form_3g3a.payload.json -Overwrite`
 
+## 3G3A Extension Request
+
+- Detailed doc: `docs/power-automate/bst_grievance_form_3g3a_extension.md`
+- Endpoint: `POST /intake`
+- Document command: `bst_grievance_form_3g3a_extension`
+- This is a separate extension-only route and does not change the current 3G3A workflow.
+- `documents[0].signers` must contain exactly three emails in union -> manager -> union order.
+- Do not add question 17 from the current 3G3A questionnaire to the Microsoft Form.
+- Collect `q3_union_statement` as a user-entered long-text field.
+- Generate a starter payload with:
+  `.\New-GrievancePayloadTemplate.ps1 -FormKey bst_grievance_form_3g3a_extension -OutputPath .\output\bst_grievance_form_3g3a_extension.payload.json -Overwrite`
+
 ## AT&T Mobility Bargaining Suggestion
 
 - Detailed doc: `docs/power-automate/att_mobility_bargaining_suggestion.md`

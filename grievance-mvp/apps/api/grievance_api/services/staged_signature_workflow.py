@@ -14,8 +14,13 @@ _DEFAULT_STAGE_KEYS = {
     2: "stage2_manager",
     3: "stage3_union_final",
 }
+_THREE_G_THREE_A_FORM_KEYS = {
+    "bst_grievance_form_3g3a",
+    "bst_grievance_form_3g3a_extension",
+}
 _STAGED_FORM_STAGE_KEYS = {
     "bst_grievance_form_3g3a": _DEFAULT_STAGE_KEYS,
+    "bst_grievance_form_3g3a_extension": _DEFAULT_STAGE_KEYS,
     "mobility_record_of_grievance": {
         1: "stage1_union",
         2: "stage2_company",
@@ -57,7 +62,7 @@ def is_staged_document(*, cfg, doc_type: str, template_key: str | None):  # noqa
 
 
 def is_3g3a_staged(*, cfg, doc_type: str, template_key: str | None):  # noqa: ANN001
-    return resolve_staged_form_key(cfg=cfg, doc_type=doc_type, template_key=template_key) == "bst_grievance_form_3g3a"
+    return resolve_staged_form_key(cfg=cfg, doc_type=doc_type, template_key=template_key) in _THREE_G_THREE_A_FORM_KEYS
 
 
 def stage_key_for(stage_no: int, *, form_key: str | None = None) -> str:

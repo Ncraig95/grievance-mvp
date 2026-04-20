@@ -565,6 +565,54 @@
       ]
     },
     {
+      "key": "bst_grievance_form_3g3a_extension",
+      "title": "CWA 3106 - 3G3A Extension Request",
+      "routeType": "intake",
+      "endpointPath": "/intake",
+      "documentCommand": "bst_grievance_form_3g3a_extension",
+      "requestIdPattern": "forms-3g3a-extension-<Response Id>",
+      "detailedGuide": "docs/power-automate/bst_grievance_form_3g3a_extension.md",
+      "topLevelFields": {
+        "grievance_id": "<Existing grievance id>",
+        "contract": "<BST or Utilities>",
+        "narrative": "<Request summary>"
+      },
+      "documents": [
+        {
+          "doc_type": "bst_grievance_form_3g3a_extension",
+          "template_key": "bst_grievance_form_3g3a_extension",
+          "requires_signature": true,
+          "signers": [
+            "<Union stage 1 email>",
+            "<Manager stage 2 email>",
+            "<Union stage 3 email>"
+          ]
+        }
+      ],
+      "templateDataFields": {
+        "q1_occurred_date": "<yyyy-mm-dd>",
+        "q1_city_state": "<City, State>",
+        "q2_employee_name": "<Employee or work group name>",
+        "q2_employee_attuid": "<ATTUID>",
+        "q2_department": "<Department>",
+        "q2_job_title": "<Job title>",
+        "q2_payroll_id": "<Payroll ID>",
+        "q2_seniority_date": "<yyyy-mm-dd>",
+        "q2a_job_title_requested": "<Job title involved or requested>",
+        "q2a_requisition_number": "<Requisition number>",
+        "q3_union_statement": "<Union statement>",
+        "q4_contract_basis": "<Contract basis>",
+        "q5_informal_meeting_date": "<yyyy-mm-dd>",
+        "q5_3g3r_issued_date": "<yyyy-mm-dd>",
+        "q5_union_rep_name_attuid": "<Union representative name and ATTUID>"
+      },
+      "notes": [
+        "This is a separate extension-only route and does not change the current 3G3A workflow.",
+        "Collect q3_union_statement as a user-entered long-text field.",
+        "Do not add question 17 from the current 3G3A questionnaire to Microsoft Forms."
+      ]
+    },
+    {
       "key": "att_mobility_bargaining_suggestion",
       "title": "AT&T Mobility Bargaining Suggestion",
       "routeType": "standalone",

@@ -34,6 +34,16 @@ class IntakeNameNormalizationTests(unittest.TestCase):
         self.assertEqual(out["grievant_firstname"], "SingleName")
         self.assertEqual(out["grievant_lastname"], "Unknown")
 
+    def test_uses_template_data_q2_employee_name_for_3g3a_forms(self) -> None:
+        payload = {
+            "template_data": {
+                "q2_employee_name": "Taylor Jones",
+            }
+        }
+        out = _normalize_name_fields(payload)
+        self.assertEqual(out["grievant_firstname"], "Taylor")
+        self.assertEqual(out["grievant_lastname"], "Jones")
+
 
 if __name__ == "__main__":
     unittest.main()

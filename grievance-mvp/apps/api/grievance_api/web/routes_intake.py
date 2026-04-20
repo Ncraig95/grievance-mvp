@@ -94,6 +94,7 @@ _3G3A_STAGE_INTERACTIVE_MARK_FIELDS = (
     "q10_union_is_no_mark",
 )
 _3G3A_STAGE2_DATE_MARKER = "{{Dte_es_:signer2:q5_l2_date}}"
+_THREE_G_THREE_A_EXTENSION_DOC_TYPE = "bst_grievance_form_3g3a_extension"
 _3G3A_WRAP_POLICIES: dict[str, dict[str, int]] = {
     # Render-time safety rails for long free-text blocks in fixed form sections.
     "q3_union_statement": {"max_chars": 1800, "wrap_width": 88},
@@ -667,7 +668,11 @@ def _apply_bellsouth_defaults(*, context: dict[str, object], payload: IntakeRequ
             context[key] = "TBD"
 
 
-def _apply_3g3a_defaults(*, context: dict[str, object], grievance_id: str) -> None:
+def _apply_3g3a_defaults(
+    *,
+    context: dict[str, object],
+    grievance_id: str,
+) -> None:
     def _pick(*keys: str, fallback: str = "") -> str:
         for key in keys:
             raw = context.get(key)
@@ -1007,6 +1012,9 @@ def _normalize_name_fields(raw_payload: dict[str, object]) -> dict[str, object]:
         out.get("grievant_name"),
         out.get("grievant_full_name"),
         out.get("member_name"),
+        out.get("q2_employee_name"),
+        out.get("employee_work_group_name"),
+        out.get("submitting_member_name"),
     ]
     template_data = out.get("template_data")
     if isinstance(template_data, dict):
@@ -1015,6 +1023,9 @@ def _normalize_name_fields(raw_payload: dict[str, object]) -> dict[str, object]:
                 template_data.get("grievant_name"),
                 template_data.get("grievant_full_name"),
                 template_data.get("member_name"),
+                template_data.get("q2_employee_name"),
+                template_data.get("employee_work_group_name"),
+                template_data.get("submitting_member_name"),
             ]
         )
 
@@ -1316,7 +1327,7 @@ def _build_template_context(
     )
     if doc_type in _MEETING_REQUEST_DOC_TYPES:
         _apply_bellsouth_defaults(context=context, payload=payload)
-    if doc_type == "bst_grievance_form_3g3a":
+    if doc_type in {"bst_grievance_form_3g3a", _THREE_G_THREE_A_EXTENSION_DOC_TYPE}:
         _apply_3g3a_defaults(context=context, grievance_id=grievance_id)
     if doc_type == "mobility_record_of_grievance":
         _apply_mobility_record_defaults(

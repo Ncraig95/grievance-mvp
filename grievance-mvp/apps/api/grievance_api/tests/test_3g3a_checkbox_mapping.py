@@ -99,6 +99,16 @@ class ThreeGThreeACheckboxMappingTests(unittest.TestCase):
         self.assertEqual(context["q10_union_is_yes_mark"], "☐")
         self.assertEqual(context["q10_union_is_no_mark"], "☒")
 
+    def test_extension_preserves_user_supplied_union_statement(self) -> None:
+        context: dict[str, object] = {
+            "q3_union_statement": "user supplied value",
+        }
+        _apply_3g3a_defaults(
+            context=context,
+            grievance_id="2026001",
+        )
+        self.assertEqual(context["q3_union_statement"], "user supplied value")
+
     def test_clear_stage_interactive_marks_resets_q8_and_q10_marks(self) -> None:
         context: dict[str, object] = {
             "q1_is_bst_mark": "☒",

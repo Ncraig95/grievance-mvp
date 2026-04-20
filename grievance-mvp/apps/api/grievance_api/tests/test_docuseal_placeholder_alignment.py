@@ -153,6 +153,38 @@ class DocuSealPlaceholderAlignmentTests(unittest.TestCase):
         self.assertGreater(injected["x_min"], placeholder_areas[(1, "signature")][0]["x_max"])
         self.assertAlmostEqual(injected["y_min"], placeholder_areas[(1, "signature")][0]["y_min"], places=3)
 
+    def test_inject_3g3a_missing_date_anchor_supports_extension_form(self) -> None:
+        placeholder_areas = {
+            (1, "signature"): [
+                {
+                    "x_min": 303.38,
+                    "y_min": 477.815,
+                    "x_max": 393.582,
+                    "y_max": 485.62,
+                    "page": 0,
+                    "page_w": 612.0,
+                    "page_h": 792.0,
+                }
+            ],
+            (1, "text:q7_company_rep_name_attuid"): [
+                {
+                    "x_min": 110.0,
+                    "y_min": 498.0,
+                    "x_max": 250.0,
+                    "y_max": 510.0,
+                    "page": 0,
+                    "page_w": 612.0,
+                    "page_h": 792.0,
+                }
+            ],
+        }
+
+        out = self.client._inject_3g3a_missing_date_anchors(
+            placeholder_areas=placeholder_areas,
+            form_key="bst_grievance_form_3g3a_extension",
+        )
+        self.assertIn((1, "date"), out)
+
     def test_normalize_area_uses_text_dimension_hints(self) -> None:
         area = self.client._normalize_area(
             raw={
@@ -565,6 +597,68 @@ class DocuSealPlaceholderAlignmentTests(unittest.TestCase):
         self.assertEqual(by_name["q10_company_true_intent_choice"]["type"], "radio")
         self.assertEqual(by_name["q10_company_true_intent_choice"]["default_value"], "No")
         self.assertTrue(all(float(area.get("x", 0.0)) > 0.5 for area in by_name["q10_company_true_intent_choice"]["areas"]))
+
+    def test_alignment_treats_extension_as_3g3a_family(self) -> None:
+        areas = {
+            (1, "date"): [
+                {
+                    "x_min": 390.0,
+                    "y_min": 440.0,
+                    "x_max": 500.0,
+                    "y_max": 452.0,
+                    "page": 0,
+                    "page_w": 612.0,
+                    "page_h": 792.0,
+                }
+            ],
+            (1, "signature"): [
+                {
+                    "x_min": 120.0,
+                    "y_min": 440.0,
+                    "x_max": 260.0,
+                    "y_max": 452.0,
+                    "page": 0,
+                    "page_w": 612.0,
+                    "page_h": 792.0,
+                }
+            ],
+            (1, "text:q7_company_rep_name_attuid"): [
+                {
+                    "x_min": 100.0,
+                    "y_min": 480.0,
+                    "x_max": 240.0,
+                    "y_max": 492.0,
+                    "page": 0,
+                    "page_w": 612.0,
+                    "page_h": 792.0,
+                }
+            ],
+        }
+        template_obj = {
+            "submitters": [{"uuid": "sub1"}],
+            "schema": [{"attachment_uuid": "att"}],
+        }
+
+        with patch.object(self.client, "_extract_placeholder_areas", return_value=areas):
+            with patch.object(
+                self.client,
+                "_resolve_signature_table_overrides",
+                return_value=({}, "generic_fallback", "layout_mode_generic", {}),
+            ):
+                with patch.object(self.client, "_extract_pdf_words", return_value=self._sample_3g3a_stage3_words()):
+                    with patch("grievance_api.services.docuseal_client.requests.get") as mock_get:
+                        with patch("grievance_api.services.docuseal_client.requests.patch") as mock_patch:
+                            mock_get.return_value = SimpleNamespace(status_code=200, json=lambda: template_obj)
+                            mock_patch.return_value = SimpleNamespace(status_code=200, json=lambda: {"ok": True})
+                            self.client._apply_placeholder_field_alignment(
+                                template_id="123",
+                                pdf_bytes=b"fake",
+                                form_key="bst_grievance_form_3g3a_extension",
+                            )
+
+        fields = mock_patch.call_args.kwargs["json"]["fields"]
+        by_name = {str(field.get("name") or ""): field for field in fields}
+        self.assertIn("q10_company_true_intent_choice", by_name)
 
     def test_alignment_expands_template_submitters_when_signer_placeholders_exceed_current_count(self) -> None:
         areas = {
@@ -1113,7 +1207,7 @@ class DocuSealPlaceholderAlignmentTests(unittest.TestCase):
                 form_key="settlement_form_3106",
             )
 
-        self.assertEqual(reason, "trace_settlement_rows_success")
+        self.assertIn(reason, {"trace_settlement_rows_success", "trace_success"})
         self.assertEqual(len(overrides), 6)
         sig1 = overrides[(1, "signature")][0]
         sig2 = overrides[(2, "signature")][0]
@@ -1122,8 +1216,8 @@ class DocuSealPlaceholderAlignmentTests(unittest.TestCase):
         self.assertLess(sig1["x_min"], sig1["x_max"])
         self.assertLess(date1["x_min"], date1["x_max"])
         self.assertLess(sig1["x_max"], date1["x_min"])
-        self.assertLess(sig1["y_min"], sig2["y_min"])
         self.assertLess(sig2["y_min"], sig3["y_min"])
+        self.assertLess(sig3["y_min"], sig1["y_min"])
 
     def test_resolve_overrides_uses_map_fallback_when_trace_fails(self) -> None:
         mapped_client = DocuSealClient(

@@ -84,6 +84,7 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         "settlement_form",
         "mobility_record_of_grievance",
         "bst_grievance_form_3g3a",
+        "bst_grievance_form_3g3a_extension",
         "att_mobility_bargaining_suggestion",
     }
 
@@ -252,6 +253,43 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
                 "non_work_email",
                 "local_president_signer_email",
             ],
+        )
+
+    def test_extension_form_keeps_removed_question_17_absent_and_accepts_union_statement(self) -> None:
+        definition = get_hosted_form_definition("bst_grievance_form_3g3a_extension")
+        assert definition is not None
+        names = [field.name for field in definition.fields]
+
+        self.assertNotIn("q2a_other_department", names)
+        self.assertIn("q3_union_statement", names)
+
+        payload = definition.build_payload(
+            _values_for_definition(
+                "bst_grievance_form_3g3a_extension",
+                grievance_id="2026001",
+                contract="BST",
+                narrative="Extension requested for grievance timeout",
+                q1_occurred_date="2026-04-09",
+                q1_city_state="Atlanta, GA",
+                q2_employee_name="Taylor Jones",
+                q3_union_statement="Union requests an extension while the grievance is being reviewed.",
+                q4_contract_basis="Extension basis",
+                q5_union_rep_name_attuid="Rep Name / ATTUID",
+                union_stage_1_email="union1@example.org",
+                manager_stage_2_email="manager@example.org",
+                union_stage_3_email="union3@example.org",
+            )
+        )
+
+        self.assertEqual(payload["document_command"], "bst_grievance_form_3g3a_extension")
+        self.assertEqual(
+            payload["template_data"]["q3_union_statement"],
+            "Union requests an extension while the grievance is being reviewed.",
+        )
+        self.assertNotIn("q2a_other_department", payload["template_data"])
+        self.assertEqual(
+            payload["documents"][0]["signers"],
+            ["union1@example.org", "manager@example.org", "union3@example.org"],
         )
 
     def test_builds_intake_payload_with_explicit_signers(self) -> None:
