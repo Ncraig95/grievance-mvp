@@ -76,6 +76,60 @@ _CONTACT_HEADER_ALIASES: dict[str, str] = {
     "active": "active",
 }
 
+_IMPORT_FIELD_KEYS: tuple[str, ...] = (
+    "email",
+    "first_name",
+    "last_name",
+    "full_name",
+    "work_location",
+    "work_group",
+    "department",
+    "bargaining_unit",
+    "local_number",
+    "steward_name",
+    "rep_name",
+)
+
+_COMBINED_STATUS_HEADER_ALIASES: set[str] = {
+    "status",
+    "member_status",
+    "membership_status",
+    "member_status_combined",
+    "status_bucket",
+    "member_type_status",
+}
+
+_MEMBERSHIP_STATUS_HEADER_ALIASES: set[str] = {
+    "membership_type",
+    "member_type",
+    "member_non_member",
+    "member_status_type",
+    "member_category",
+}
+
+_EMPLOYMENT_STATUS_HEADER_ALIASES: set[str] = {
+    "employment_status",
+    "employment",
+    "active_status",
+    "worker_status",
+    "activity_status",
+}
+
+_STATUS_DETAIL_HEADER_ALIASES: set[str] = {
+    "status_detail",
+    "detail_status",
+    "detail",
+    "member_detail",
+    "status_reason",
+}
+
+_ALLOWED_STATUS_BUCKETS: tuple[str, ...] = (
+    "Member - Active - Active",
+    "Member - Active - Pending",
+    "Non Member - Active - Active",
+    "Non Member - Active - Non fr Mem",
+)
+
 _PLACEHOLDER_CATALOG: tuple[str, ...] = (
     "first_name",
     "last_name",
@@ -90,6 +144,11 @@ _PLACEHOLDER_CATALOG: tuple[str, ...] = (
     "local_number",
     "steward_name",
     "rep_name",
+    "membership_type",
+    "employment_status",
+    "status_detail",
+    "status_bucket",
+    "status_source_text",
     "visit_date",
     "visit_time",
     "subject",
@@ -173,6 +232,14 @@ class OutreachSendSummary:
     recipient_email: str
     status: str
     graph_message_id: str | None = None
+    error_text: str | None = None
+
+
+@dataclass(frozen=True)
+class OutreachImportSheet:
+    name: str
+    headers: list[str]
+    rows: list[dict[str, str]]
 
 
 def _normalize_key(value: object) -> str:
@@ -221,6 +288,161 @@ def _hash_text(value: object) -> str | None:
     if not text:
         return None
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _header_fingerprint(headers: list[str]) -> str:
+    normalized = sorted(_normalize_key(header) for header in headers if _normalize_key(header))
+    return hashlib.sha256(json.dumps(normalized, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()
+
+
+def _normalized_headers(headers: list[str]) -> list[str]:
+    return [_normalize_key(header) for header in headers if _normalize_key(header)]
+
+
+def _sanitize_mapping_dict(raw_value: object) -> dict[str, str | None]:
+    if not isinstance(raw_value, dict):
+        return {}
+    out: dict[str, str | None] = {}
+    for key, value in raw_value.items():
+        normalized_key = _normalize_key(key)
+        if not normalized_key:
+            continue
+        out[normalized_key] = _normalize_text(value) or None
+    return out
+
+
+def _canonical_membership_type(value: object) -> str | None:
+    normalized = _normalize_key(value)
+    if normalized in {"member", "mem"}:
+        return "Member"
+    if normalized in {"non_member", "nonmember", "non_member_", "nonmember_", "non_member_member"}:
+        return "Non Member"
+    return None
+
+
+def _canonical_employment_status(value: object) -> str | None:
+    normalized = _normalize_key(value)
+    if normalized == "active":
+        return "Active"
+    return None
+
+
+def _canonical_status_detail(value: object) -> str | None:
+    normalized = _normalize_key(value)
+    if normalized == "active":
+        return "Active"
+    if normalized == "pending":
+        return "Pending"
+    if normalized in {"non_fr_mem", "nonfrmem", "non_fr_member"}:
+        return "Non fr Mem"
+    return None
+
+
+def _status_bucket(
+    *,
+    membership_type: str | None,
+    employment_status: str | None,
+    status_detail: str | None,
+) -> str | None:
+    if not membership_type or not employment_status or not status_detail:
+        return None
+    bucket = f"{membership_type} - {employment_status} - {status_detail}"
+    if bucket in _ALLOWED_STATUS_BUCKETS:
+        return bucket
+    return None
+
+
+def _classify_combined_status(value: object) -> dict[str, str | None]:
+    text = _normalize_text(value)
+    if not text:
+        return {
+            "membership_type": None,
+            "employment_status": None,
+            "status_detail": None,
+            "status_bucket": None,
+            "status_source_text": None,
+            "reason": "missing_status",
+        }
+    parts = [part.strip() for part in re.split(r"\s+-\s+", text) if part.strip()]
+    if len(parts) != 3:
+        return {
+            "membership_type": None,
+            "employment_status": None,
+            "status_detail": None,
+            "status_bucket": None,
+            "status_source_text": text,
+            "reason": "unsupported_status",
+        }
+    membership_type = _canonical_membership_type(parts[0])
+    employment_status = _canonical_employment_status(parts[1])
+    status_detail = _canonical_status_detail(parts[2])
+    bucket = _status_bucket(
+        membership_type=membership_type,
+        employment_status=employment_status,
+        status_detail=status_detail,
+    )
+    return {
+        "membership_type": membership_type,
+        "employment_status": employment_status,
+        "status_detail": status_detail,
+        "status_bucket": bucket,
+        "status_source_text": text,
+        "reason": None if bucket else "unsupported_status",
+    }
+
+
+def _classify_split_status(
+    *,
+    membership_type_value: object,
+    employment_status_value: object,
+    status_detail_value: object,
+) -> dict[str, str | None]:
+    source_text = " - ".join(
+        value for value in (
+            _normalize_text(membership_type_value),
+            _normalize_text(employment_status_value),
+            _normalize_text(status_detail_value),
+        )
+        if value
+    )
+    if not source_text:
+        return {
+            "membership_type": None,
+            "employment_status": None,
+            "status_detail": None,
+            "status_bucket": None,
+            "status_source_text": None,
+            "reason": "missing_status",
+        }
+    if not (
+        _normalize_text(membership_type_value)
+        and _normalize_text(employment_status_value)
+        and _normalize_text(status_detail_value)
+    ):
+        return {
+            "membership_type": None,
+            "employment_status": None,
+            "status_detail": None,
+            "status_bucket": None,
+            "status_source_text": source_text,
+            "reason": "incomplete_status",
+        }
+    membership_type = _canonical_membership_type(membership_type_value)
+    employment_status = _canonical_employment_status(employment_status_value)
+    status_detail = _canonical_status_detail(status_detail_value)
+    bucket = _status_bucket(
+        membership_type=membership_type,
+        employment_status=employment_status,
+        status_detail=status_detail,
+    )
+    return {
+        "membership_type": membership_type,
+        "employment_status": employment_status,
+        "status_detail": status_detail,
+        "status_bucket": bucket,
+        "status_source_text": source_text,
+        "reason": None if bucket else "unsupported_status",
+    }
 
 
 def _parse_local_date(value: str) -> date:
@@ -341,6 +563,27 @@ class OutreachService:
     def send_enabled(self) -> bool:
         return bool(self.cfg.enabled and self.mailer and _normalize_text(self.cfg.sender_user_id))
 
+    def send_readiness(self) -> dict[str, Any]:
+        issues: list[str] = []
+        public_base_url = _public_base_url(self.cfg, self.email_cfg, self.officer_auth_cfg)
+        if not self.cfg.enabled:
+            issues.append("outreach sending is disabled")
+        if not _normalize_text(self.cfg.sender_user_id):
+            issues.append("outreach sender mailbox is not configured")
+        if self.mailer is None:
+            issues.append("outreach Graph mailer is unavailable")
+        if not public_base_url:
+            issues.append("outreach public base URL is not configured")
+        return {
+            "enabled": bool(self.cfg.enabled),
+            "ready": not issues,
+            "sender_user_id": _normalize_text(self.cfg.sender_user_id) or None,
+            "public_base_url": public_base_url or None,
+            "reply_to_address": _normalize_text(self.cfg.reply_to_address) or None,
+            "dry_run": bool(self.email_cfg.dry_run),
+            "issues": issues,
+        }
+
     async def ensure_seed_data(self) -> None:
         now = utcnow()
         async with aiosqlite.connect(self.db.db_path) as con:
@@ -414,8 +657,9 @@ class OutreachService:
         rows = await self.db.fetchall(
             """
             SELECT id, email, first_name, last_name, full_name, work_location, work_group,
-                   department, bargaining_unit, local_number, steward_name, rep_name, active,
-                   notes, source, extra_fields_json, created_at_utc, updated_at_utc
+                   department, bargaining_unit, local_number, steward_name, rep_name,
+                   membership_type, employment_status, status_detail, status_bucket, status_source_text,
+                   active, notes, source, extra_fields_json, created_at_utc, updated_at_utc
             FROM outreach_contacts
             ORDER BY lower(COALESCE(full_name, '')), lower(email)
             """
@@ -426,10 +670,32 @@ class OutreachService:
         email = _normalize_email(payload.get("email"))
         if not email or "@" not in email:
             raise RuntimeError("valid email is required")
-        first_name = _normalize_text(payload.get("first_name"))
-        last_name = _normalize_text(payload.get("last_name"))
-        full_name = _normalize_text(payload.get("full_name")) or _full_name(first_name, last_name, email)
-        extra_fields = payload.get("extra_fields")
+        existing_contact: dict[str, Any] | None = None
+        if contact_id is not None:
+            existing_contact = await self.get_contact(int(contact_id))
+        else:
+            existing_row = await self.db.fetchone("SELECT id FROM outreach_contacts WHERE email=?", (email,))
+            if existing_row:
+                existing_contact = await self.get_contact(int(existing_row[0]))
+
+        def _merged_text(field_name: str) -> str:
+            if field_name in payload:
+                return _normalize_text(payload.get(field_name))
+            if existing_contact:
+                return _normalize_text(existing_contact.get(field_name))
+            return ""
+
+        first_name = _merged_text("first_name")
+        last_name = _merged_text("last_name")
+        full_name_input = _normalize_text(payload.get("full_name")) if "full_name" in payload else ""
+        if full_name_input:
+            full_name = full_name_input
+        elif existing_contact and "full_name" not in payload and "first_name" not in payload and "last_name" not in payload:
+            full_name = _normalize_text(existing_contact.get("full_name")) or _full_name(first_name, last_name, email)
+        else:
+            full_name = _full_name(first_name, last_name, email)
+
+        extra_fields = payload.get("extra_fields") if "extra_fields" in payload else existing_contact.get("extra_fields") if existing_contact else {}
         if not isinstance(extra_fields, dict):
             extra_fields = {}
         cleaned_extra = {
@@ -437,15 +703,28 @@ class OutreachService:
             for key, value in extra_fields.items()
             if _normalize_key(key) and _normalize_text(value)
         }
+        active = (
+            _as_bool(payload.get("active"), default=True)
+            if "active" in payload
+            else bool(existing_contact["active"])
+            if existing_contact
+            else True
+        )
+        membership_type = _merged_text("membership_type") or None
+        employment_status = _merged_text("employment_status") or None
+        status_detail = _merged_text("status_detail") or None
+        status_bucket = _merged_text("status_bucket") or None
+        status_source_text = _merged_text("status_source_text") or None
         now = utcnow()
         if contact_id is None:
             await self.db.exec(
                 """
                 INSERT INTO outreach_contacts(
                   email, first_name, last_name, full_name, work_location, work_group, department,
-                  bargaining_unit, local_number, steward_name, rep_name, active, notes, source,
-                  extra_fields_json, created_at_utc, updated_at_utc
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                  bargaining_unit, local_number, steward_name, rep_name, membership_type,
+                  employment_status, status_detail, status_bucket, status_source_text, active, notes,
+                  source, extra_fields_json, created_at_utc, updated_at_utc
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(email) DO UPDATE SET
                   first_name=excluded.first_name,
                   last_name=excluded.last_name,
@@ -457,6 +736,11 @@ class OutreachService:
                   local_number=excluded.local_number,
                   steward_name=excluded.steward_name,
                   rep_name=excluded.rep_name,
+                  membership_type=excluded.membership_type,
+                  employment_status=excluded.employment_status,
+                  status_detail=excluded.status_detail,
+                  status_bucket=excluded.status_bucket,
+                  status_source_text=excluded.status_source_text,
                   active=excluded.active,
                   notes=excluded.notes,
                   source=excluded.source,
@@ -468,16 +752,21 @@ class OutreachService:
                     first_name,
                     last_name,
                     full_name,
-                    _normalize_text(payload.get("work_location")),
-                    _normalize_text(payload.get("work_group")),
-                    _normalize_text(payload.get("department")),
-                    _normalize_text(payload.get("bargaining_unit")),
-                    _normalize_text(payload.get("local_number")),
-                    _normalize_text(payload.get("steward_name")),
-                    _normalize_text(payload.get("rep_name")),
-                    1 if _as_bool(payload.get("active"), default=True) else 0,
-                    _normalize_text(payload.get("notes")),
-                    _normalize_text(payload.get("source")) or "manual",
+                    _merged_text("work_location"),
+                    _merged_text("work_group"),
+                    _merged_text("department"),
+                    _merged_text("bargaining_unit"),
+                    _merged_text("local_number"),
+                    _merged_text("steward_name"),
+                    _merged_text("rep_name"),
+                    membership_type,
+                    employment_status,
+                    status_detail,
+                    status_bucket,
+                    status_source_text,
+                    1 if active else 0,
+                    _merged_text("notes"),
+                    _merged_text("source") or "manual",
                     json.dumps(cleaned_extra, ensure_ascii=False),
                     now,
                     now,
@@ -491,6 +780,7 @@ class OutreachService:
                 UPDATE outreach_contacts
                 SET email=?, first_name=?, last_name=?, full_name=?, work_location=?, work_group=?,
                     department=?, bargaining_unit=?, local_number=?, steward_name=?, rep_name=?,
+                    membership_type=?, employment_status=?, status_detail=?, status_bucket=?, status_source_text=?,
                     active=?, notes=?, source=?, extra_fields_json=?, updated_at_utc=?
                 WHERE id=?
                 """,
@@ -499,16 +789,21 @@ class OutreachService:
                     first_name,
                     last_name,
                     full_name,
-                    _normalize_text(payload.get("work_location")),
-                    _normalize_text(payload.get("work_group")),
-                    _normalize_text(payload.get("department")),
-                    _normalize_text(payload.get("bargaining_unit")),
-                    _normalize_text(payload.get("local_number")),
-                    _normalize_text(payload.get("steward_name")),
-                    _normalize_text(payload.get("rep_name")),
-                    1 if _as_bool(payload.get("active"), default=True) else 0,
-                    _normalize_text(payload.get("notes")),
-                    _normalize_text(payload.get("source")) or "manual",
+                    _merged_text("work_location"),
+                    _merged_text("work_group"),
+                    _merged_text("department"),
+                    _merged_text("bargaining_unit"),
+                    _merged_text("local_number"),
+                    _merged_text("steward_name"),
+                    _merged_text("rep_name"),
+                    membership_type,
+                    employment_status,
+                    status_detail,
+                    status_bucket,
+                    status_source_text,
+                    1 if active else 0,
+                    _merged_text("notes"),
+                    _merged_text("source") or "manual",
                     json.dumps(cleaned_extra, ensure_ascii=False),
                     now,
                     int(contact_id),
@@ -520,8 +815,9 @@ class OutreachService:
         row = await self.db.fetchone(
             """
             SELECT id, email, first_name, last_name, full_name, work_location, work_group,
-                   department, bargaining_unit, local_number, steward_name, rep_name, active,
-                   notes, source, extra_fields_json, created_at_utc, updated_at_utc
+                   department, bargaining_unit, local_number, steward_name, rep_name,
+                   membership_type, employment_status, status_detail, status_bucket, status_source_text,
+                   active, notes, source, extra_fields_json, created_at_utc, updated_at_utc
             FROM outreach_contacts
             WHERE id=?
             """,
@@ -534,80 +830,398 @@ class OutreachService:
     async def delete_contact(self, contact_id: int) -> None:
         await self.db.exec("DELETE FROM outreach_contacts WHERE id=?", (int(contact_id),))
 
-    async def import_contacts(self, *, filename: str, content_base64: str) -> dict[str, Any]:
+    async def inspect_contacts_import(
+        self,
+        *,
+        filename: str,
+        content_base64: str,
+        sheet_name: str | None = None,
+        mapping: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         try:
             decoded = base64.b64decode(content_base64)
         except Exception as exc:
             raise RuntimeError("invalid import payload") from exc
         name = _normalize_text(filename).lower()
-        imported_count = 0
-        updated_count = 0
-        skipped_count = 0
-        errors: list[str] = []
-        seen_emails: set[str] = set()
-        for row_no, row in enumerate(self._contact_import_rows(name=name, content=decoded), start=2):
-            email = _normalize_email(row.get("email"))
-            if not email:
-                skipped_count += 1
-                continue
-            if email in seen_emails:
-                skipped_count += 1
-                continue
-            seen_emails.add(email)
-            existing = await self.db.fetchone("SELECT id FROM outreach_contacts WHERE email=?", (email,))
-            try:
-                await self.save_contact(contact_id=int(existing[0]) if existing else None, payload=row)
-            except Exception as exc:
-                errors.append(f"Row {row_no}: {exc}")
-                continue
-            if existing:
-                updated_count += 1
-            else:
-                imported_count += 1
+        sheets = self._import_sheets(name=name, content=decoded)
+        selected_sheet = self._selected_import_sheet(sheets=sheets, requested_sheet_name=sheet_name)
+        suggested_mapping = self._suggest_import_mapping(selected_sheet)
+        remembered_mapping = await self._saved_import_mapping(headers=selected_sheet.headers)
+        effective_mapping = self._resolve_import_mapping(
+            headers=selected_sheet.headers,
+            suggested_mapping=suggested_mapping,
+            remembered_mapping=remembered_mapping,
+            requested_mapping=mapping,
+        )
+        preview = await self._preview_import(sheet=selected_sheet, mapping=effective_mapping)
         return {
-            "imported_count": imported_count,
-            "updated_count": updated_count,
-            "skipped_count": skipped_count,
-            "errors": errors,
+            "sheets": [
+                {
+                    "name": sheet.name,
+                    "row_count": len(sheet.rows),
+                    "selected": sheet.name == selected_sheet.name,
+                }
+                for sheet in sheets
+            ],
+            "selected_sheet_name": selected_sheet.name,
+            "headers": list(selected_sheet.headers),
+            "sample_rows": list(selected_sheet.rows[:5]),
+            "suggested_mapping": suggested_mapping,
+            "remembered_mapping": remembered_mapping,
+            "effective_mapping": effective_mapping,
+            "preview": preview,
         }
 
-    def _contact_import_rows(self, *, name: str, content: bytes) -> list[dict[str, Any]]:
+    async def import_contacts(
+        self,
+        *,
+        filename: str,
+        content_base64: str,
+        sheet_name: str | None = None,
+        mapping: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        inspect = await self.inspect_contacts_import(
+            filename=filename,
+            content_base64=content_base64,
+            sheet_name=sheet_name,
+            mapping=mapping,
+        )
+        decoded = base64.b64decode(content_base64)
+        name = _normalize_text(filename).lower()
+        sheets = self._import_sheets(name=name, content=decoded)
+        selected_sheet = self._selected_import_sheet(
+            sheets=sheets,
+            requested_sheet_name=_normalize_text(inspect["selected_sheet_name"]) or sheet_name,
+        )
+        effective_mapping = dict(inspect["effective_mapping"])
+        plan = await self._planned_import_rows(sheet=selected_sheet, mapping=effective_mapping)
+        errors: list[str] = []
+        for row in plan["rows"]:
+            try:
+                await self.save_contact(contact_id=row["existing_id"], payload=row["payload"])
+            except Exception as exc:
+                errors.append(f"Row {row['row_no']}: {exc}")
+        if not errors:
+            await self._save_import_mapping(headers=selected_sheet.headers, mapping=effective_mapping)
+        response = dict(plan["preview"])
+        response["selected_sheet_name"] = selected_sheet.name
+        response["errors"] = errors
+        response["saved_mapping"] = not errors
+        return response
+
+    def _import_sheets(self, *, name: str, content: bytes) -> list[OutreachImportSheet]:
         if name.endswith(".csv"):
-            return self._parse_csv_rows(content)
+            return [self._parse_csv_sheet(content)]
         if name.endswith(".xlsx"):
-            return self._parse_xlsx_rows(content)
+            return self._parse_xlsx_sheets(content)
         raise RuntimeError("only .csv and .xlsx imports are supported")
 
-    def _parse_csv_rows(self, content: bytes) -> list[dict[str, Any]]:
+    def _parse_csv_sheet(self, content: bytes) -> OutreachImportSheet:
         text = content.decode("utf-8-sig", errors="replace")
-        reader = csv.DictReader(StringIO(text))
-        return [self._normalize_import_row(row) for row in reader if isinstance(row, dict)]
-
-    def _parse_xlsx_rows(self, content: bytes) -> list[dict[str, Any]]:
-        workbook = load_workbook(filename=BytesIO(content), read_only=True, data_only=True)
-        sheet = workbook.active
-        rows = list(sheet.iter_rows(values_only=True))
+        rows = list(csv.reader(StringIO(text)))
         if not rows:
-            return []
-        headers = [str(value or "") for value in rows[0]]
-        out: list[dict[str, Any]] = []
+            return OutreachImportSheet(name="CSV", headers=[], rows=[])
+        headers = [str(value or "").strip() for value in rows[0]]
+        parsed_rows: list[dict[str, str]] = []
         for values in rows[1:]:
-            out.append(self._normalize_import_row(dict(zip(headers, values, strict=False))))
-        return out
+            parsed_rows.append(
+                {
+                    header: _normalize_text(value)
+                    for header, value in zip(headers, values, strict=False)
+                    if header
+                }
+            )
+        return OutreachImportSheet(name="CSV", headers=headers, rows=parsed_rows)
 
-    def _normalize_import_row(self, row: dict[str, Any]) -> dict[str, Any]:
-        normalized: dict[str, Any] = {"extra_fields": {}}
-        for raw_key, raw_value in row.items():
-            key = _normalize_key(raw_key)
-            if not key:
+    def _parse_xlsx_sheets(self, content: bytes) -> list[OutreachImportSheet]:
+        workbook = load_workbook(filename=BytesIO(content), read_only=True, data_only=True)
+        sheets: list[OutreachImportSheet] = []
+        for worksheet in workbook.worksheets:
+            values = list(worksheet.iter_rows(values_only=True))
+            if not values:
+                sheets.append(OutreachImportSheet(name=worksheet.title, headers=[], rows=[]))
                 continue
-            target = _CONTACT_HEADER_ALIASES.get(key)
-            value = _normalize_text(raw_value)
-            if target:
-                normalized[target] = value
-            elif value:
-                normalized["extra_fields"][key] = value
-        return normalized
+            headers = [str(value or "").strip() for value in values[0]]
+            parsed_rows: list[dict[str, str]] = []
+            for row_values in values[1:]:
+                parsed_rows.append(
+                    {
+                        header: _normalize_text(value)
+                        for header, value in zip(headers, row_values, strict=False)
+                        if header
+                    }
+                )
+            sheets.append(OutreachImportSheet(name=worksheet.title, headers=headers, rows=parsed_rows))
+        workbook.close()
+        if not sheets:
+            raise RuntimeError("the workbook does not contain any sheets")
+        return sheets
+
+    def _selected_import_sheet(
+        self,
+        *,
+        sheets: list[OutreachImportSheet],
+        requested_sheet_name: str | None,
+    ) -> OutreachImportSheet:
+        if not sheets:
+            raise RuntimeError("the import file does not contain any rows")
+        requested = _normalize_text(requested_sheet_name)
+        if requested:
+            for sheet in sheets:
+                if sheet.name == requested:
+                    return sheet
+            raise RuntimeError(f"sheet not found: {requested}")
+        return sheets[0]
+
+    def _suggest_import_mapping(self, sheet: OutreachImportSheet) -> dict[str, Any]:
+        field_mapping = {field_name: None for field_name in _IMPORT_FIELD_KEYS}
+        for header in sheet.headers:
+            normalized_header = _normalize_key(header)
+            target = _CONTACT_HEADER_ALIASES.get(normalized_header)
+            if target in field_mapping and field_mapping[target] is None:
+                field_mapping[target] = header
+
+        used_headers = {header for header in field_mapping.values() if header}
+
+        def _sample_values(header: str | None) -> list[str]:
+            if not header:
+                return []
+            return [_normalize_text(row.get(header)) for row in sheet.rows[:10]]
+
+        def _find_header_by_alias(alias_set: set[str]) -> str | None:
+            for header in sheet.headers:
+                if header in used_headers:
+                    continue
+                if _normalize_key(header) in alias_set:
+                    return header
+            return None
+
+        def _find_header_by_values(checker) -> str | None:  # noqa: ANN001
+            for header in sheet.headers:
+                if header in used_headers:
+                    continue
+                if any(checker(value) for value in _sample_values(header)):
+                    return header
+            return None
+
+        combined_header = _find_header_by_alias(_COMBINED_STATUS_HEADER_ALIASES)
+        if combined_header is None:
+            combined_header = _find_header_by_values(lambda value: bool(_classify_combined_status(value)["status_bucket"]))
+
+        membership_header = _find_header_by_alias(_MEMBERSHIP_STATUS_HEADER_ALIASES)
+        if membership_header:
+            used_headers.add(membership_header)
+        employment_header = _find_header_by_alias(_EMPLOYMENT_STATUS_HEADER_ALIASES)
+        if employment_header:
+            used_headers.add(employment_header)
+        detail_header = _find_header_by_alias(_STATUS_DETAIL_HEADER_ALIASES)
+
+        if membership_header is None:
+            membership_header = _find_header_by_values(lambda value: bool(_canonical_membership_type(value)))
+            if membership_header:
+                used_headers.add(membership_header)
+        if employment_header is None:
+            employment_header = _find_header_by_values(lambda value: bool(_canonical_employment_status(value)))
+            if employment_header:
+                used_headers.add(employment_header)
+        if detail_header is None:
+            detail_header = _find_header_by_values(lambda value: bool(_canonical_status_detail(value)))
+
+        mode = "combined" if combined_header else "split" if membership_header or employment_header or detail_header else "combined"
+        return {
+            "field_mapping": field_mapping,
+            "status_mapping": {
+                "mode": mode,
+                "combined_status_column": combined_header,
+                "membership_type_column": membership_header,
+                "employment_status_column": employment_header,
+                "status_detail_column": detail_header,
+            },
+        }
+
+    async def _saved_import_mapping(self, *, headers: list[str]) -> dict[str, Any] | None:
+        fingerprint = _header_fingerprint(headers)
+        row = await self.db.fetchone(
+            """
+            SELECT mapping_json
+            FROM outreach_import_profiles
+            WHERE header_fingerprint=?
+            LIMIT 1
+            """,
+            (fingerprint,),
+        )
+        if not row:
+            return None
+        mapping = _json_loads(row[0])
+        if not mapping:
+            return None
+        return self._sanitize_import_mapping(headers=headers, mapping=mapping)
+
+    def _sanitize_import_mapping(self, *, headers: list[str], mapping: dict[str, Any] | None) -> dict[str, Any]:
+        valid_headers = set(headers)
+        field_mapping_raw = _sanitize_mapping_dict((mapping or {}).get("field_mapping"))
+        status_mapping_raw = _sanitize_mapping_dict((mapping or {}).get("status_mapping"))
+        field_mapping = {
+            field_name: header if header in valid_headers else None
+            for field_name, header in {field_name: field_mapping_raw.get(field_name) for field_name in _IMPORT_FIELD_KEYS}.items()
+        }
+        mode = _normalize_key(status_mapping_raw.get("mode")) or "combined"
+        if mode not in {"combined", "split"}:
+            mode = "combined"
+        status_mapping = {
+            "mode": mode,
+            "combined_status_column": status_mapping_raw.get("combined_status_column") if status_mapping_raw.get("combined_status_column") in valid_headers else None,
+            "membership_type_column": status_mapping_raw.get("membership_type_column") if status_mapping_raw.get("membership_type_column") in valid_headers else None,
+            "employment_status_column": status_mapping_raw.get("employment_status_column") if status_mapping_raw.get("employment_status_column") in valid_headers else None,
+            "status_detail_column": status_mapping_raw.get("status_detail_column") if status_mapping_raw.get("status_detail_column") in valid_headers else None,
+        }
+        return {"field_mapping": field_mapping, "status_mapping": status_mapping}
+
+    def _merge_import_mapping(self, base_mapping: dict[str, Any], override_mapping: dict[str, Any]) -> dict[str, Any]:
+        merged = {
+            "field_mapping": dict(base_mapping.get("field_mapping") or {}),
+            "status_mapping": dict(base_mapping.get("status_mapping") or {}),
+        }
+        merged["field_mapping"].update({key: value for key, value in (override_mapping.get("field_mapping") or {}).items()})
+        merged["status_mapping"].update({key: value for key, value in (override_mapping.get("status_mapping") or {}).items()})
+        return merged
+
+    def _resolve_import_mapping(
+        self,
+        *,
+        headers: list[str],
+        suggested_mapping: dict[str, Any],
+        remembered_mapping: dict[str, Any] | None,
+        requested_mapping: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        effective = self._sanitize_import_mapping(headers=headers, mapping=suggested_mapping)
+        if remembered_mapping:
+            effective = self._merge_import_mapping(effective, self._sanitize_import_mapping(headers=headers, mapping=remembered_mapping))
+        if requested_mapping:
+            effective = self._merge_import_mapping(effective, self._sanitize_import_mapping(headers=headers, mapping=requested_mapping))
+        return effective
+
+    async def _preview_import(self, *, sheet: OutreachImportSheet, mapping: dict[str, Any]) -> dict[str, Any]:
+        plan = await self._planned_import_rows(sheet=sheet, mapping=mapping)
+        return dict(plan["preview"])
+
+    async def _planned_import_rows(self, *, sheet: OutreachImportSheet, mapping: dict[str, Any]) -> dict[str, Any]:
+        existing_rows = await self.db.fetchall("SELECT id, email FROM outreach_contacts")
+        existing_by_email = {
+            _normalize_email(row[1]): int(row[0])
+            for row in existing_rows
+            if _normalize_email(row[1])
+        }
+        rows_to_commit: list[dict[str, Any]] = []
+        preview = {
+            "imported_count": 0,
+            "updated_count": 0,
+            "skipped_count": 0,
+            "ignored_count": 0,
+            "bucket_counts": {},
+            "skipped_reasons": {},
+            "ignored_reasons": {},
+        }
+        seen_emails: set[str] = set()
+        for row_no, row in enumerate(sheet.rows, start=2):
+            payload = self._mapped_contact_payload(row=row, mapping=mapping, source=sheet.name)
+            email = _normalize_email(payload.get("email"))
+            if not email:
+                preview["skipped_count"] += 1
+                preview["skipped_reasons"]["missing_email"] = preview["skipped_reasons"].get("missing_email", 0) + 1
+                continue
+            status_info = self._status_from_row(row=row, mapping=mapping)
+            if status_info["reason"]:
+                preview["ignored_count"] += 1
+                reason = str(status_info["reason"])
+                preview["ignored_reasons"][reason] = preview["ignored_reasons"].get(reason, 0) + 1
+                continue
+            if email in seen_emails:
+                preview["skipped_count"] += 1
+                preview["skipped_reasons"]["duplicate_email"] = preview["skipped_reasons"].get("duplicate_email", 0) + 1
+                continue
+            seen_emails.add(email)
+            payload.update(
+                {
+                    "membership_type": status_info["membership_type"],
+                    "employment_status": status_info["employment_status"],
+                    "status_detail": status_info["status_detail"],
+                    "status_bucket": status_info["status_bucket"],
+                    "status_source_text": status_info["status_source_text"],
+                }
+            )
+            existing_id = existing_by_email.get(email)
+            if existing_id is not None:
+                preview["updated_count"] += 1
+            else:
+                preview["imported_count"] += 1
+            bucket = str(status_info["status_bucket"])
+            preview["bucket_counts"][bucket] = preview["bucket_counts"].get(bucket, 0) + 1
+            rows_to_commit.append({"row_no": row_no, "payload": payload, "existing_id": existing_id})
+        return {"rows": rows_to_commit, "preview": preview}
+
+    def _mapped_contact_payload(self, *, row: dict[str, str], mapping: dict[str, Any], source: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {"source": f"import:{_normalize_text(source) or 'sheet'}"}
+        field_mapping = mapping.get("field_mapping") or {}
+        for field_name in _IMPORT_FIELD_KEYS:
+            header = _normalize_text(field_mapping.get(field_name))
+            if not header:
+                continue
+            payload[field_name] = _normalize_text(row.get(header))
+        return payload
+
+    def _status_from_row(self, *, row: dict[str, str], mapping: dict[str, Any]) -> dict[str, str | None]:
+        status_mapping = mapping.get("status_mapping") or {}
+        mode = _normalize_key(status_mapping.get("mode")) or "combined"
+        if mode == "split":
+            membership_header = _normalize_text(status_mapping.get("membership_type_column"))
+            employment_header = _normalize_text(status_mapping.get("employment_status_column"))
+            detail_header = _normalize_text(status_mapping.get("status_detail_column"))
+            if not (membership_header or employment_header or detail_header):
+                return {
+                    "membership_type": None,
+                    "employment_status": None,
+                    "status_detail": None,
+                    "status_bucket": None,
+                    "status_source_text": None,
+                    "reason": "status_unmapped",
+                }
+            return _classify_split_status(
+                membership_type_value=row.get(membership_header) if membership_header else "",
+                employment_status_value=row.get(employment_header) if employment_header else "",
+                status_detail_value=row.get(detail_header) if detail_header else "",
+            )
+        combined_header = _normalize_text(status_mapping.get("combined_status_column"))
+        if not combined_header:
+            return {
+                "membership_type": None,
+                "employment_status": None,
+                "status_detail": None,
+                "status_bucket": None,
+                "status_source_text": None,
+                "reason": "status_unmapped",
+            }
+        return _classify_combined_status(row.get(combined_header))
+
+    async def _save_import_mapping(self, *, headers: list[str], mapping: dict[str, Any]) -> None:
+        await self.db.exec(
+            """
+            INSERT INTO outreach_import_profiles(
+              header_fingerprint, normalized_headers_json, mapping_json, created_at_utc, updated_at_utc
+            ) VALUES(?,?,?,?,?)
+            ON CONFLICT(header_fingerprint) DO UPDATE SET
+              normalized_headers_json=excluded.normalized_headers_json,
+              mapping_json=excluded.mapping_json,
+              updated_at_utc=excluded.updated_at_utc
+            """,
+            (
+                _header_fingerprint(headers),
+                json.dumps(_normalized_headers(headers), ensure_ascii=False),
+                json.dumps(mapping, ensure_ascii=False),
+                utcnow(),
+                utcnow(),
+            ),
+        )
 
     async def list_templates(self) -> list[dict[str, Any]]:
         rows = await self.db.fetchall(
@@ -696,9 +1310,9 @@ class OutreachService:
         rows = await self.db.fetchall(
             """
             SELECT id, location_name, visit_date_local, start_time_local, end_time_local,
-                   timezone, audience_location, audience_work_group, notice_subject,
-                   reminder_subject, notice_send_at_utc, reminder_send_at_utc, status,
-                   created_at_utc, updated_at_utc
+                   timezone, audience_location, audience_work_group, audience_status_bucket,
+                   notice_subject, reminder_subject, notice_send_at_utc, reminder_send_at_utc,
+                   status, created_at_utc, updated_at_utc
             FROM outreach_stops
             ORDER BY visit_date_local, start_time_local, lower(location_name)
             """
@@ -740,15 +1354,17 @@ class OutreachService:
                 """
                 INSERT INTO outreach_stops(
                   location_name, visit_date_local, start_time_local, end_time_local, timezone,
-                  audience_location, audience_work_group, notice_subject, reminder_subject,
-                  notice_send_at_utc, reminder_send_at_utc, status, created_at_utc, updated_at_utc
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                  audience_location, audience_work_group, audience_status_bucket, notice_subject,
+                  reminder_subject, notice_send_at_utc, reminder_send_at_utc, status,
+                  created_at_utc, updated_at_utc
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(location_name, visit_date_local) DO UPDATE SET
                   start_time_local=excluded.start_time_local,
                   end_time_local=excluded.end_time_local,
                   timezone=excluded.timezone,
                   audience_location=excluded.audience_location,
                   audience_work_group=excluded.audience_work_group,
+                  audience_status_bucket=excluded.audience_status_bucket,
                   notice_subject=excluded.notice_subject,
                   reminder_subject=excluded.reminder_subject,
                   notice_send_at_utc=excluded.notice_send_at_utc,
@@ -764,6 +1380,7 @@ class OutreachService:
                     timezone_name,
                     _normalize_text(payload.get("audience_location")),
                     _normalize_text(payload.get("audience_work_group")),
+                    _normalize_text(payload.get("audience_status_bucket")) or None,
                     _normalize_text(payload.get("notice_subject")),
                     _normalize_text(payload.get("reminder_subject")),
                     notice_send_at_utc,
@@ -783,8 +1400,8 @@ class OutreachService:
                 """
                 UPDATE outreach_stops
                 SET location_name=?, visit_date_local=?, start_time_local=?, end_time_local=?, timezone=?,
-                    audience_location=?, audience_work_group=?, notice_subject=?, reminder_subject=?,
-                    notice_send_at_utc=?, reminder_send_at_utc=?, status=?, updated_at_utc=?
+                    audience_location=?, audience_work_group=?, audience_status_bucket=?, notice_subject=?,
+                    reminder_subject=?, notice_send_at_utc=?, reminder_send_at_utc=?, status=?, updated_at_utc=?
                 WHERE id=?
                 """,
                 (
@@ -795,6 +1412,7 @@ class OutreachService:
                     timezone_name,
                     _normalize_text(payload.get("audience_location")),
                     _normalize_text(payload.get("audience_work_group")),
+                    _normalize_text(payload.get("audience_status_bucket")) or None,
                     _normalize_text(payload.get("notice_subject")),
                     _normalize_text(payload.get("reminder_subject")),
                     notice_send_at_utc,
@@ -810,9 +1428,9 @@ class OutreachService:
         row = await self.db.fetchone(
             """
             SELECT id, location_name, visit_date_local, start_time_local, end_time_local,
-                   timezone, audience_location, audience_work_group, notice_subject,
-                   reminder_subject, notice_send_at_utc, reminder_send_at_utc, status,
-                   created_at_utc, updated_at_utc
+                   timezone, audience_location, audience_work_group, audience_status_bucket,
+                   notice_subject, reminder_subject, notice_send_at_utc, reminder_send_at_utc,
+                   status, created_at_utc, updated_at_utc
             FROM outreach_stops
             WHERE id=?
             """,
@@ -1304,8 +1922,9 @@ class OutreachService:
         due_rows = await self.db.fetchall(
             """
             SELECT id, location_name, visit_date_local, start_time_local, end_time_local, timezone,
-                   audience_location, audience_work_group, notice_subject, reminder_subject,
-                   notice_send_at_utc, reminder_send_at_utc, status, created_at_utc, updated_at_utc
+                   audience_location, audience_work_group, audience_status_bucket, notice_subject,
+                   reminder_subject, notice_send_at_utc, reminder_send_at_utc, status,
+                   created_at_utc, updated_at_utc
             FROM outreach_stops
             WHERE status='active'
               AND (notice_send_at_utc<=? OR reminder_send_at_utc<=?)
@@ -1446,8 +2065,9 @@ class OutreachService:
         params: list[Any] = []
         sql = """
             SELECT id, email, first_name, last_name, full_name, work_location, work_group,
-                   department, bargaining_unit, local_number, steward_name, rep_name, active,
-                   notes, source, extra_fields_json, created_at_utc, updated_at_utc
+                   department, bargaining_unit, local_number, steward_name, rep_name,
+                   membership_type, employment_status, status_detail, status_bucket, status_source_text,
+                   active, notes, source, extra_fields_json, created_at_utc, updated_at_utc
             FROM outreach_contacts
             WHERE active=1
         """
@@ -1457,6 +2077,9 @@ class OutreachService:
         if _normalize_text(stop_row["audience_work_group"]):
             sql += " AND lower(COALESCE(work_group, ''))=lower(?)"
             params.append(stop_row["audience_work_group"])
+        if _normalize_text(stop_row.get("audience_status_bucket")):
+            sql += " AND lower(COALESCE(status_bucket, ''))=lower(?)"
+            params.append(stop_row["audience_status_bucket"])
         sql += " ORDER BY lower(COALESCE(full_name, '')), lower(email)"
         rows = await self.db.fetchall(sql, tuple(params))
         return [self._contact_row(row) for row in rows]
@@ -1962,6 +2585,11 @@ class OutreachService:
             "local_number",
             "steward_name",
             "rep_name",
+            "membership_type",
+            "employment_status",
+            "status_detail",
+            "status_bucket",
+            "status_source_text",
             "source",
             "notes",
         ):
@@ -2100,19 +2728,21 @@ class OutreachService:
                 reply_to_name=_normalize_text(self.cfg.reply_to_name) or None,
             )
         except Exception as exc:
+            error_text = str(exc)
             await self.db.exec(
                 """
                 UPDATE outreach_send_log
                 SET status='failed', failed_at_utc=?, error_text=?, updated_at_utc=?
                 WHERE id=?
                 """,
-                (utcnow(), str(exc), utcnow(), int(send_log_id)),
+                (utcnow(), error_text, utcnow(), int(send_log_id)),
             )
             return OutreachSendSummary(
                 send_log_id=int(send_log_id),
                 recipient_email=_normalize_email(recipient_email),
                 status="failed",
                 graph_message_id=None,
+                error_text=error_text,
             )
         await self.db.exec(
             """
@@ -2127,6 +2757,7 @@ class OutreachService:
             recipient_email=_normalize_email(recipient_email),
             status="sent",
             graph_message_id=sent.graph_message_id,
+            error_text=None,
         )
 
     def _preview_unsubscribe_url(self) -> str:
@@ -2212,6 +2843,11 @@ class OutreachService:
             "local_number": _normalize_text(contact.get("local_number")),
             "steward_name": _normalize_text(contact.get("steward_name")),
             "rep_name": _normalize_text(contact.get("rep_name")),
+            "membership_type": _normalize_text(contact.get("membership_type")),
+            "employment_status": _normalize_text(contact.get("employment_status")),
+            "status_detail": _normalize_text(contact.get("status_detail")),
+            "status_bucket": _normalize_text(contact.get("status_bucket")),
+            "status_source_text": _normalize_text(contact.get("status_source_text")),
             "visit_date": visit_date,
             "visit_time": visit_time,
             "subject": subject,
@@ -2262,12 +2898,17 @@ class OutreachService:
             "local_number": _normalize_text(row[9]) or None,
             "steward_name": _normalize_text(row[10]) or None,
             "rep_name": _normalize_text(row[11]) or None,
-            "active": bool(int(row[12] or 0)),
-            "notes": _normalize_text(row[13]) or None,
-            "source": _normalize_text(row[14]) or "manual",
-            "extra_fields": _json_loads(row[15]),
-            "created_at_utc": _normalize_text(row[16]),
-            "updated_at_utc": _normalize_text(row[17]),
+            "membership_type": _normalize_text(row[12]) or None,
+            "employment_status": _normalize_text(row[13]) or None,
+            "status_detail": _normalize_text(row[14]) or None,
+            "status_bucket": _normalize_text(row[15]) or None,
+            "status_source_text": _normalize_text(row[16]) or None,
+            "active": bool(int(row[17] or 0)),
+            "notes": _normalize_text(row[18]) or None,
+            "source": _normalize_text(row[19]) or "manual",
+            "extra_fields": _json_loads(row[20]),
+            "created_at_utc": _normalize_text(row[21]),
+            "updated_at_utc": _normalize_text(row[22]),
         }
 
     def _template_row(self, row: tuple[Any, ...]) -> dict[str, Any]:
@@ -2295,15 +2936,16 @@ class OutreachService:
             "timezone": timezone_name,
             "audience_location": _normalize_text(row[6]) or None,
             "audience_work_group": _normalize_text(row[7]) or None,
-            "notice_subject": _normalize_text(row[8]) or None,
-            "reminder_subject": _normalize_text(row[9]) or None,
-            "notice_send_at_utc": _normalize_text(row[10]),
-            "reminder_send_at_utc": _normalize_text(row[11]),
-            "status": _normalize_text(row[12]) or "draft",
-            "created_at_utc": _normalize_text(row[13]),
-            "updated_at_utc": _normalize_text(row[14]),
-            "notice_send_at_local": _utc_to_local_input(_normalize_text(row[10]), timezone_name),
-            "reminder_send_at_local": _utc_to_local_input(_normalize_text(row[11]), timezone_name),
+            "audience_status_bucket": _normalize_text(row[8]) or None,
+            "notice_subject": _normalize_text(row[9]) or None,
+            "reminder_subject": _normalize_text(row[10]) or None,
+            "notice_send_at_utc": _normalize_text(row[11]),
+            "reminder_send_at_utc": _normalize_text(row[12]),
+            "status": _normalize_text(row[13]) or "draft",
+            "created_at_utc": _normalize_text(row[14]),
+            "updated_at_utc": _normalize_text(row[15]),
+            "notice_send_at_local": _utc_to_local_input(_normalize_text(row[11]), timezone_name),
+            "reminder_send_at_local": _utc_to_local_input(_normalize_text(row[12]), timezone_name),
         }
 
     def _send_summary_row(self, row: OutreachSendSummary) -> dict[str, Any]:
@@ -2312,4 +2954,5 @@ class OutreachService:
             "recipient_email": row.recipient_email,
             "status": row.status,
             "graph_message_id": row.graph_message_id,
+            "error_text": row.error_text,
         }

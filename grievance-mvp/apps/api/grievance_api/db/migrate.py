@@ -300,6 +300,12 @@ def migrate(db_path: str) -> None:
 
         _ensure_column(con, "standalone_outbound_emails", "submission_id", "TEXT")
         _ensure_column(con, "standalone_outbound_emails", "document_scope_id", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "outreach_contacts", "membership_type", "TEXT")
+        _ensure_column(con, "outreach_contacts", "employment_status", "TEXT")
+        _ensure_column(con, "outreach_contacts", "status_detail", "TEXT")
+        _ensure_column(con, "outreach_contacts", "status_bucket", "TEXT")
+        _ensure_column(con, "outreach_contacts", "status_source_text", "TEXT")
+        _ensure_column(con, "outreach_stops", "audience_status_bucket", "TEXT")
         _ensure_column(con, "outreach_send_log", "open_token_hash", "TEXT")
 
         _ensure_column(con, "hosted_form_settings", "form_key", "TEXT")
@@ -383,6 +389,8 @@ def migrate(db_path: str) -> None:
                 "CREATE INDEX IF NOT EXISTS idx_external_steward_case_assignments_case "
                 "ON external_steward_case_assignments(case_id)"
             ),
+            "CREATE INDEX IF NOT EXISTS idx_outreach_contacts_status_bucket ON outreach_contacts(status_bucket)",
+            "CREATE INDEX IF NOT EXISTS idx_outreach_stops_status_bucket ON outreach_stops(status, audience_status_bucket)",
         ]
         for stmt in index_sql:
             try:

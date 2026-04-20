@@ -317,6 +317,11 @@ CREATE TABLE IF NOT EXISTS outreach_contacts (
   local_number TEXT,
   steward_name TEXT,
   rep_name TEXT,
+  membership_type TEXT,
+  employment_status TEXT,
+  status_detail TEXT,
+  status_bucket TEXT,
+  status_source_text TEXT,
   active INTEGER NOT NULL DEFAULT 1,
   notes TEXT,
   source TEXT NOT NULL DEFAULT 'manual',
@@ -333,6 +338,9 @@ ON outreach_contacts(work_location);
 
 CREATE INDEX IF NOT EXISTS idx_outreach_contacts_work_group
 ON outreach_contacts(work_group);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_contacts_status_bucket
+ON outreach_contacts(status_bucket);
 
 CREATE TABLE IF NOT EXISTS outreach_templates (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -359,6 +367,7 @@ CREATE TABLE IF NOT EXISTS outreach_stops (
   timezone TEXT NOT NULL,
   audience_location TEXT,
   audience_work_group TEXT,
+  audience_status_bucket TEXT,
   notice_subject TEXT,
   reminder_subject TEXT,
   notice_send_at_utc TEXT NOT NULL,
@@ -376,6 +385,21 @@ ON outreach_stops(status, notice_send_at_utc);
 
 CREATE INDEX IF NOT EXISTS idx_outreach_stops_status_reminder
 ON outreach_stops(status, reminder_send_at_utc);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_stops_status_bucket
+ON outreach_stops(status, audience_status_bucket);
+
+CREATE TABLE IF NOT EXISTS outreach_import_profiles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  header_fingerprint TEXT NOT NULL,
+  normalized_headers_json TEXT NOT NULL DEFAULT '[]',
+  mapping_json TEXT NOT NULL DEFAULT '{}',
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outreach_import_profiles_fingerprint
+ON outreach_import_profiles(header_fingerprint);
 
 CREATE TABLE IF NOT EXISTS outreach_suppressions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
