@@ -12,7 +12,7 @@ Core fields:
 - Contract -> `contract`
 - Grievant first name -> `grievant_firstname`
 - Grievant last name -> `grievant_lastname`
-- Grievant email -> `grievant_email`
+- Grievant email -> `grievant_email` (optional for this unsigned cover letter)
 - Narrative -> `narrative`
 
 Template-specific (`template_data`):
@@ -40,7 +40,7 @@ Derived by the API:
   "contract": "<contract>",
   "grievant_firstname": "<first>",
   "grievant_lastname": "<last>",
-  "grievant_email": "<email>",
+  "grievant_email": "<email or blank>",
   "narrative": "Data request cover letter generated from intake",
   "template_data": {
     "company_rep_name": "<rep name>",
@@ -61,3 +61,4 @@ Derived by the API:
 - `grievance_id` is required.
 - `grievance_number` and `grievance_id` are treated as the same identifier for this flow.
 - The template is an unsigned cover letter, so it should be stored alongside the matching grievance data request form.
+- `grievant_email` may be omitted or left blank because the template does not render it and no signer is assigned.

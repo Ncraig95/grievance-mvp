@@ -144,7 +144,46 @@ class OutreachServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(preview.subject, "Ed Ball Building Visit on April 14th")
         self.assertIn("Hi everyone,", preview.text_body)
         self.assertIn("https://grievance.example.org/unsubscribe/preview", preview.text_body)
+        self.assertIn('href="https://grievance.example.org/unsubscribe/preview"', preview.html_body)
+        self.assertIn("If the button does not open", preview.html_body)
         self.assertEqual(preview.unknown_placeholders, [])
+
+    async def test_preview_uses_custom_outreach_html_wrapper_when_present(self):
+        templates_dir = Path(self.email_cfg.templates_dir)
+        templates_dir.mkdir(parents=True, exist_ok=True)
+        (templates_dir / "outreach_base.html").write_text(
+            """<html><body><section data-template="custom">{{ content_html }}</section><footer><a href="{{ unsubscribe_url }}">Stop emails</a> {{ reply_to }}</footer></body></html>""",
+            encoding="utf-8",
+        )
+
+        service = self._service(enabled=False, mailer=None)
+        await service.ensure_seed_data()
+        contact = await service.save_contact(
+            contact_id=None,
+            payload={
+                "email": "member@example.org",
+                "first_name": "Jamie",
+                "work_location": "Ed Ball Building",
+                "active": True,
+            },
+        )
+        notice_template = next(row for row in (await service.list_templates()) if row["template_type"] == "notice")
+        stop = next(
+            row
+            for row in (await service.list_stops())
+            if row["location_name"] == "Ed Ball Building" and row["visit_date_local"] == "2026-04-14"
+        )
+
+        preview = await service.preview(
+            template_id=int(notice_template["id"]),
+            stop_id=int(stop["id"]),
+            contact_id=int(contact["id"]),
+            recipient_email=contact["email"],
+        )
+
+        self.assertIn('data-template="custom"', preview.html_body)
+        self.assertIn(">Stop emails<", preview.html_body)
+        self.assertIn("replies@example.org", preview.html_body)
 
     async def test_run_due_is_idempotent_and_respects_unsubscribe_suppression(self):
         fake_mailer = _FakeMailer()
@@ -517,6 +556,47 @@ class OutreachServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_inspect["effective_mapping"]["field_mapping"]["last_name"], "Worker Last")
         self.assertEqual(second_inspect["effective_mapping"]["status_mapping"]["combined_status_column"], "Rollup Status")
 
+    async def test_inspect_contacts_import_suggests_group_and_subgroup_from_structural_columns(self):
+        service = self._service(enabled=False, mailer=None)
+        csv_payload = self._csv_payload(
+            "\n".join(
+                [
+                    "Email,Field - Unit,Field - Department,Field - Division,Status",
+                    "member1@example.org,120 - CoJ Non-Supervisory,PL - PUBLIC LIBRARY,PLJX,Member - Active - Active",
+                    "member2@example.org,120 - CoJ Non-Supervisory,PW - PUBLIC WORKS,PWDS,Member - Active - Active",
+                ]
+            )
+        )
+
+        result = await service.inspect_contacts_import(
+            filename="coj-groups.csv",
+            content_base64=csv_payload,
+        )
+
+        self.assertEqual(result["effective_mapping"]["field_mapping"]["group_name"], "Field - Department")
+        self.assertEqual(result["effective_mapping"]["field_mapping"]["subgroup_name"], "Field - Division")
+
+    async def test_inspect_contacts_import_suggests_processing_unit_and_member_department_group_fields(self):
+        service = self._service(enabled=False, mailer=None)
+        payload = self._xlsx_payload(
+            {
+                "Members": [
+                    ["Email", "Processing Unit", "Member Department", "Status Name"],
+                    ["member1@example.org", "0006501 ATT / BELLSOUTH TELECOMMS", "CGS4", "Member - Active - Active"],
+                    ["member2@example.org", "0615701 ATT MOBILITY", "CXT8", "Member - Active - Pending"],
+                ]
+            }
+        )
+
+        result = await service.inspect_contacts_import(
+            filename="members.xlsx",
+            content_base64=payload,
+            sheet_name="Members",
+        )
+
+        self.assertEqual(result["effective_mapping"]["field_mapping"]["group_name"], "Processing Unit")
+        self.assertEqual(result["effective_mapping"]["field_mapping"]["subgroup_name"], "Member Department")
+
     async def test_import_contacts_combined_status_only_imports_allowed_buckets(self):
         service = self._service(enabled=False, mailer=None)
         csv_payload = self._csv_payload(
@@ -644,6 +724,151 @@ class OutreachServiceTests(unittest.IsolatedAsyncioTestCase):
         contacts = await service._contacts_for_stop(stop)  # noqa: SLF001
 
         self.assertEqual([row["email"] for row in contacts], ["member-pending@example.org"])
+
+    async def test_contacts_for_stop_filters_by_group_and_subgroup(self):
+        service = self._service(enabled=False, mailer=None)
+        await service.save_contact(
+            contact_id=None,
+            payload={
+                "email": "library-east@example.org",
+                "first_name": "Avery",
+                "work_location": "City Hall",
+                "group_name": "PL - PUBLIC LIBRARY",
+                "subgroup_name": "PLJX",
+                "active": True,
+                "membership_type": "Member",
+                "employment_status": "Active",
+                "status_detail": "Active",
+                "status_bucket": "Member - Active - Active",
+                "status_source_text": "Member - Active - Active",
+            },
+        )
+        await service.save_contact(
+            contact_id=None,
+            payload={
+                "email": "library-west@example.org",
+                "first_name": "Robin",
+                "work_location": "City Hall",
+                "group_name": "PL - PUBLIC LIBRARY",
+                "subgroup_name": "PLWU",
+                "active": True,
+                "membership_type": "Member",
+                "employment_status": "Active",
+                "status_detail": "Active",
+                "status_bucket": "Member - Active - Active",
+                "status_source_text": "Member - Active - Active",
+            },
+        )
+        await service.save_contact(
+            contact_id=None,
+            payload={
+                "email": "public-works@example.org",
+                "first_name": "Casey",
+                "work_location": "City Hall",
+                "group_name": "PW - PUBLIC WORKS",
+                "subgroup_name": "PWDS",
+                "active": True,
+                "membership_type": "Member",
+                "employment_status": "Active",
+                "status_detail": "Active",
+                "status_bucket": "Member - Active - Active",
+                "status_source_text": "Member - Active - Active",
+            },
+        )
+        stop = await service.save_stop(
+            stop_id=None,
+            payload={
+                "location_name": "City Hall",
+                "visit_date_local": "2026-07-10",
+                "start_time_local": "10:00",
+                "end_time_local": "11:00",
+                "timezone": "America/New_York",
+                "audience_location": "City Hall",
+                "audience_group_name": "PL - PUBLIC LIBRARY",
+                "audience_subgroup_name": "PLJX",
+                "notice_subject": "Library Visit",
+                "reminder_subject": "Library Reminder",
+                "status": "active",
+            },
+        )
+
+        contacts = await service._contacts_for_stop(stop)  # noqa: SLF001
+
+        self.assertEqual([row["email"] for row in contacts], ["library-east@example.org"])
+
+    async def test_contacts_for_stop_filters_by_multiple_groups_and_subgroups(self):
+        service = self._service(enabled=False, mailer=None)
+        await service.save_contact(
+            contact_id=None,
+            payload={
+                "email": "library-east@example.org",
+                "first_name": "Avery",
+                "work_location": "City Hall",
+                "group_name": "PL - PUBLIC LIBRARY",
+                "subgroup_name": "PLJX",
+                "active": True,
+                "membership_type": "Member",
+                "employment_status": "Active",
+                "status_detail": "Active",
+                "status_bucket": "Member - Active - Active",
+                "status_source_text": "Member - Active - Active",
+            },
+        )
+        await service.save_contact(
+            contact_id=None,
+            payload={
+                "email": "library-west@example.org",
+                "first_name": "Robin",
+                "work_location": "City Hall",
+                "group_name": "PL - PUBLIC LIBRARY",
+                "subgroup_name": "PLWU",
+                "active": True,
+                "membership_type": "Member",
+                "employment_status": "Active",
+                "status_detail": "Active",
+                "status_bucket": "Member - Active - Active",
+                "status_source_text": "Member - Active - Active",
+            },
+        )
+        await service.save_contact(
+            contact_id=None,
+            payload={
+                "email": "public-works@example.org",
+                "first_name": "Casey",
+                "work_location": "City Hall",
+                "group_name": "PW - PUBLIC WORKS",
+                "subgroup_name": "PWDS",
+                "active": True,
+                "membership_type": "Member",
+                "employment_status": "Active",
+                "status_detail": "Active",
+                "status_bucket": "Member - Active - Active",
+                "status_source_text": "Member - Active - Active",
+            },
+        )
+        stop = await service.save_stop(
+            stop_id=None,
+            payload={
+                "location_name": "City Hall",
+                "visit_date_local": "2026-07-10",
+                "start_time_local": "10:00",
+                "end_time_local": "11:00",
+                "timezone": "America/New_York",
+                "audience_location": "City Hall",
+                "audience_group_name": "PL - PUBLIC LIBRARY, PW - PUBLIC WORKS",
+                "audience_subgroup_name": "PLWU, PWDS",
+                "notice_subject": "Multi Group Visit",
+                "reminder_subject": "Multi Group Reminder",
+                "status": "active",
+            },
+        )
+
+        contacts = await service._contacts_for_stop(stop)  # noqa: SLF001
+
+        self.assertEqual(
+            [row["email"] for row in contacts],
+            ["library-west@example.org", "public-works@example.org"],
+        )
 
     async def test_prefetch_click_is_flagged_and_excluded_from_topline_metrics(self):
         fake_mailer = _FakeMailer()

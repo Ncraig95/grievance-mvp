@@ -49,7 +49,7 @@ Standalone exception:
 - `att_mobility_bargaining_suggestion.md` uses the standalone endpoint instead of `/intake`.
 - Its SharePoint filing happens only after DocuSeal signature completion.
 
-## Global intake fields required in every payload
+## Global intake fields usually required in intake payloads
 
 - `request_id` (unique per run, idempotency key)
 - `document_command`
@@ -60,6 +60,9 @@ Standalone exception:
 - `narrative`
 
 Use `template_data` for document-specific placeholders.
+
+Exception:
+- `grievance_data_request` and `data_request_letterhead` may leave `grievant_email` blank because those unsigned templates do not render it and do not route to a signer.
 
 ## Notes
 

@@ -151,6 +151,31 @@ class OutreachRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Outreach Contacts", response.body.decode("utf-8"))
         self.assertIn('/officers/outreach/ui/compose', response.body.decode("utf-8"))
 
+    async def test_outreach_compose_page_renders_contact_sort_controls(self):
+        service = self._service(mailer=None, enabled=False)
+        request = self._request(service)
+
+        response = await outreach_ui_page("compose", request)
+        body = response.body.decode("utf-8")
+
+        self.assertIn('id="composeContactSortField"', body)
+        self.assertIn('id="composeContactSortDirection"', body)
+        self.assertIn('id="composeContactSearch"', body)
+        self.assertIn('id="composeContactGroupFilter"', body)
+        self.assertIn('id="composeContactSubgroupFilter"', body)
+
+    async def test_outreach_contacts_page_renders_group_and_subgroup_controls(self):
+        service = self._service(mailer=None, enabled=False)
+        request = self._request(service)
+
+        response = await outreach_ui_page("contacts", request)
+        body = response.body.decode("utf-8")
+
+        self.assertIn('id="contactGroupName"', body)
+        self.assertIn('id="contactSubgroupName"', body)
+        self.assertIn('id="importGroupNameColumn"', body)
+        self.assertIn('id="importSubgroupNameColumn"', body)
+
     async def test_inspect_contact_import_route_returns_sheet_preview(self):
         service = self._service(mailer=None, enabled=False)
         request = self._request(service)

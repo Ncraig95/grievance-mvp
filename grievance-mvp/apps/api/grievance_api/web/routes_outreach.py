@@ -1010,6 +1010,8 @@ def _render_outreach_page(*, page_name: str) -> str:
           <div><label>Full Name<input id="contactFullName" /></label></div>
           <div><label>Work Location<input id="contactLocation" /></label></div>
           <div><label>Work Group<input id="contactWorkGroup" /></label></div>
+          <div><label>Group<input id="contactGroupName" list="knownGroupOptions" /></label></div>
+          <div><label>Subgroup<input id="contactSubgroupName" list="knownSubgroupOptions" /></label></div>
           <div><label>Department<input id="contactDepartment" /></label></div>
           <div><label>Bargaining Unit<input id="contactBargainingUnit" /></label></div>
           <div><label>Local Number<input id="contactLocalNumber" /></label></div>
@@ -1051,6 +1053,8 @@ def _render_outreach_page(*, page_name: str) -> str:
             <div><label>Full Name<select id="importFullNameColumn"></select></label></div>
             <div><label>Work Location<select id="importWorkLocationColumn"></select></label></div>
             <div><label>Work Group<select id="importWorkGroupColumn"></select></label></div>
+            <div><label>Group<select id="importGroupNameColumn"></select></label></div>
+            <div><label>Subgroup<select id="importSubgroupNameColumn"></select></label></div>
             <div><label>Department<select id="importDepartmentColumn"></select></label></div>
             <div><label>Bargaining Unit<select id="importBargainingUnitColumn"></select></label></div>
             <div><label>Local Number<select id="importLocalNumberColumn"></select></label></div>
@@ -1088,10 +1092,16 @@ def _render_outreach_page(*, page_name: str) -> str:
             </select>
           </label>
         </div>
+        <div><label>Group Filter<input id="contactGroupFilter" list="knownGroupOptions" placeholder="All groups or comma list" /></label></div>
+        <div><label>Subgroup Filter<input id="contactSubgroupFilter" list="knownSubgroupOptions" placeholder="All subgroups or comma list" /></label></div>
       </div>
+      <div class="note">Use commas to filter more than one group or subgroup at the same time.</div>
       <div class="summary-grid" id="contactBucketCounts"></div>
       <div class="table-wrap"><table id="contactsTable"></table></div>
     </section>
+
+    <datalist id="knownGroupOptions"></datalist>
+    <datalist id="knownSubgroupOptions"></datalist>
 
     <section class="panel route-section" data-section="templates">
       <h2>Templates</h2>
@@ -1128,6 +1138,8 @@ def _render_outreach_page(*, page_name: str) -> str:
         <div><label>Status<select id="stopStatus"><option value="draft">Draft</option><option value="active">Active</option><option value="paused">Paused</option><option value="archived">Archived</option></select></label></div>
         <div><label>Audience Location<input id="stopAudienceLocation" /></label></div>
         <div><label>Audience Work Group<input id="stopAudienceWorkGroup" /></label></div>
+        <div><label>Audience Group<input id="stopAudienceGroupName" list="knownGroupOptions" placeholder="One or more groups" /></label></div>
+        <div><label>Audience Subgroup<input id="stopAudienceSubgroupName" list="knownSubgroupOptions" placeholder="One or more subgroups" /></label></div>
         <div>
           <label>Audience Status Bucket
             <select id="stopAudienceStatusBucket">
@@ -1149,7 +1161,7 @@ def _render_outreach_page(*, page_name: str) -> str:
         <button id="clearStopBtn" class="secondary" type="button">Clear Form</button>
         <button id="deleteStopBtn" class="danger" type="button">Delete Selected</button>
       </div>
-      <div class="note" id="stopFormNote">Use audience filters to narrow a stop to a location, work group, status bucket, or any combination of those.</div>
+      <div class="note" id="stopFormNote">Use audience filters to narrow a stop to a location, work group, group, subgroup, status bucket, or any combination of those. Separate multiple groups or subgroups with commas.</div>
     </section>
 
     <section class="panel route-section" data-section="stops">
@@ -1183,6 +1195,47 @@ Thank you,
 
     <section class="panel route-section" data-section="compose">
       <h2>Preview and Test Send</h2>
+      <div class="subtle-card">
+        <h3>Saved Contact Sort</h3>
+        <div class="form-grid">
+          <div>
+            <label>Sort Contacts By
+              <select id="composeContactSortField">
+                <option value="full_name">Name</option>
+                <option value="email">Email</option>
+                <option value="work_location">Work Location</option>
+                <option value="work_group">Work Group</option>
+                <option value="group_name">Group</option>
+                <option value="subgroup_name">Subgroup</option>
+                <option value="department">Department</option>
+                <option value="bargaining_unit">Bargaining Unit</option>
+                <option value="local_number">Local Number</option>
+                <option value="steward_name">Steward Name</option>
+                <option value="rep_name">Rep Name</option>
+                <option value="status_bucket">Status Bucket</option>
+                <option value="source">Source</option>
+                <option value="updated_at_utc">Last Updated</option>
+              </select>
+            </label>
+          </div>
+          <div>
+            <label>Direction
+              <select id="composeContactSortDirection">
+                <option value="asc">Ascending</option>
+                <option value="desc">Descending</option>
+              </select>
+            </label>
+          </div>
+          <div>
+            <label>Search Contacts
+              <input id="composeContactSearch" placeholder="Search name, email, location, group, subgroup, status" />
+            </label>
+          </div>
+          <div><label>Group Filter<input id="composeContactGroupFilter" list="knownGroupOptions" placeholder="All groups or comma list" /></label></div>
+          <div><label>Subgroup Filter<input id="composeContactSubgroupFilter" list="knownSubgroupOptions" placeholder="All subgroups or comma list" /></label></div>
+        </div>
+        <div class="note" id="composeContactSortNote">This controls the saved contact order used by Preview/Test Send and One-Off Send. Use commas to filter more than one group or subgroup.</div>
+      </div>
       <div class="form-grid">
         <div><label>Template<select id="previewTemplateId"></select></label></div>
         <div><label>Stop<select id="previewStopId"></select></label></div>
@@ -1212,6 +1265,8 @@ Thank you,
         <div><label>Full Name<input id="oneOffFullName" /></label></div>
         <div><label>Work Location<input id="oneOffWorkLocation" /></label></div>
         <div><label>Work Group<input id="oneOffWorkGroup" /></label></div>
+        <div><label>Group<input id="oneOffGroupName" list="knownGroupOptions" /></label></div>
+        <div><label>Subgroup<input id="oneOffSubgroupName" list="knownSubgroupOptions" /></label></div>
         <div><label>Department<input id="oneOffDepartment" /></label></div>
         <div><label>Bargaining Unit<input id="oneOffBargainingUnit" /></label></div>
         <div><label>Local Number<input id="oneOffLocalNumber" /></label></div>
@@ -1252,6 +1307,23 @@ Thank you,
       'Non Member - Active - Non fr Mem',
     ];
 
+    const CONTACT_SORT_FIELDS = new Set([
+      'full_name',
+      'email',
+      'work_location',
+      'work_group',
+      'group_name',
+      'subgroup_name',
+      'department',
+      'bargaining_unit',
+      'local_number',
+      'steward_name',
+      'rep_name',
+      'status_bucket',
+      'source',
+      'updated_at_utc',
+    ]);
+
     const IMPORT_FIELD_SELECTS = [
       ['email', 'importEmailColumn'],
       ['first_name', 'importFirstNameColumn'],
@@ -1259,6 +1331,8 @@ Thank you,
       ['full_name', 'importFullNameColumn'],
       ['work_location', 'importWorkLocationColumn'],
       ['work_group', 'importWorkGroupColumn'],
+      ['group_name', 'importGroupNameColumn'],
+      ['subgroup_name', 'importSubgroupNameColumn'],
       ['department', 'importDepartmentColumn'],
       ['bargaining_unit', 'importBargainingUnitColumn'],
       ['local_number', 'importLocalNumberColumn'],
@@ -1279,6 +1353,13 @@ Thank you,
       selectedContactId: null,
       selectedTemplateId: null,
       selectedStopId: null,
+      composeContactSort: {
+        field: 'full_name',
+        direction: 'asc',
+        search: '',
+        group_name: '',
+        subgroup_name: '',
+      },
       currentSection: CURRENT_SECTION,
       importInspector: null,
       importUpload: null,
@@ -1310,6 +1391,23 @@ Thank you,
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+    }
+
+    function splitFilterValues(value) {
+      const seen = new Set();
+      return String(value || '')
+        .split(/[\r\n,;|]+/)
+        .map((entry) => entry.trim().toLowerCase())
+        .filter((entry) => {
+          if (!entry || seen.has(entry)) return false;
+          seen.add(entry);
+          return true;
+        });
+    }
+
+    function matchesFilterValues(values, filters) {
+      if (!filters.length) return true;
+      return values.some((value) => filters.includes(String(value || '').trim().toLowerCase()));
     }
 
     function jsonOrEmpty(text) {
@@ -1512,6 +1610,8 @@ Thank you,
         full_name: document.getElementById('contactFullName').value,
         work_location: document.getElementById('contactLocation').value,
         work_group: document.getElementById('contactWorkGroup').value,
+        group_name: document.getElementById('contactGroupName').value,
+        subgroup_name: document.getElementById('contactSubgroupName').value,
         department: document.getElementById('contactDepartment').value,
         bargaining_unit: document.getElementById('contactBargainingUnit').value,
         local_number: document.getElementById('contactLocalNumber').value,
@@ -1544,6 +1644,8 @@ Thank you,
         timezone: document.getElementById('stopTimezone').value,
         audience_location: document.getElementById('stopAudienceLocation').value,
         audience_work_group: document.getElementById('stopAudienceWorkGroup').value,
+        audience_group_name: document.getElementById('stopAudienceGroupName').value,
+        audience_subgroup_name: document.getElementById('stopAudienceSubgroupName').value,
         audience_status_bucket: document.getElementById('stopAudienceStatusBucket').value || null,
         notice_subject: document.getElementById('stopNoticeSubject').value,
         reminder_subject: document.getElementById('stopReminderSubject').value,
@@ -1553,9 +1655,139 @@ Thank you,
       };
     }
 
+    function uniqueContactValues(...fieldNames) {
+      const seen = new Set();
+      const values = [];
+      (state.contacts || []).forEach((row) => {
+        fieldNames.forEach((fieldName) => {
+          const value = String(row[fieldName] || '').trim();
+          if (!value) return;
+          const key = value.toLowerCase();
+          if (seen.has(key)) return;
+          seen.add(key);
+          values.push(value);
+        });
+      });
+      return values.sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }));
+    }
+
+    function renderContactValueOptions() {
+      const groupValues = uniqueContactValues('group_name', 'work_group');
+      const subgroupValues = uniqueContactValues('subgroup_name', 'department');
+      setHtml('knownGroupOptions', groupValues.map((value) => `<option value="${escapeHtml(value)}"></option>`).join(''));
+      setHtml('knownSubgroupOptions', subgroupValues.map((value) => `<option value="${escapeHtml(value)}"></option>`).join(''));
+    }
+
+    function contactSortValue(row, fieldName) {
+      if (fieldName === 'full_name') return row.full_name || row.first_name || row.last_name || row.email || '';
+      if (fieldName === 'status_bucket') return row.status_bucket || [row.membership_type, row.employment_status, row.status_detail].filter(Boolean).join(' - ');
+      if (fieldName === 'updated_at_utc') return row.updated_at_utc || '';
+      return row[fieldName] || '';
+    }
+
+    function updateComposeContactSortState() {
+      const fieldNode = document.getElementById('composeContactSortField');
+      const directionNode = document.getElementById('composeContactSortDirection');
+      const searchNode = document.getElementById('composeContactSearch');
+      const groupNode = document.getElementById('composeContactGroupFilter');
+      const subgroupNode = document.getElementById('composeContactSubgroupFilter');
+      if (fieldNode && CONTACT_SORT_FIELDS.has(fieldNode.value || '')) {
+        state.composeContactSort.field = fieldNode.value;
+      }
+      if (directionNode && ['asc', 'desc'].includes(directionNode.value || '')) {
+        state.composeContactSort.direction = directionNode.value;
+      }
+      if (searchNode) {
+        state.composeContactSort.search = searchNode.value || '';
+      }
+      if (groupNode) {
+        state.composeContactSort.group_name = groupNode.value || '';
+      }
+      if (subgroupNode) {
+        state.composeContactSort.subgroup_name = subgroupNode.value || '';
+      }
+    }
+
+    function searchableContactText(row) {
+      return [
+        row.full_name,
+        row.first_name,
+        row.last_name,
+        row.email,
+        row.work_location,
+        row.work_group,
+        row.group_name,
+        row.subgroup_name,
+        row.department,
+        row.bargaining_unit,
+        row.local_number,
+        row.steward_name,
+        row.rep_name,
+        row.status_bucket,
+        row.membership_type,
+        row.employment_status,
+        row.status_detail,
+        row.source,
+      ].filter(Boolean).join(' ').toLowerCase();
+    }
+
+    function sortedComposeContacts() {
+      updateComposeContactSortState();
+      const sortField = state.composeContactSort.field || 'full_name';
+      const sortDirection = state.composeContactSort.direction === 'desc' ? 'desc' : 'asc';
+      const search = (state.composeContactSort.search || '').trim().toLowerCase();
+      const groupFilters = splitFilterValues(state.composeContactSort.group_name || '');
+      const subgroupFilters = splitFilterValues(state.composeContactSort.subgroup_name || '');
+      const rows = [...(state.contacts || [])]
+        .filter((row) => matchesFilterValues([row.group_name, row.work_group], groupFilters))
+        .filter((row) => matchesFilterValues([row.subgroup_name, row.department], subgroupFilters))
+        .filter((row) => !search || searchableContactText(row).includes(search))
+        .sort((left, right) => {
+          const leftValue = String(contactSortValue(left, sortField)).toLowerCase();
+          const rightValue = String(contactSortValue(right, sortField)).toLowerCase();
+          const compared = leftValue.localeCompare(rightValue, undefined, { numeric: true, sensitivity: 'base' });
+          if (compared !== 0) return sortDirection === 'desc' ? -compared : compared;
+          return String(left.email || '').localeCompare(String(right.email || ''), undefined, { numeric: true, sensitivity: 'base' });
+        });
+      return rows;
+    }
+
+    function contactOptionLabel(row) {
+      const locationBits = [row.work_location, row.work_group, row.group_name, row.subgroup_name].filter(Boolean).join(' / ');
+      const statusText = row.status_bucket || [row.membership_type, row.employment_status, row.status_detail].filter(Boolean).join(' / ');
+      const detailBits = [locationBits, statusText].filter(Boolean).join(' • ');
+      return detailBits
+        ? `${row.full_name || row.email || ''} - ${row.email || ''} - ${detailBits}`
+        : `${row.full_name || row.email || ''} - ${row.email || ''}`;
+    }
+
+    function renderComposeContactSortNote(sortedRows) {
+      const rows = Array.isArray(sortedRows) ? sortedRows : sortedComposeContacts();
+      const fieldLabel = document.getElementById('composeContactSortField') ? document.getElementById('composeContactSortField').selectedOptions[0].textContent : 'Name';
+      const directionLabel = state.composeContactSort.direction === 'desc' ? 'descending' : 'ascending';
+      const searchText = (state.composeContactSort.search || '').trim();
+      const groupText = (state.composeContactSort.group_name || '').trim();
+      const subgroupText = (state.composeContactSort.subgroup_name || '').trim();
+      const filters = [
+        searchText ? `search "${searchText}"` : '',
+        groupText ? `group "${groupText}"` : '',
+        subgroupText ? `subgroup "${subgroupText}"` : '',
+      ].filter(Boolean).join(', ');
+      setNote(
+        'composeContactSortNote',
+        `${rows.length} saved contacts available for send selection, sorted by ${fieldLabel} (${directionLabel})${filters ? ` and filtered by ${filters}` : ''}.`,
+        'info',
+      );
+    }
+
     function filteredContacts() {
       const selectedBucket = document.getElementById('contactStatusBucketFilter').value || '';
-      return (state.contacts || []).filter((row) => !selectedBucket || row.status_bucket === selectedBucket);
+      const selectedGroups = splitFilterValues(document.getElementById('contactGroupFilter').value || '');
+      const selectedSubgroups = splitFilterValues(document.getElementById('contactSubgroupFilter').value || '');
+      return (state.contacts || [])
+        .filter((row) => !selectedBucket || row.status_bucket === selectedBucket)
+        .filter((row) => matchesFilterValues([row.group_name, row.work_group], selectedGroups))
+        .filter((row) => matchesFilterValues([row.subgroup_name, row.department], selectedSubgroups));
     }
 
     function renderContactBucketCounts() {
@@ -1573,13 +1805,15 @@ Thank you,
     function renderContacts() {
       const rows = filteredContacts();
       setHtml('contactsTable',
-        '<tr><th>Email</th><th>Name</th><th>Location</th><th>Work Group</th><th>Status Bucket</th><th>Status Detail</th><th>Source</th><th>Record</th></tr>' +
+        '<tr><th>Email</th><th>Name</th><th>Location</th><th>Work Group</th><th>Group</th><th>Subgroup</th><th>Status Bucket</th><th>Status Detail</th><th>Source</th><th>Record</th></tr>' +
         rows.map((row) => `
           <tr data-contact-id="${escapeHtml(row.id)}">
             <td>${escapeHtml(row.email || '')}</td>
             <td>${escapeHtml(row.full_name || row.first_name || '')}</td>
             <td>${escapeHtml(row.work_location || '')}</td>
             <td>${escapeHtml(row.work_group || '')}</td>
+            <td>${escapeHtml(row.group_name || '')}</td>
+            <td>${escapeHtml(row.subgroup_name || '')}</td>
             <td>${row.status_bucket ? `<span class="pill">${escapeHtml(row.status_bucket)}</span>` : ''}</td>
             <td>${escapeHtml([row.membership_type, row.employment_status, row.status_detail].filter(Boolean).join(' / '))}</td>
             <td>${escapeHtml(row.source || '')}</td>
@@ -1612,7 +1846,7 @@ Thank you,
       setHtml('stopsTable',
         '<tr><th>Location</th><th>Visit</th><th>Audience</th><th>Notice Send</th><th>Reminder Send</th><th>Status</th></tr>' +
         (state.stops || []).map((row) => {
-          const audienceParts = [row.audience_location, row.audience_work_group, row.audience_status_bucket].filter(Boolean);
+          const audienceParts = [row.audience_location, row.audience_work_group, row.audience_group_name, row.audience_subgroup_name, row.audience_status_bucket].filter(Boolean);
           return `
             <tr data-stop-id="${escapeHtml(row.id)}">
               <td>${escapeHtml(row.location_name || '')}</td>
@@ -1675,8 +1909,10 @@ Thank you,
     }
 
     function refreshSelects() {
+      const sortedContactRows = sortedComposeContacts();
+      renderContactValueOptions();
       const contactOptions = ['<option value="">No saved contact</option>']
-        .concat((state.contacts || []).map((row) => `<option value="${escapeHtml(row.id)}">${escapeHtml(row.full_name || row.email || '')}</option>`))
+        .concat(sortedContactRows.map((row) => `<option value="${escapeHtml(row.id)}">${escapeHtml(contactOptionLabel(row))}</option>`))
         .join('');
       const templateOptions = (state.templates || []).map((row) => `<option value="${escapeHtml(row.id)}">${escapeHtml(row.name || '')}</option>`).join('');
       const stopOptions = (state.stops || []).map((row) => `<option value="${escapeHtml(row.id)}">${escapeHtml(`${row.location_name || ''} ${row.visit_date_local || ''}`)}</option>`).join('');
@@ -1699,6 +1935,7 @@ Thank you,
       setSelectValueIfPresent('previewStopId', state.selectedStopId);
       setSelectValueIfPresent('oneOffStopId', state.selectedStopId);
       setSelectValueIfPresent('quickMessageStopId', state.selectedStopId);
+      renderComposeContactSortNote(sortedContactRows);
     }
 
     function selectContact(contactId) {
@@ -1711,6 +1948,8 @@ Thank you,
       document.getElementById('contactFullName').value = row.full_name || '';
       document.getElementById('contactLocation').value = row.work_location || '';
       document.getElementById('contactWorkGroup').value = row.work_group || '';
+      document.getElementById('contactGroupName').value = row.group_name || '';
+      document.getElementById('contactSubgroupName').value = row.subgroup_name || '';
       document.getElementById('contactDepartment').value = row.department || '';
       document.getElementById('contactBargainingUnit').value = row.bargaining_unit || '';
       document.getElementById('contactLocalNumber').value = row.local_number || '';
@@ -1751,6 +1990,8 @@ Thank you,
       document.getElementById('stopTimezone').value = row.timezone || 'America/New_York';
       document.getElementById('stopAudienceLocation').value = row.audience_location || '';
       document.getElementById('stopAudienceWorkGroup').value = row.audience_work_group || '';
+      document.getElementById('stopAudienceGroupName').value = row.audience_group_name || '';
+      document.getElementById('stopAudienceSubgroupName').value = row.audience_subgroup_name || '';
       document.getElementById('stopAudienceStatusBucket').value = row.audience_status_bucket || '';
       document.getElementById('stopNoticeSubject').value = row.notice_subject || '';
       document.getElementById('stopReminderSubject').value = row.reminder_subject || '';
@@ -1765,7 +2006,7 @@ Thank you,
 
     function clearContactForm() {
       state.selectedContactId = null;
-      ['contactEmail','contactFirstName','contactLastName','contactFullName','contactLocation','contactWorkGroup','contactDepartment','contactBargainingUnit','contactLocalNumber','contactStewardName','contactRepName','contactNotes','contactSource','contactExtraFields'].forEach((id) => {
+      ['contactEmail','contactFirstName','contactLastName','contactFullName','contactLocation','contactWorkGroup','contactGroupName','contactSubgroupName','contactDepartment','contactBargainingUnit','contactLocalNumber','contactStewardName','contactRepName','contactNotes','contactSource','contactExtraFields'].forEach((id) => {
         document.getElementById(id).value = '';
       });
       document.getElementById('contactActive').value = 'true';
@@ -1786,7 +2027,7 @@ Thank you,
 
     function clearStopForm() {
       state.selectedStopId = null;
-      ['stopLocationName','stopVisitDate','stopStartTime','stopEndTime','stopAudienceLocation','stopAudienceWorkGroup','stopNoticeSubject','stopReminderSubject','stopNoticeSendLocal','stopReminderSendLocal'].forEach((id) => {
+      ['stopLocationName','stopVisitDate','stopStartTime','stopEndTime','stopAudienceLocation','stopAudienceWorkGroup','stopAudienceGroupName','stopAudienceSubgroupName','stopNoticeSubject','stopReminderSubject','stopNoticeSendLocal','stopReminderSendLocal'].forEach((id) => {
         document.getElementById(id).value = '';
       });
       document.getElementById('stopAudienceStatusBucket').value = '';
@@ -1802,6 +2043,8 @@ Thank you,
         full_name: document.getElementById('oneOffFullName').value || null,
         work_location: document.getElementById('oneOffWorkLocation').value || null,
         work_group: document.getElementById('oneOffWorkGroup').value || null,
+        group_name: document.getElementById('oneOffGroupName').value || null,
+        subgroup_name: document.getElementById('oneOffSubgroupName').value || null,
         department: document.getElementById('oneOffDepartment').value || null,
         bargaining_unit: document.getElementById('oneOffBargainingUnit').value || null,
         local_number: document.getElementById('oneOffLocalNumber').value || null,
@@ -1812,7 +2055,7 @@ Thank you,
     }
 
     function clearOneOffForm() {
-      ['oneOffFirstName','oneOffLastName','oneOffFullName','oneOffWorkLocation','oneOffWorkGroup','oneOffDepartment','oneOffBargainingUnit','oneOffLocalNumber','oneOffStewardName','oneOffRepName','oneOffExtraFields'].forEach((id) => {
+      ['oneOffFirstName','oneOffLastName','oneOffFullName','oneOffWorkLocation','oneOffWorkGroup','oneOffGroupName','oneOffSubgroupName','oneOffDepartment','oneOffBargainingUnit','oneOffLocalNumber','oneOffStewardName','oneOffRepName','oneOffExtraFields'].forEach((id) => {
         document.getElementById(id).value = '';
       });
       document.getElementById('oneOffRecipientEmail').value = 'ncraig@cwa3106.com';
@@ -2136,6 +2379,23 @@ Thank you,
 
     document.getElementById('clearContactBtn').addEventListener('click', clearContactForm);
     document.getElementById('contactStatusBucketFilter').addEventListener('change', renderContacts);
+    document.getElementById('contactGroupFilter').addEventListener('input', renderContacts);
+    document.getElementById('contactSubgroupFilter').addEventListener('input', renderContacts);
+    document.getElementById('composeContactSortField').addEventListener('change', () => {
+      refreshSelects();
+    });
+    document.getElementById('composeContactSortDirection').addEventListener('change', () => {
+      refreshSelects();
+    });
+    document.getElementById('composeContactSearch').addEventListener('input', () => {
+      refreshSelects();
+    });
+    document.getElementById('composeContactGroupFilter').addEventListener('input', () => {
+      refreshSelects();
+    });
+    document.getElementById('composeContactSubgroupFilter').addEventListener('input', () => {
+      refreshSelects();
+    });
 
     document.getElementById('inspectImportBtn').addEventListener('click', async () => {
       await runAction('importResult', inspectImportFile, 'Inspecting file…');
@@ -2367,6 +2627,8 @@ Thank you,
       document.getElementById('oneOffFullName').value = row.full_name || '';
       document.getElementById('oneOffWorkLocation').value = row.work_location || '';
       document.getElementById('oneOffWorkGroup').value = row.work_group || '';
+      document.getElementById('oneOffGroupName').value = row.group_name || '';
+      document.getElementById('oneOffSubgroupName').value = row.subgroup_name || '';
       document.getElementById('oneOffDepartment').value = row.department || '';
       document.getElementById('oneOffBargainingUnit').value = row.bargaining_unit || '';
       document.getElementById('oneOffLocalNumber').value = row.local_number || '';

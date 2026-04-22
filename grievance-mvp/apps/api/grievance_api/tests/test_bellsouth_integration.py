@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from fastapi import HTTPException
 
@@ -21,6 +24,7 @@ from grievance_api.web.routes_intake import (
     _validate_existing_folder_mode,
     _preferred_signer_email_for_doc,
     _resolve_document_command,
+    _upload_generated_pdf_to_case_folder,
 )
 from grievance_api.services.staged_signature_workflow import is_3g3a_staged
 
@@ -131,6 +135,55 @@ class BellSouthCommandTests(unittest.TestCase):
                 DocumentRequest(doc_type="bellsouth_meeting_request", template_key="bellsouth_formal_grievance_meeting_request")
             )
         )
+
+
+class _UploadGraphStub:
+    def __init__(self) -> None:
+        self.upload_calls: list[dict[str, object]] = []
+
+    def upload_to_case_subfolder(self, **kwargs):  # noqa: ANN003
+        self.upload_calls.append(dict(kwargs))
+        filename = str(kwargs["filename"])
+        return SimpleNamespace(
+            path=f"/Documents/Grievances/Generated/{filename}",
+            web_url=f"https://sharepoint.local/{filename}",
+        )
+
+
+class GeneratedUploadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_upload_generated_pdf_to_case_folder_records_sharepoint_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_path = Path(tmpdir) / "generated.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 test")
+
+            db = SimpleNamespace(add_event=AsyncMock())
+            graph = _UploadGraphStub()
+            cfg = SimpleNamespace(
+                graph=SimpleNamespace(
+                    site_hostname="contoso.sharepoint.com",
+                    site_path="/sites/Grievances",
+                    document_library="Documents",
+                    case_parent_folder="Grievances",
+                    generated_subfolder="Generated",
+                )
+            )
+
+            url = await _upload_generated_pdf_to_case_folder(
+                cfg=cfg,
+                db=db,
+                graph=graph,
+                case_id="C2026001",
+                document_id="D2026001",
+                doc_type="data_request_letterhead",
+                sharepoint_case_folder="2026001 John Doe",
+                pdf_path=str(pdf_path),
+            )
+
+        self.assertEqual(url, "https://sharepoint.local/data_request_letterhead_D2026001.pdf")
+        self.assertEqual(len(graph.upload_calls), 1)
+        self.assertEqual(graph.upload_calls[0]["case_folder_name"], "2026001 John Doe")
+        self.assertEqual(graph.upload_calls[0]["subfolder"], "Generated")
+        db.add_event.assert_awaited_once()
 
     def test_bellsouth_is_not_staged_3g3a(self) -> None:
         cfg = SimpleNamespace(

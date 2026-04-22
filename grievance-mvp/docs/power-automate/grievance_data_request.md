@@ -13,7 +13,7 @@ Core fields:
 - Contract -> `contract`
 - Grievant first name -> `grievant_firstname`
 - Grievant last name -> `grievant_lastname`
-- Grievant email -> `grievant_email`
+- Grievant email -> `grievant_email` (optional for this unsigned document)
 - Narrative -> `narrative`
 
 Template-specific (`template_data`):
@@ -38,7 +38,7 @@ Template-specific (`template_data`):
   "contract": "<contract>",
   "grievant_firstname": "<first>",
   "grievant_lastname": "<last>",
-  "grievant_email": "<email>",
+  "grievant_email": "<email or blank>",
   "narrative": "Data request generated from intake",
   "template_data": {
     "articles": "<articles>",
@@ -65,3 +65,4 @@ Template-specific (`template_data`):
 
 - This form is generated as a regular file.
 - It does not require signature routing.
+- `grievant_email` may be omitted or left blank because the template does not render it and no signer is assigned.

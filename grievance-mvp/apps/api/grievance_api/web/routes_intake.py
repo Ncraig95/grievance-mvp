@@ -1001,6 +1001,56 @@ async def _mirror_failed_archive_to_sharepoint(
     )
 
 
+async def _upload_generated_pdf_to_case_folder(
+    *,
+    cfg,  # noqa: ANN001
+    db: Db,
+    graph,  # noqa: ANN001
+    case_id: str,
+    document_id: str,
+    doc_type: str,
+    sharepoint_case_folder: str | None,
+    pdf_path: str,
+) -> str | None:
+    graph_cfg = getattr(cfg, "graph", None)
+    generated_pdf = Path(str(pdf_path or "").strip())
+    if (
+        graph is None
+        or graph_cfg is None
+        or not sharepoint_case_folder
+        or not getattr(graph_cfg, "site_hostname", "")
+        or not getattr(graph_cfg, "site_path", "")
+        or not getattr(graph_cfg, "document_library", "")
+        or not generated_pdf.exists()
+        or not generated_pdf.is_file()
+    ):
+        return None
+
+    upload_name = f"{doc_type}_{document_id}.pdf"
+    uploaded_generated = graph.upload_to_case_subfolder(
+        site_hostname=graph_cfg.site_hostname,
+        site_path=graph_cfg.site_path,
+        library=graph_cfg.document_library,
+        case_folder_name=sharepoint_case_folder,
+        case_parent_folder=graph_cfg.case_parent_folder,
+        subfolder=graph_cfg.generated_subfolder,
+        filename=upload_name,
+        file_bytes=generated_pdf.read_bytes(),
+    )
+    await db.add_event(
+        case_id,
+        document_id,
+        "sharepoint_generated_uploaded",
+        {
+            "filename": upload_name,
+            "subfolder": graph_cfg.generated_subfolder,
+            "path": uploaded_generated.path,
+            "web_url": uploaded_generated.web_url,
+        },
+    )
+    return uploaded_generated.web_url
+
+
 def _normalize_name_fields(raw_payload: dict[str, object]) -> dict[str, object]:
     out = dict(raw_payload)
     first = str(out.get("grievant_firstname", "") or "").strip()
@@ -2085,6 +2135,35 @@ async def intake(request: Request):
                 event_type = "no_signature_auto_approved"
             await db.exec("UPDATE documents SET status=? WHERE id=?", (status, document_id))
             await db.add_event(case_id, document_id, event_type, {})
+            if status == "approved":
+                try:
+                    generated_link = await _upload_generated_pdf_to_case_folder(
+                        cfg=cfg,
+                        db=db,
+                        graph=graph,
+                        case_id=case_id,
+                        document_id=document_id,
+                        doc_type=doc_type,
+                        sharepoint_case_folder=sharepoint_case_folder,
+                        pdf_path=pdf_path,
+                    )
+                except Exception as exc:
+                    await db.add_event(
+                        case_id,
+                        document_id,
+                        "sharepoint_generated_upload_failed",
+                        {"doc_type": doc_type, "error": str(exc)},
+                    )
+                    logger.exception(
+                        "sharepoint_generated_upload_failed",
+                        extra={"correlation_id": correlation_id, "document_id": document_id, "doc_type": doc_type},
+                    )
+                else:
+                    if generated_link:
+                        await db.exec(
+                            "UPDATE documents SET sharepoint_generated_url=? WHERE id=?",
+                            (generated_link, document_id),
+                        )
 
         doc_statuses.append(
             DocumentStatus(document_id=document_id, doc_type=doc_type, status=status, signing_link=signing_link)

@@ -312,6 +312,8 @@ CREATE TABLE IF NOT EXISTS outreach_contacts (
   full_name TEXT,
   work_location TEXT,
   work_group TEXT,
+  group_name TEXT,
+  subgroup_name TEXT,
   department TEXT,
   bargaining_unit TEXT,
   local_number TEXT,
@@ -338,6 +340,12 @@ ON outreach_contacts(work_location);
 
 CREATE INDEX IF NOT EXISTS idx_outreach_contacts_work_group
 ON outreach_contacts(work_group);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_contacts_group_name
+ON outreach_contacts(group_name);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_contacts_subgroup_name
+ON outreach_contacts(subgroup_name);
 
 CREATE INDEX IF NOT EXISTS idx_outreach_contacts_status_bucket
 ON outreach_contacts(status_bucket);
@@ -367,6 +375,8 @@ CREATE TABLE IF NOT EXISTS outreach_stops (
   timezone TEXT NOT NULL,
   audience_location TEXT,
   audience_work_group TEXT,
+  audience_group_name TEXT,
+  audience_subgroup_name TEXT,
   audience_status_bucket TEXT,
   notice_subject TEXT,
   reminder_subject TEXT,
@@ -388,6 +398,12 @@ ON outreach_stops(status, reminder_send_at_utc);
 
 CREATE INDEX IF NOT EXISTS idx_outreach_stops_status_bucket
 ON outreach_stops(status, audience_status_bucket);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_stops_group_name
+ON outreach_stops(status, audience_group_name);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_stops_subgroup_name
+ON outreach_stops(status, audience_subgroup_name);
 
 CREATE TABLE IF NOT EXISTS outreach_import_profiles (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

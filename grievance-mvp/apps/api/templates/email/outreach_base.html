@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <!--
+      Outreach email wrapper.
+      Available placeholders include: subject, sender_name, reply_to, unsubscribe_url,
+      content_html/body_html, body_text, and merge fields such as first_name, full_name,
+      location, visit_date, visit_time, and work_group.
+    -->
+    <meta charset="utf-8">
+    <meta http-equiv="x-ua-compatible" content="ie=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="x-apple-disable-message-reformatting">
+    <title>{{ subject }}</title>
+    <style type="text/css">
+      #outlook a { padding: 0; }
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100% !important;
+        background-color: #ffffff;
+        -webkit-text-size-adjust: 100%;
+        -ms-text-size-adjust: 100%;
+      }
+      table {
+        border-collapse: collapse;
+        mso-table-lspace: 0pt;
+        mso-table-rspace: 0pt;
+      }
+      td { border-collapse: collapse; }
+      img {
+        border: 0;
+        outline: none;
+        text-decoration: none;
+        -ms-interpolation-mode: bicubic;
+        max-width: 100%;
+        height: auto;
+      }
+      a img { border: none; }
+      p { margin: 1em 0; }
+      .container { width: 100%; max-width: 680px; }
+      .body-copy {
+        color: #505050;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 16px;
+        line-height: 1.6;
+        text-align: left;
+      }
+      .headline {
+        color: #c8102e;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 30px;
+        line-height: 1.15;
+        font-weight: 700;
+        margin: 0 0 20px 0;
+      }
+      .footer-box {
+        background-color: #e1e1e1;
+        color: #101010;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      .small-footer {
+        color: #707070;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 11px;
+        line-height: 1.45;
+        text-align: left;
+      }
+      @media only screen and (max-width: 640px) {
+        .headline { font-size: 26px !important; }
+        .body-copy { font-size: 15px !important; }
+        .content-pad { padding: 12px 16px 28px 16px !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">
+      {{ subject }}
+    </div>
+    <center>
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;background-color:#ffffff;">
+        <tr>
+          <td align="center" valign="top">
+            <table role="presentation" class="container" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:680px;">
+              <tr>
+                <td class="content-pad" style="padding:12px 12px 36px 12px;">
+                  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                    <tr>
+                      <td align="center" style="padding:12px 0 18px 0;font-family:Arial, Helvetica, sans-serif;">
+                        <p style="margin:0 0 10px 0;text-align:center;">
+                          <a href="https://cwa-3106.org" target="_blank" style="text-decoration:none;">
+                            <img
+                              src="https://grievance.cwa3106.org/static/email/cwa-logo.svg"
+                              alt="CWA Local 3106"
+                              width="170"
+                              style="display:block;margin:0 auto 8px auto;"
+                            >
+                          </a>
+                        </p>
+                        <div style="margin:0 1em;color:#c8102e;font-size:18px;font-weight:700;font-family:Arial, Helvetica, sans-serif;">
+                          {{ sender_name | default('CWA Local 3106') }}
+                        </div>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td class="body-copy" style="font-family:Arial, Helvetica, sans-serif;color:#505050;font-size:16px;line-height:1.6;text-align:left;">
+                        <h1 class="headline" style="color:#c8102e;font-size:30px;line-height:1.15;font-weight:700;margin:0 0 20px 0;font-family:Arial, Helvetica, sans-serif;">
+                          {{ subject }}
+                        </h1>
+                        {{ content_html }}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td style="padding-top:20px;">
+                        <table role="presentation" class="footer-box" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#e1e1e1;">
+                          <tr>
+                            <td align="center" style="padding:18px 16px;color:#101010;font-family:Arial, Helvetica, sans-serif;font-size:13px;line-height:1.5;">
+                              <div style="font-size:20px;font-weight:700;margin-bottom:8px;color:#c8102e;">
+                                CWA Local 3106
+                              </div>
+                              <div style="margin-bottom:8px;">
+                                4076 Union Hall Pl<br>
+                                Jacksonville, FL 32205
+                              </div>
+                              <div style="font-size:15px;font-weight:700;margin-bottom:8px;">
+                                <a href="https://cwa-3106.org" target="_blank" style="color:#c8102e;text-decoration:none;font-weight:700;">
+                                  cwa-3106.org
+                                </a>
+                              </div>
+                              <div style="margin-bottom:8px;">
+                                Hall Phone:
+                                <a href="tel:+19043842222" style="color:#101010;text-decoration:none;font-weight:700;">
+                                  (904) 384-2222
+                                </a>
+                              </div>
+                              {% if reply_to %}
+                              <div>
+                                Reply to:
+                                <a href="mailto:{{ reply_to }}" style="color:#101010;text-decoration:underline;">{{ reply_to }}</a>
+                              </div>
+                              {% endif %}
+                            </td>
+                          </tr>
+                        </table>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td class="small-footer" style="padding:14px 4px 0 4px;color:#707070;font-family:Arial, Helvetica, sans-serif;font-size:11px;line-height:1.45;text-align:left;">
+                        You are receiving this message from CWA Local 3106 outreach.
+                        <br>
+                        To stop receiving emails,
+                        <a href="{{ unsubscribe_url }}" style="color:#0096db;text-decoration:underline;">click here to unsubscribe</a>.
+                        <br>
+                        If the link does not open, copy and paste this URL into your browser:
+                        <br>
+                        <a href="{{ unsubscribe_url }}" style="color:#0096db;text-decoration:underline;word-break:break-all;">{{ unsubscribe_url }}</a>
+                      </td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </center>
+  </body>
+</html>

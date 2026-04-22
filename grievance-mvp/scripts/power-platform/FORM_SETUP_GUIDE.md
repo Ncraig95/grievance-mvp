@@ -51,6 +51,7 @@ Use the detailed field-map docs under `grievance-mvp/docs/power-automate/` when 
 - This form requires an existing `grievance_id`.
 - `grievance_number` and `grievance_id` are the same identifier for this flow.
 - This form is generated as a regular file and does not use signature routing.
+- `grievant_email` is optional for this flow.
 - Generate a starter payload with:
   `.\New-GrievancePayloadTemplate.ps1 -FormKey grievance_data_request -OutputPath .\output\grievance_data_request.payload.json -Overwrite`
 
@@ -62,6 +63,7 @@ Use the detailed field-map docs under `grievance-mvp/docs/power-automate/` when 
 - This form requires an existing `grievance_id`.
 - `grievance_number` and `grievance_id` are the same identifier for this flow.
 - Use this for the unsigned cover letter that pairs with the signed grievance data request.
+- `grievant_email` is optional for this flow.
 - Generate a starter payload with:
   `.\New-GrievancePayloadTemplate.ps1 -FormKey data_request_letterhead -OutputPath .\output\data_request_letterhead.payload.json -Overwrite`
 

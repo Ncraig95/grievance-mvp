@@ -262,6 +262,10 @@ def migrate(db_path: str) -> None:
         _ensure_column(con, "documents", "sharepoint_signed_url", "TEXT")
         _ensure_column(con, "documents", "sharepoint_audit_url", "TEXT")
         _ensure_column(con, "documents", "audit_backup_locations_json", "TEXT")
+        _ensure_column(con, "outreach_contacts", "group_name", "TEXT")
+        _ensure_column(con, "outreach_contacts", "subgroup_name", "TEXT")
+        _ensure_column(con, "outreach_stops", "audience_group_name", "TEXT")
+        _ensure_column(con, "outreach_stops", "audience_subgroup_name", "TEXT")
 
         _ensure_column(con, "standalone_submissions", "request_id", "TEXT")
         _ensure_column(con, "standalone_submissions", "form_key", "TEXT")
@@ -390,7 +394,11 @@ def migrate(db_path: str) -> None:
                 "ON external_steward_case_assignments(case_id)"
             ),
             "CREATE INDEX IF NOT EXISTS idx_outreach_contacts_status_bucket ON outreach_contacts(status_bucket)",
+            "CREATE INDEX IF NOT EXISTS idx_outreach_contacts_group_name ON outreach_contacts(group_name)",
+            "CREATE INDEX IF NOT EXISTS idx_outreach_contacts_subgroup_name ON outreach_contacts(subgroup_name)",
             "CREATE INDEX IF NOT EXISTS idx_outreach_stops_status_bucket ON outreach_stops(status, audience_status_bucket)",
+            "CREATE INDEX IF NOT EXISTS idx_outreach_stops_group_name ON outreach_stops(status, audience_group_name)",
+            "CREATE INDEX IF NOT EXISTS idx_outreach_stops_subgroup_name ON outreach_stops(status, audience_subgroup_name)",
         ]
         for stmt in index_sql:
             try:

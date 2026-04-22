@@ -1073,6 +1073,9 @@ _FORM_OVERRIDES: dict[str, dict[str, object]] = {
             "grievant_name": _full_name,
             "today_date": _today_iso,
         },
+        "optional_fields": {
+            "grievant_email",
+        },
     },
     "data_request_letterhead": {
         "description": "Submit a data request cover letter against an existing grievance folder.",
@@ -1083,6 +1086,7 @@ _FORM_OVERRIDES: dict[str, dict[str, object]] = {
             "today_date": _today_iso,
         },
         "optional_fields": {
+            "grievant_email",
             "company_rep_email",
             "company_rep_title",
             "approver_block",

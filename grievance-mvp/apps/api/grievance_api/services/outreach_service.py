@@ -10,6 +10,7 @@ import html
 from io import BytesIO, StringIO
 import json
 import logging
+from pathlib import Path
 import re
 import secrets
 from typing import Any
@@ -18,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 import aiosqlite
 from jinja2 import ChainableUndefined, Environment, meta
+from markupsafe import Markup
 from openpyxl import load_workbook
 
 from ..core.config import EmailConfig, OfficerAuthConfig, OutreachConfig
@@ -29,6 +31,8 @@ _BOOL_TRUE = {"1", "true", "yes", "y", "on"}
 _URL_RE = re.compile(r"(https?://[^\s<]+)")
 _HTML_HREF_RE = re.compile(r'href="([^"]+)"')
 _NORMALIZE_KEY_RE = re.compile(r"[^a-z0-9]+")
+_MULTI_VALUE_SPLIT_RE = re.compile(r"[\r\n,;|]+")
+_OUTREACH_HTML_TEMPLATE_FILENAME = "outreach_base.html"
 _STRONG_AUTOMATION_HINTS = (
     "barracuda",
     "mimecast",
@@ -62,6 +66,11 @@ _CONTACT_HEADER_ALIASES: dict[str, str] = {
     "work_location": "work_location",
     "workgroup": "work_group",
     "work_group": "work_group",
+    "group": "group_name",
+    "group_name": "group_name",
+    "subgroup": "subgroup_name",
+    "sub_group": "subgroup_name",
+    "subgroup_name": "subgroup_name",
     "department": "department",
     "bargaining_unit": "bargaining_unit",
     "bargainingunit": "bargaining_unit",
@@ -83,11 +92,53 @@ _IMPORT_FIELD_KEYS: tuple[str, ...] = (
     "full_name",
     "work_location",
     "work_group",
+    "group_name",
+    "subgroup_name",
     "department",
     "bargaining_unit",
     "local_number",
     "steward_name",
     "rep_name",
+)
+
+_GROUP_HEADER_PRIORITY: tuple[str, ...] = (
+    "group_name",
+    "group",
+    "work_group",
+    "workgroup",
+    "processing_unit",
+    "field_unit",
+    "unit",
+    "bargaining_unit",
+    "bargainingunit",
+    "member_department",
+    "department",
+    "field_department",
+    "branch",
+    "region",
+    "division",
+    "field_division",
+    "field_employer",
+    "work_location",
+    "customworklocation1",
+    "customworklocation2",
+)
+
+_SUBGROUP_HEADER_PRIORITY: tuple[str, ...] = (
+    "subgroup_name",
+    "subgroup",
+    "sub_group",
+    "division",
+    "field_division",
+    "member_department",
+    "department",
+    "field_department",
+    "branch",
+    "region",
+    "work_location",
+    "customworklocation1",
+    "customworklocation2",
+    "job_title_description",
 )
 
 _COMBINED_STATUS_HEADER_ALIASES: set[str] = {
@@ -139,6 +190,8 @@ _PLACEHOLDER_CATALOG: tuple[str, ...] = (
     "campaign_location",
     "work_location",
     "work_group",
+    "group_name",
+    "subgroup_name",
     "department",
     "bargaining_unit",
     "local_number",
@@ -217,6 +270,68 @@ _SEEDED_STOPS: tuple[dict[str, str], ...] = (
     {"location_name": "South Branch", "visit_date_local": "2026-05-21", "start_time_local": "15:00", "end_time_local": "16:30", "notice_subject": "South Branch Visit on May 21st", "reminder_subject": "South Branch Visit on May 21st"},
 )
 
+_DEFAULT_OUTREACH_HTML_TEMPLATE = """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ subject }}</title>
+  </head>
+  <body style="margin:0;padding:0;background-color:#f5efe6;">
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">
+      {{ subject }}
+    </div>
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;background-color:#f5efe6;">
+      <tr>
+        <td align="center" style="padding:24px 12px;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;max-width:680px;background-color:#ffffff;border:1px solid #d6d3d1;">
+            <tr>
+              <td style="padding:28px 32px 24px;background-color:#0f3d33;color:#f8fafc;font-family:Segoe UI,Tahoma,Geneva,Verdana,sans-serif;">
+                <div style="font-size:12px;line-height:1.4;letter-spacing:0.12em;text-transform:uppercase;opacity:0.88;">
+                  {{ sender_name | default('CWA Local 3106') }}
+                </div>
+                <div style="margin-top:10px;font-size:28px;line-height:1.2;font-weight:700;">
+                  {{ subject }}
+                </div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:32px 32px 18px;color:#1f2937;font-family:Segoe UI,Tahoma,Geneva,Verdana,sans-serif;font-size:16px;line-height:1.65;">
+                {{ content_html }}
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:0 32px 32px;font-family:Segoe UI,Tahoma,Geneva,Verdana,sans-serif;">
+                <table role="presentation" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
+                  <tr>
+                    <td style="border-radius:999px;background-color:#0f3d33;">
+                      <a href="{{ unsubscribe_url }}" style="display:inline-block;padding:12px 20px;color:#ffffff;font-size:14px;font-weight:700;text-decoration:none;">
+                        Unsubscribe
+                      </a>
+                    </td>
+                  </tr>
+                </table>
+                <p style="margin:18px 0 0;font-size:12px;line-height:1.6;color:#57534e;">
+                  If the button does not open, use this link:
+                  <br>
+                  <a href="{{ unsubscribe_url }}" style="color:#0f766e;text-decoration:underline;word-break:break-all;">{{ unsubscribe_url }}</a>
+                </p>
+                {% if reply_to %}
+                <p style="margin:14px 0 0;font-size:12px;line-height:1.6;color:#57534e;">
+                  Reply to
+                  <a href="mailto:{{ reply_to }}" style="color:#0f766e;text-decoration:underline;">{{ reply_to }}</a>
+                </p>
+                {% endif %}
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
+
 
 @dataclass(frozen=True)
 class OutreachRenderedMessage:
@@ -252,6 +367,28 @@ def _normalize_text(value: object) -> str:
 
 def _normalize_email(value: object) -> str:
     return _normalize_text(value).lower()
+
+
+def _normalize_text_list(value: object) -> list[str]:
+    seen: set[str] = set()
+    tokens: list[str] = []
+    for raw_token in _MULTI_VALUE_SPLIT_RE.split(_normalize_text(value)):
+        token = " ".join(_normalize_text(raw_token).split())
+        if not token:
+            continue
+        normalized_key = token.lower()
+        if normalized_key in seen:
+            continue
+        seen.add(normalized_key)
+        tokens.append(token)
+    return tokens
+
+
+def _normalize_text_list_value(value: object) -> str | None:
+    tokens = _normalize_text_list(value)
+    if not tokens:
+        return None
+    return ", ".join(tokens)
 
 
 def _full_name(first_name: str, last_name: str, fallback: str = "") -> str:
@@ -297,6 +434,11 @@ def _header_fingerprint(headers: list[str]) -> str:
 
 def _normalized_headers(headers: list[str]) -> list[str]:
     return [_normalize_key(header) for header in headers if _normalize_key(header)]
+
+
+def _header_value_stats(rows: list[dict[str, str]], header: str) -> tuple[int, int]:
+    nonblank_values = [_normalize_text(row.get(header)) for row in rows if _normalize_text(row.get(header))]
+    return len(nonblank_values), len({value for value in nonblank_values})
 
 
 def _sanitize_mapping_dict(raw_value: object) -> dict[str, str | None]:
@@ -556,6 +698,12 @@ class OutreachService:
             finalize=lambda value: "" if value is None else value,
         )
         self.env.filters["default"] = _jinja_default
+        self.html_env = Environment(
+            undefined=ChainableUndefined,
+            autoescape=True,
+            finalize=lambda value: "" if value is None else value,
+        )
+        self.html_env.filters["default"] = _jinja_default
 
     def placeholder_catalog(self) -> list[str]:
         return list(_PLACEHOLDER_CATALOG)
@@ -623,12 +771,12 @@ class OutreachService:
                 if await existing.fetchone():
                     continue
                 await con.execute(
-                    """
-                    INSERT INTO outreach_stops(
-                      location_name, visit_date_local, start_time_local, end_time_local, timezone,
-                      audience_location, audience_work_group, notice_subject, reminder_subject,
+                """
+                INSERT INTO outreach_stops(
+                  location_name, visit_date_local, start_time_local, end_time_local, timezone,
+                      audience_location, audience_work_group, audience_group_name, audience_subgroup_name, notice_subject, reminder_subject,
                       notice_send_at_utc, reminder_send_at_utc, status, created_at_utc, updated_at_utc
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         stop["location_name"],
@@ -637,6 +785,8 @@ class OutreachService:
                         stop["end_time_local"],
                         timezone_name,
                         stop["location_name"],
+                        None,
+                        None,
                         None,
                         stop["notice_subject"],
                         stop["reminder_subject"],
@@ -657,7 +807,7 @@ class OutreachService:
         rows = await self.db.fetchall(
             """
             SELECT id, email, first_name, last_name, full_name, work_location, work_group,
-                   department, bargaining_unit, local_number, steward_name, rep_name,
+                   group_name, subgroup_name, department, bargaining_unit, local_number, steward_name, rep_name,
                    membership_type, employment_status, status_detail, status_bucket, status_source_text,
                    active, notes, source, extra_fields_json, created_at_utc, updated_at_utc
             FROM outreach_contacts
@@ -715,22 +865,26 @@ class OutreachService:
         status_detail = _merged_text("status_detail") or None
         status_bucket = _merged_text("status_bucket") or None
         status_source_text = _merged_text("status_source_text") or None
+        group_name = _merged_text("group_name") or _merged_text("work_group") or None
+        subgroup_name = _merged_text("subgroup_name") or _merged_text("department") or None
         now = utcnow()
         if contact_id is None:
             await self.db.exec(
                 """
                 INSERT INTO outreach_contacts(
-                  email, first_name, last_name, full_name, work_location, work_group, department,
-                  bargaining_unit, local_number, steward_name, rep_name, membership_type,
+                  email, first_name, last_name, full_name, work_location, work_group, group_name, subgroup_name,
+                  department, bargaining_unit, local_number, steward_name, rep_name, membership_type,
                   employment_status, status_detail, status_bucket, status_source_text, active, notes,
                   source, extra_fields_json, created_at_utc, updated_at_utc
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(email) DO UPDATE SET
                   first_name=excluded.first_name,
                   last_name=excluded.last_name,
                   full_name=excluded.full_name,
                   work_location=excluded.work_location,
                   work_group=excluded.work_group,
+                  group_name=excluded.group_name,
+                  subgroup_name=excluded.subgroup_name,
                   department=excluded.department,
                   bargaining_unit=excluded.bargaining_unit,
                   local_number=excluded.local_number,
@@ -754,6 +908,8 @@ class OutreachService:
                     full_name,
                     _merged_text("work_location"),
                     _merged_text("work_group"),
+                    group_name,
+                    subgroup_name,
                     _merged_text("department"),
                     _merged_text("bargaining_unit"),
                     _merged_text("local_number"),
@@ -778,7 +934,7 @@ class OutreachService:
             await self.db.exec(
                 """
                 UPDATE outreach_contacts
-                SET email=?, first_name=?, last_name=?, full_name=?, work_location=?, work_group=?,
+                SET email=?, first_name=?, last_name=?, full_name=?, work_location=?, work_group=?, group_name=?, subgroup_name=?,
                     department=?, bargaining_unit=?, local_number=?, steward_name=?, rep_name=?,
                     membership_type=?, employment_status=?, status_detail=?, status_bucket=?, status_source_text=?,
                     active=?, notes=?, source=?, extra_fields_json=?, updated_at_utc=?
@@ -791,6 +947,8 @@ class OutreachService:
                     full_name,
                     _merged_text("work_location"),
                     _merged_text("work_group"),
+                    group_name,
+                    subgroup_name,
                     _merged_text("department"),
                     _merged_text("bargaining_unit"),
                     _merged_text("local_number"),
@@ -815,7 +973,7 @@ class OutreachService:
         row = await self.db.fetchone(
             """
             SELECT id, email, first_name, last_name, full_name, work_location, work_group,
-                   department, bargaining_unit, local_number, steward_name, rep_name,
+                   group_name, subgroup_name, department, bargaining_unit, local_number, steward_name, rep_name,
                    membership_type, employment_status, status_detail, status_bucket, status_source_text,
                    active, notes, source, extra_fields_json, created_at_utc, updated_at_utc
             FROM outreach_contacts
@@ -1003,6 +1161,44 @@ class OutreachService:
                 if any(checker(value) for value in _sample_values(header)):
                     return header
             return None
+
+        def _find_structural_header(priority_headers: tuple[str, ...]) -> str | None:
+            fallback: str | None = None
+            for normalized_header in priority_headers:
+                for header in sheet.headers:
+                    if header in used_headers:
+                        continue
+                    if _normalize_key(header) != normalized_header:
+                        continue
+                    nonblank_count, unique_count = _header_value_stats(sheet.rows, header)
+                    if nonblank_count <= 0:
+                        continue
+                    if unique_count > 1:
+                        return header
+                    if fallback is None:
+                        fallback = header
+            return fallback
+
+        if field_mapping["group_name"] is None:
+            field_mapping["group_name"] = _find_structural_header(_GROUP_HEADER_PRIORITY)
+            if field_mapping["group_name"]:
+                used_headers.add(field_mapping["group_name"])
+
+        if field_mapping["subgroup_name"] is None:
+            field_mapping["subgroup_name"] = _find_structural_header(_SUBGROUP_HEADER_PRIORITY)
+            if field_mapping["subgroup_name"]:
+                used_headers.add(field_mapping["subgroup_name"])
+
+        if field_mapping["group_name"] is None and field_mapping["work_group"] is not None:
+            field_mapping["group_name"] = field_mapping["work_group"]
+        if field_mapping["group_name"] is None and field_mapping["department"] is not None:
+            field_mapping["group_name"] = field_mapping["department"]
+        if (
+            field_mapping["subgroup_name"] is None
+            and field_mapping["department"] is not None
+            and field_mapping["department"] != field_mapping["group_name"]
+        ):
+            field_mapping["subgroup_name"] = field_mapping["department"]
 
         combined_header = _find_header_by_alias(_COMBINED_STATUS_HEADER_ALIASES)
         if combined_header is None:
@@ -1310,8 +1506,8 @@ class OutreachService:
         rows = await self.db.fetchall(
             """
             SELECT id, location_name, visit_date_local, start_time_local, end_time_local,
-                   timezone, audience_location, audience_work_group, audience_status_bucket,
-                   notice_subject, reminder_subject, notice_send_at_utc, reminder_send_at_utc,
+                   timezone, audience_location, audience_work_group, audience_group_name, audience_subgroup_name,
+                   audience_status_bucket, notice_subject, reminder_subject, notice_send_at_utc, reminder_send_at_utc,
                    status, created_at_utc, updated_at_utc
             FROM outreach_stops
             ORDER BY visit_date_local, start_time_local, lower(location_name)
@@ -1348,22 +1544,27 @@ class OutreachService:
                 tz_name=timezone_name,
             )
         )
+        audience_work_group = _normalize_text_list_value(payload.get("audience_work_group"))
+        audience_group_name = _normalize_text_list_value(payload.get("audience_group_name")) or audience_work_group
+        audience_subgroup_name = _normalize_text_list_value(payload.get("audience_subgroup_name"))
         now = utcnow()
         if stop_id is None:
             await self.db.exec(
                 """
                 INSERT INTO outreach_stops(
                   location_name, visit_date_local, start_time_local, end_time_local, timezone,
-                  audience_location, audience_work_group, audience_status_bucket, notice_subject,
+                  audience_location, audience_work_group, audience_group_name, audience_subgroup_name, audience_status_bucket, notice_subject,
                   reminder_subject, notice_send_at_utc, reminder_send_at_utc, status,
                   created_at_utc, updated_at_utc
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(location_name, visit_date_local) DO UPDATE SET
                   start_time_local=excluded.start_time_local,
                   end_time_local=excluded.end_time_local,
                   timezone=excluded.timezone,
                   audience_location=excluded.audience_location,
                   audience_work_group=excluded.audience_work_group,
+                  audience_group_name=excluded.audience_group_name,
+                  audience_subgroup_name=excluded.audience_subgroup_name,
                   audience_status_bucket=excluded.audience_status_bucket,
                   notice_subject=excluded.notice_subject,
                   reminder_subject=excluded.reminder_subject,
@@ -1379,7 +1580,9 @@ class OutreachService:
                     end_time_local,
                     timezone_name,
                     _normalize_text(payload.get("audience_location")),
-                    _normalize_text(payload.get("audience_work_group")),
+                    audience_work_group,
+                    audience_group_name,
+                    audience_subgroup_name or None,
                     _normalize_text(payload.get("audience_status_bucket")) or None,
                     _normalize_text(payload.get("notice_subject")),
                     _normalize_text(payload.get("reminder_subject")),
@@ -1400,7 +1603,8 @@ class OutreachService:
                 """
                 UPDATE outreach_stops
                 SET location_name=?, visit_date_local=?, start_time_local=?, end_time_local=?, timezone=?,
-                    audience_location=?, audience_work_group=?, audience_status_bucket=?, notice_subject=?,
+                    audience_location=?, audience_work_group=?, audience_group_name=?, audience_subgroup_name=?,
+                    audience_status_bucket=?, notice_subject=?,
                     reminder_subject=?, notice_send_at_utc=?, reminder_send_at_utc=?, status=?, updated_at_utc=?
                 WHERE id=?
                 """,
@@ -1411,7 +1615,9 @@ class OutreachService:
                     end_time_local,
                     timezone_name,
                     _normalize_text(payload.get("audience_location")),
-                    _normalize_text(payload.get("audience_work_group")),
+                    audience_work_group,
+                    audience_group_name,
+                    audience_subgroup_name or None,
                     _normalize_text(payload.get("audience_status_bucket")) or None,
                     _normalize_text(payload.get("notice_subject")),
                     _normalize_text(payload.get("reminder_subject")),
@@ -1428,8 +1634,8 @@ class OutreachService:
         row = await self.db.fetchone(
             """
             SELECT id, location_name, visit_date_local, start_time_local, end_time_local,
-                   timezone, audience_location, audience_work_group, audience_status_bucket,
-                   notice_subject, reminder_subject, notice_send_at_utc, reminder_send_at_utc,
+                   timezone, audience_location, audience_work_group, audience_group_name, audience_subgroup_name,
+                   audience_status_bucket, notice_subject, reminder_subject, notice_send_at_utc, reminder_send_at_utc,
                    status, created_at_utc, updated_at_utc
             FROM outreach_stops
             WHERE id=?
@@ -1922,9 +2128,9 @@ class OutreachService:
         due_rows = await self.db.fetchall(
             """
             SELECT id, location_name, visit_date_local, start_time_local, end_time_local, timezone,
-                   audience_location, audience_work_group, audience_status_bucket, notice_subject,
-                   reminder_subject, notice_send_at_utc, reminder_send_at_utc, status,
-                   created_at_utc, updated_at_utc
+                   audience_location, audience_work_group, audience_group_name, audience_subgroup_name,
+                   audience_status_bucket, notice_subject, reminder_subject, notice_send_at_utc,
+                   reminder_send_at_utc, status, created_at_utc, updated_at_utc
             FROM outreach_stops
             WHERE status='active'
               AND (notice_send_at_utc<=? OR reminder_send_at_utc<=?)
@@ -2065,7 +2271,7 @@ class OutreachService:
         params: list[Any] = []
         sql = """
             SELECT id, email, first_name, last_name, full_name, work_location, work_group,
-                   department, bargaining_unit, local_number, steward_name, rep_name,
+                   group_name, subgroup_name, department, bargaining_unit, local_number, steward_name, rep_name,
                    membership_type, employment_status, status_detail, status_bucket, status_source_text,
                    active, notes, source, extra_fields_json, created_at_utc, updated_at_utc
             FROM outreach_contacts
@@ -2074,9 +2280,21 @@ class OutreachService:
         if _normalize_text(stop_row["audience_location"]):
             sql += " AND lower(COALESCE(work_location, ''))=lower(?)"
             params.append(stop_row["audience_location"])
-        if _normalize_text(stop_row["audience_work_group"]):
-            sql += " AND lower(COALESCE(work_group, ''))=lower(?)"
-            params.append(stop_row["audience_work_group"])
+        work_group_filters = [token.lower() for token in _normalize_text_list(stop_row["audience_work_group"])]
+        if work_group_filters:
+            placeholders = ",".join("?" for _ in work_group_filters)
+            sql += f" AND lower(COALESCE(work_group, '')) IN ({placeholders})"
+            params.extend(work_group_filters)
+        group_filters = [token.lower() for token in _normalize_text_list(stop_row.get("audience_group_name"))]
+        if group_filters:
+            placeholders = ",".join("?" for _ in group_filters)
+            sql += f" AND lower(COALESCE(group_name, work_group, '')) IN ({placeholders})"
+            params.extend(group_filters)
+        subgroup_filters = [token.lower() for token in _normalize_text_list(stop_row.get("audience_subgroup_name"))]
+        if subgroup_filters:
+            placeholders = ",".join("?" for _ in subgroup_filters)
+            sql += f" AND lower(COALESCE(subgroup_name, department, '')) IN ({placeholders})"
+            params.extend(subgroup_filters)
         if _normalize_text(stop_row.get("audience_status_bucket")):
             sql += " AND lower(COALESCE(status_bucket, ''))=lower(?)"
             params.append(stop_row["audience_status_bucket"])
@@ -2580,6 +2798,8 @@ class OutreachService:
             "full_name",
             "work_location",
             "work_group",
+            "group_name",
+            "subgroup_name",
             "department",
             "bargaining_unit",
             "local_number",
@@ -2791,7 +3011,7 @@ class OutreachService:
         context["subject"] = subject
         body = self.env.from_string(template_row["body_template"]).render(context).strip()
         text_body = self._text_with_footer(body, unsubscribe_url)
-        html_body = self._html_from_text(body, unsubscribe_url)
+        html_body = self._html_from_text(body, unsubscribe_url, context=context)
         return OutreachRenderedMessage(
             subject=subject,
             text_body=text_body,
@@ -2838,6 +3058,8 @@ class OutreachService:
             "campaign_location": stop_row["location_name"],
             "work_location": _normalize_text(contact.get("work_location")),
             "work_group": _normalize_text(contact.get("work_group")),
+            "group_name": _normalize_text(contact.get("group_name")) or _normalize_text(contact.get("work_group")),
+            "subgroup_name": _normalize_text(contact.get("subgroup_name")) or _normalize_text(contact.get("department")),
             "department": _normalize_text(contact.get("department")),
             "bargaining_unit": _normalize_text(contact.get("bargaining_unit")),
             "local_number": _normalize_text(contact.get("local_number")),
@@ -2866,23 +3088,54 @@ class OutreachService:
     def _text_with_footer(self, body: str, unsubscribe_url: str) -> str:
         return f"{body.rstrip()}\n\nTo unsubscribe, visit:\n{unsubscribe_url}\n"
 
-    def _html_from_text(self, body: str, unsubscribe_url: str) -> str:
+    def _html_from_text(
+        self,
+        body: str,
+        unsubscribe_url: str,
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> str:
+        content_html = Markup(self._body_content_html(body))
+        wrapper_context = dict(context or {})
+        wrapper_context.update(
+            {
+                "body_text": body.rstrip(),
+                "body_html": content_html,
+                "content_html": content_html,
+                "unsubscribe_url": unsubscribe_url,
+            }
+        )
+        custom_template_path = Path(self.email_cfg.templates_dir) / _OUTREACH_HTML_TEMPLATE_FILENAME
+        if custom_template_path.exists():
+            try:
+                template_source = custom_template_path.read_text(encoding="utf-8")
+                return self.html_env.from_string(template_source).render(wrapper_context).strip()
+            except Exception:
+                self.logger.exception("outreach html wrapper render failed", extra={"template_path": str(custom_template_path)})
+        return self.html_env.from_string(_DEFAULT_OUTREACH_HTML_TEMPLATE).render(wrapper_context).strip()
+
+    def _body_content_html(self, body: str) -> str:
         paragraphs = []
         for block in re.split(r"\n{2,}", body.strip()):
-            escaped = html.escape(block).replace("\n", "<br>")
-            escaped = _URL_RE.sub(lambda match: f'<a href="{html.escape(match.group(1), quote=True)}">{html.escape(match.group(1))}</a>', escaped)
+            block = block.strip()
+            if not block:
+                continue
+            escaped = self._linkify_plain_text_html(block).replace("\n", "<br>")
             paragraphs.append(f"<p>{escaped}</p>")
-        footer = (
-            '<p style="font-size:12px;color:#4b5563;">'
-            f'To unsubscribe, <a href="{html.escape(unsubscribe_url, quote=True)}">click here</a>.'
-            "</p>"
-        )
-        return (
-            "<html><body style=\"font-family:Segoe UI,Tahoma,Geneva,Verdana,sans-serif;color:#1f2937;line-height:1.5;\">"
-            + "".join(paragraphs)
-            + footer
-            + "</body></html>"
-        )
+        return "".join(paragraphs)
+
+    def _linkify_plain_text_html(self, text: str) -> str:
+        rendered: list[str] = []
+        cursor = 0
+        for match in _URL_RE.finditer(text):
+            rendered.append(html.escape(text[cursor:match.start()]))
+            url = match.group(1)
+            safe_url = html.escape(url, quote=True)
+            safe_label = html.escape(url)
+            rendered.append(f'<a href="{safe_url}" style="color:#0f766e;text-decoration:underline;">{safe_label}</a>')
+            cursor = match.end()
+        rendered.append(html.escape(text[cursor:]))
+        return "".join(rendered)
 
     def _contact_row(self, row: tuple[Any, ...]) -> dict[str, Any]:
         return {
@@ -2893,22 +3146,24 @@ class OutreachService:
             "full_name": _normalize_text(row[4]),
             "work_location": _normalize_text(row[5]) or None,
             "work_group": _normalize_text(row[6]) or None,
-            "department": _normalize_text(row[7]) or None,
-            "bargaining_unit": _normalize_text(row[8]) or None,
-            "local_number": _normalize_text(row[9]) or None,
-            "steward_name": _normalize_text(row[10]) or None,
-            "rep_name": _normalize_text(row[11]) or None,
-            "membership_type": _normalize_text(row[12]) or None,
-            "employment_status": _normalize_text(row[13]) or None,
-            "status_detail": _normalize_text(row[14]) or None,
-            "status_bucket": _normalize_text(row[15]) or None,
-            "status_source_text": _normalize_text(row[16]) or None,
-            "active": bool(int(row[17] or 0)),
-            "notes": _normalize_text(row[18]) or None,
-            "source": _normalize_text(row[19]) or "manual",
-            "extra_fields": _json_loads(row[20]),
-            "created_at_utc": _normalize_text(row[21]),
-            "updated_at_utc": _normalize_text(row[22]),
+            "group_name": _normalize_text(row[7]) or _normalize_text(row[6]) or None,
+            "subgroup_name": _normalize_text(row[8]) or _normalize_text(row[9]) or None,
+            "department": _normalize_text(row[9]) or None,
+            "bargaining_unit": _normalize_text(row[10]) or None,
+            "local_number": _normalize_text(row[11]) or None,
+            "steward_name": _normalize_text(row[12]) or None,
+            "rep_name": _normalize_text(row[13]) or None,
+            "membership_type": _normalize_text(row[14]) or None,
+            "employment_status": _normalize_text(row[15]) or None,
+            "status_detail": _normalize_text(row[16]) or None,
+            "status_bucket": _normalize_text(row[17]) or None,
+            "status_source_text": _normalize_text(row[18]) or None,
+            "active": bool(int(row[19] or 0)),
+            "notes": _normalize_text(row[20]) or None,
+            "source": _normalize_text(row[21]) or "manual",
+            "extra_fields": _json_loads(row[22]),
+            "created_at_utc": _normalize_text(row[23]),
+            "updated_at_utc": _normalize_text(row[24]),
         }
 
     def _template_row(self, row: tuple[Any, ...]) -> dict[str, Any]:
@@ -2936,16 +3191,18 @@ class OutreachService:
             "timezone": timezone_name,
             "audience_location": _normalize_text(row[6]) or None,
             "audience_work_group": _normalize_text(row[7]) or None,
-            "audience_status_bucket": _normalize_text(row[8]) or None,
-            "notice_subject": _normalize_text(row[9]) or None,
-            "reminder_subject": _normalize_text(row[10]) or None,
-            "notice_send_at_utc": _normalize_text(row[11]),
-            "reminder_send_at_utc": _normalize_text(row[12]),
-            "status": _normalize_text(row[13]) or "draft",
-            "created_at_utc": _normalize_text(row[14]),
-            "updated_at_utc": _normalize_text(row[15]),
-            "notice_send_at_local": _utc_to_local_input(_normalize_text(row[11]), timezone_name),
-            "reminder_send_at_local": _utc_to_local_input(_normalize_text(row[12]), timezone_name),
+            "audience_group_name": _normalize_text(row[8]) or _normalize_text(row[7]) or None,
+            "audience_subgroup_name": _normalize_text(row[9]) or None,
+            "audience_status_bucket": _normalize_text(row[10]) or None,
+            "notice_subject": _normalize_text(row[11]) or None,
+            "reminder_subject": _normalize_text(row[12]) or None,
+            "notice_send_at_utc": _normalize_text(row[13]),
+            "reminder_send_at_utc": _normalize_text(row[14]),
+            "status": _normalize_text(row[15]) or "draft",
+            "created_at_utc": _normalize_text(row[16]),
+            "updated_at_utc": _normalize_text(row[17]),
+            "notice_send_at_local": _utc_to_local_input(_normalize_text(row[13]), timezone_name),
+            "reminder_send_at_local": _utc_to_local_input(_normalize_text(row[14]), timezone_name),
         }
 
     def _send_summary_row(self, row: OutreachSendSummary) -> dict[str, Any]:

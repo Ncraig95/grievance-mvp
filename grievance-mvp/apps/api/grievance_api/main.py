@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from .core.config import load_config
@@ -42,6 +43,7 @@ def create_app() -> FastAPI:
     migrate(cfg.db_path)
 
     app = FastAPI(title="Grievance MVP API", version="0.2.0")
+    app.mount("/static/email", StaticFiles(directory="/app/templates/email/assets"), name="static-email")
     any_auth_enabled = cfg.officer_auth.enabled or cfg.external_steward_auth.enabled
     if any_auth_enabled:
         session_secret = str(cfg.officer_auth.session_secret or cfg.hmac_shared_secret or "").strip()

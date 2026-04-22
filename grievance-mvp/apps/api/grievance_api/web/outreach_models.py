@@ -18,6 +18,8 @@ class OutreachContactUpsertRequest(OutreachStatusFields):
     full_name: str | None = None
     work_location: str | None = None
     work_group: str | None = None
+    group_name: str | None = None
+    subgroup_name: str | None = None
     department: str | None = None
     bargaining_unit: str | None = None
     local_number: str | None = None
@@ -69,6 +71,8 @@ class OutreachStopUpsertRequest(BaseModel):
     timezone: str | None = None
     audience_location: str | None = None
     audience_work_group: str | None = None
+    audience_group_name: str | None = None
+    audience_subgroup_name: str | None = None
     audience_status_bucket: str | None = None
     notice_subject: str | None = None
     reminder_subject: str | None = None
@@ -86,6 +90,8 @@ class OutreachStopRow(BaseModel):
     timezone: str
     audience_location: str | None = None
     audience_work_group: str | None = None
+    audience_group_name: str | None = None
+    audience_subgroup_name: str | None = None
     audience_status_bucket: str | None = None
     notice_subject: str | None = None
     reminder_subject: str | None = None
@@ -109,6 +115,8 @@ class OutreachManualContactRequest(OutreachStatusFields):
     full_name: str | None = None
     work_location: str | None = None
     work_group: str | None = None
+    group_name: str | None = None
+    subgroup_name: str | None = None
     department: str | None = None
     bargaining_unit: str | None = None
     local_number: str | None = None
@@ -219,6 +227,8 @@ class OutreachImportFieldMapping(BaseModel):
     full_name: str | None = None
     work_location: str | None = None
     work_group: str | None = None
+    group_name: str | None = None
+    subgroup_name: str | None = None
     department: str | None = None
     bargaining_unit: str | None = None
     local_number: str | None = None

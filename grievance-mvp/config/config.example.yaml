@@ -287,7 +287,7 @@ outreach:
   sender_user_id: organizing@members.REPLACE.org
   sender_display_name: CWA Local 3106
   public_base_url: https://grievance.REPLACE.org
-  reply_to_address: grievances@REPLACE.org
+  reply_to_address: info@cwa3106.com
   reply_to_name: CWA Local 3106
   timezone: America/New_York
   min_seconds_between_sends: 0.5
