@@ -8,6 +8,11 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
+try:
+    import esprima
+except ImportError:  # pragma: no cover - dev dependency in test container
+    esprima = None
+
 from openpyxl import Workbook
 from fastapi.responses import HTMLResponse, RedirectResponse
 
@@ -100,7 +105,11 @@ class OutreachRouteTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def _request(self, service: OutreachService) -> _Request:
-        cfg = SimpleNamespace(officer_auth=self.officer_auth_cfg)
+        cfg = SimpleNamespace(
+            officer_auth=self.officer_auth_cfg,
+            email=self.email_cfg,
+            outreach=service.cfg,
+        )
         state = SimpleNamespace(cfg=cfg, outreach=service)
         return _Request(state=state)
 
@@ -163,6 +172,22 @@ class OutreachRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="composeContactSearch"', body)
         self.assertIn('id="composeContactGroupFilter"', body)
         self.assertIn('id="composeContactSubgroupFilter"', body)
+        self.assertIn(f'value="{self.email_cfg.derek_email}"', body)
+        self.assertNotIn("??", body)
+        self.assertIn(".split(/[\\r\\n,;|]+/)", body)
+
+    @unittest.skipIf(esprima is None, "esprima not installed")
+    async def test_outreach_compose_page_inline_script_parses(self):
+        service = self._service(mailer=None, enabled=False)
+        request = self._request(service)
+
+        response = await outreach_ui_page("compose", request)
+        body = response.body.decode("utf-8")
+        script = body.split("<script>", 1)[1].split("</script>", 1)[0]
+
+        parsed = esprima.parseScript(script, tolerant=False)
+
+        self.assertIsNotNone(parsed)
 
     async def test_outreach_contacts_page_renders_group_and_subgroup_controls(self):
         service = self._service(mailer=None, enabled=False)

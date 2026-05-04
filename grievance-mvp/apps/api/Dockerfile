@@ -1,6 +1,7 @@
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
+ARG INSTALL_DEV_DEPS=0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-venv python3-pip \
@@ -19,8 +20,10 @@ RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 COPY requirements.txt /app/requirements.txt
+COPY requirements-dev.txt /app/requirements-dev.txt
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r /app/requirements.txt
+    pip install --no-cache-dir -r /app/requirements.txt && \
+    if [ "$INSTALL_DEV_DEPS" = "1" ]; then pip install --no-cache-dir -r /app/requirements-dev.txt; fi
 
 COPY grievance_api /app/grievance_api
 COPY templates /app/templates

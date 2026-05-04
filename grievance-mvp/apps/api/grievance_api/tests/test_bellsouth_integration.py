@@ -25,6 +25,7 @@ from grievance_api.web.routes_intake import (
     _validate_existing_folder_mode,
     _preferred_signer_email_for_doc,
     _resolve_document_command,
+    _should_wait_for_grievance_number_before_signature,
     _upload_generated_pdf_to_case_folder,
 )
 from grievance_api.services.staged_signature_workflow import is_3g3a_staged
@@ -49,6 +50,51 @@ class BellSouthCommandTests(unittest.TestCase):
         self.assertEqual(doc.doc_type, "bellsouth_meeting_request")
         self.assertEqual(doc.template_key, "bellsouth_formal_grievance_meeting_request")
         self.assertTrue(doc.requires_signature)
+
+    def test_statement_policy_can_bypass_grievance_number_signature_gate(self) -> None:
+        cfg = SimpleNamespace(
+            wait_for_grievance_number_before_signature=True,
+            document_policies={
+                "statement_of_occurrence": DocumentPolicyConfig(
+                    folder_resolution="default",
+                    default_signer_field="personal_email",
+                    default_requires_signature=True,
+                    signature_dispatch_timing="immediate",
+                )
+            },
+        )
+        doc_req = DocumentRequest(
+            doc_type="statement_of_occurrence",
+            template_key="statement_of_occurrence",
+            requires_signature=True,
+        )
+
+        self.assertFalse(
+            _should_wait_for_grievance_number_before_signature(
+                cfg=cfg,
+                doc_req=doc_req,
+                grievance_number=None,
+            )
+        )
+
+    def test_default_policy_still_waits_for_grievance_number_signature_gate(self) -> None:
+        cfg = SimpleNamespace(
+            wait_for_grievance_number_before_signature=True,
+            document_policies={},
+        )
+        doc_req = DocumentRequest(
+            doc_type="bellsouth_meeting_request",
+            template_key="bellsouth_meeting_request",
+            requires_signature=True,
+        )
+
+        self.assertTrue(
+            _should_wait_for_grievance_number_before_signature(
+                cfg=cfg,
+                doc_req=doc_req,
+                grievance_number=None,
+            )
+        )
 
     def test_non_bellsouth_alias_commands_resolve(self) -> None:
         cfg = SimpleNamespace(

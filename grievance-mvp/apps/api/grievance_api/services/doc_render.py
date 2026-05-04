@@ -14,7 +14,9 @@ _JINJA_PLACEHOLDER_RE = re.compile(r"{{\s*([^{}]+?)\s*}}")
 _LEFTOVER_PLACEHOLDER_RE = re.compile(r"{{.*?}}", flags=re.DOTALL)
 _XML_TAG_RE = re.compile(r"<[^>]+>")
 _XML_TOKEN_RE = re.compile(r"(<[^>]+>)")
-_SAFE_JINJA_EXPR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+_SAFE_JINJA_EXPR_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*(?:\s*\|\s*(?:e|escape))?$"
+)
 _NORMALIZE_KEY_RE = re.compile(r"[^A-Za-z0-9]+")
 _LOG = logging.getLogger("grievance_api")
 _DOCUSEAL_TAG_RE = re.compile(r"^(Sig|Dte|Eml|Txt)_es_:signer\d+:[A-Za-z0-9_]+$", re.IGNORECASE)

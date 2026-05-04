@@ -74,6 +74,17 @@ def migrate(db_path: str) -> None:
 
         con.execute(
             """
+            CREATE TABLE IF NOT EXISTS app_settings (
+              setting_key TEXT PRIMARY KEY,
+              setting_json TEXT NOT NULL,
+              updated_by TEXT,
+              updated_at_utc TEXT NOT NULL
+            )
+            """
+        )
+
+        con.execute(
+            """
             CREATE TABLE IF NOT EXISTS document_stages (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               case_id TEXT NOT NULL,

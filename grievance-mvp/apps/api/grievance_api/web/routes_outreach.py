@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
@@ -137,6 +138,21 @@ def _outreach_nav_links(current_page: str) -> str:
     return "".join(links)
 
 
+def _default_test_recipient(request: Request) -> str:
+    cfg = getattr(request.app.state, "cfg", None)
+    email_cfg = getattr(cfg, "email", None)
+    outreach_cfg = getattr(cfg, "outreach", None)
+    for candidate in (
+        getattr(email_cfg, "derek_email", None),
+        getattr(outreach_cfg, "reply_to_address", None),
+        getattr(outreach_cfg, "sender_user_id", None),
+    ):
+        value = str(candidate or "").strip()
+        if value:
+            return value
+    return ""
+
+
 @router.get("/officers/outreach", response_class=HTMLResponse)
 async def outreach_page(request: Request):
     gate = await require_ops_page_access(request, next_path="/officers/outreach/ui/overview")
@@ -155,7 +171,10 @@ async def outreach_ui_page(page_name: str, request: Request):
     if isinstance(gate, RedirectResponse):
         return gate
     return HTMLResponse(
-        _render_outreach_page(page_name=normalized_page),
+        _render_outreach_page(
+            page_name=normalized_page,
+            default_test_recipient=_default_test_recipient(request),
+        ),
         headers={
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0, private",
             "Pragma": "no-cache",
@@ -700,7 +719,7 @@ async def outreach_unsubscribe_post(token: str, request: Request):
     return PlainTextResponse(f"Unsubscribed {result['email']}")
 
 
-def _render_outreach_page(*, page_name: str) -> str:
+def _render_outreach_page(*, page_name: str, default_test_recipient: str = "") -> str:
     page = _outreach_page_config(page_name)
     current_section = page["section"]
     rendered = """<!doctype html>
@@ -1174,7 +1193,7 @@ def _render_outreach_page(*, page_name: str) -> str:
       <div class="note">Fastest path for testing: type a subject and message here, preview it, then send a test to the mailbox shown below. If delivery fails, the exact failure text will stay on this panel.</div>
       <div class="form-grid" style="margin-top:12px;">
         <div><label>Stop<select id="quickMessageStopId"></select></label></div>
-        <div><label>Recipient Email<input id="quickMessageRecipientEmail" value="ncraig@cwa3106.com" /></label></div>
+        <div><label>Recipient Email<input id="quickMessageRecipientEmail" value="__OUTREACH_DEFAULT_TEST_RECIPIENT_HTML__" /></label></div>
       </div>
       <label style="margin-top:10px;">Subject<textarea id="quickMessageSubject" style="min-height:90px;">Quick outreach test for {{ location }}</textarea></label>
       <label>Message<textarea id="quickMessageBody" style="min-height:220px;">Hi {{ first_name | default('Nick') }},
@@ -1240,7 +1259,7 @@ Thank you,
         <div><label>Template<select id="previewTemplateId"></select></label></div>
         <div><label>Stop<select id="previewStopId"></select></label></div>
         <div><label>Contact<select id="previewContactId"></select></label></div>
-        <div><label>Test Recipient<input id="previewRecipientEmail" value="ncraig@cwa3106.com" /></label></div>
+        <div><label>Test Recipient<input id="previewRecipientEmail" value="__OUTREACH_DEFAULT_TEST_RECIPIENT_HTML__" /></label></div>
       </div>
       <div class="actions">
         <button id="previewBtn" type="button">Render Preview</button>
@@ -1259,7 +1278,7 @@ Thank you,
         <div><label>Template<select id="oneOffTemplateId"></select></label></div>
         <div><label>Stop<select id="oneOffStopId"></select></label></div>
         <div><label>Saved Contact<select id="oneOffContactId"></select></label></div>
-        <div><label>Recipient Email<input id="oneOffRecipientEmail" value="ncraig@cwa3106.com" /></label></div>
+        <div><label>Recipient Email<input id="oneOffRecipientEmail" value="__OUTREACH_DEFAULT_TEST_RECIPIENT_HTML__" /></label></div>
         <div><label>First Name<input id="oneOffFirstName" /></label></div>
         <div><label>Last Name<input id="oneOffLastName" /></label></div>
         <div><label>Full Name<input id="oneOffFullName" /></label></div>
@@ -1385,7 +1404,8 @@ Thank you,
     }
 
     function escapeHtml(value) {
-      return String(value ?? '')
+      const safeValue = value === null || value === undefined ? '' : value;
+      return String(safeValue)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
@@ -1396,7 +1416,7 @@ Thank you,
     function splitFilterValues(value) {
       const seen = new Set();
       return String(value || '')
-        .split(/[\r\n,;|]+/)
+        .split(/[\\r\\n,;|]+/)
         .map((entry) => entry.trim().toLowerCase())
         .filter((entry) => {
           if (!entry || seen.has(entry)) return false;
@@ -2058,7 +2078,7 @@ Thank you,
       ['oneOffFirstName','oneOffLastName','oneOffFullName','oneOffWorkLocation','oneOffWorkGroup','oneOffGroupName','oneOffSubgroupName','oneOffDepartment','oneOffBargainingUnit','oneOffLocalNumber','oneOffStewardName','oneOffRepName','oneOffExtraFields'].forEach((id) => {
         document.getElementById(id).value = '';
       });
-      document.getElementById('oneOffRecipientEmail').value = 'ncraig@cwa3106.com';
+      document.getElementById('oneOffRecipientEmail').value = __OUTREACH_DEFAULT_TEST_RECIPIENT_JS__;
       setSelectValueIfPresent('oneOffContactId', '', '');
       setNote('oneOffMeta', 'This sends one live message immediately. Use the normal Preview/Test Send panel for non-live testing.', 'info');
       document.getElementById('oneOffSubjectBox').textContent = 'One-off subject preview';
@@ -2067,7 +2087,7 @@ Thank you,
     }
 
     function resetQuickMessage() {
-      document.getElementById('quickMessageRecipientEmail').value = 'ncraig@cwa3106.com';
+      document.getElementById('quickMessageRecipientEmail').value = __OUTREACH_DEFAULT_TEST_RECIPIENT_JS__;
       document.getElementById('quickMessageSubject').value = 'Quick outreach test for {{ location }}';
       document.getElementById('quickMessageBody').value = `Hi {{ first_name | default('Nick') }},
 
@@ -2705,7 +2725,9 @@ Thank you,
     resetQuickMessage();
     clearOneOffForm();
     loadBootstrap().catch((err) => {
-      setNote('runDueNote', err.message || String(err), 'error');
+      const message = err && err.message ? err.message : String(err);
+      setNote('sendReadinessNote', `Failed to load outreach data: ${message}`, 'error');
+      setNote('runDueNote', message, 'error');
     });
   </script>
 </body>
@@ -2715,6 +2737,8 @@ Thank you,
     rendered = rendered.replace("__OUTREACH_PAGE_DESCRIPTION__", html.escape(page["description"]))
     rendered = rendered.replace("__OUTREACH_NAV_LINKS__", _outreach_nav_links(page_name))
     rendered = rendered.replace("__OUTREACH_CURRENT_SECTION__", current_section)
+    rendered = rendered.replace("__OUTREACH_DEFAULT_TEST_RECIPIENT_HTML__", html.escape(default_test_recipient))
+    rendered = rendered.replace("__OUTREACH_DEFAULT_TEST_RECIPIENT_JS__", json.dumps(default_test_recipient))
     rendered = rendered.replace(
         f'class="panel route-section" data-section="{current_section}"',
         f'class="panel route-section active" data-section="{current_section}"',

@@ -191,6 +191,38 @@ class ConfigSignatureTableMapTests(unittest.TestCase):
         self.assertTrue(form_cfg.sharepoint_storage.upload_signed)
         self.assertTrue(form_cfg.sharepoint_storage.upload_audit)
         self.assertEqual(form_cfg.default_signer_email, "president@example.org")
+        self.assertTrue(form_cfg.requires_signature)
+
+    def test_load_config_parses_print_only_standalone_form(self) -> None:
+        path = self._write_config(docuseal_overrides={})
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh)
+        raw["standalone_forms"]["motion_sheet"] = {
+            "template_path": "/app/templates/docx/Motion Sheet.docx",
+            "form_label": "Motion Sheet",
+            "sharepoint_folder_label": "Motion Sheets",
+            "requires_signature": False,
+            "sharepoint_storage": {
+                "root_folder": "Motion Sheets",
+                "upload_generated": True,
+                "upload_signed": False,
+                "upload_audit": False,
+            },
+        }
+        with open(path, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(raw, fh)
+
+        try:
+            cfg = load_config(path)
+        finally:
+            os.unlink(path)
+
+        form_cfg = cfg.standalone_forms["motion_sheet"]
+        self.assertFalse(form_cfg.requires_signature)
+        self.assertEqual(form_cfg.sharepoint_storage.root_folder, "Motion Sheets")
+        self.assertTrue(form_cfg.sharepoint_storage.upload_generated)
+        self.assertFalse(form_cfg.sharepoint_storage.upload_signed)
+        self.assertFalse(form_cfg.sharepoint_storage.upload_audit)
 
 
 if __name__ == "__main__":

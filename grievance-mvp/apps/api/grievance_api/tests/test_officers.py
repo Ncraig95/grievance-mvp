@@ -30,6 +30,7 @@ from grievance_api.web.models import (
     OfficerCaseCreateRequest,
     OfficerCaseUpdateRequest,
     OfficerAutoDataRequestDocument,
+    MotionSheetSettingsUpdateRequest,
     OfficerProfileUpdateRequest,
 )
 from grievance_api.web.routes_officers import (
@@ -47,7 +48,9 @@ from grievance_api.web.routes_officers import (
     officer_cases,
     officer_profile,
     officer_next_grievance_number,
+    motion_sheet_settings,
     officers_page,
+    update_motion_sheet_settings,
     update_officer_profile,
     update_officer_case,
 )
@@ -775,6 +778,62 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
 
         result = await officer_cases(request)
         self.assertEqual(result.viewer.officer_title, "Vice President")
+
+    async def test_admin_can_save_motion_sheet_officer_defaults(self) -> None:
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        defaults = await motion_sheet_settings(request)
+        self.assertEqual(
+            defaults.officers,
+            ["Josh Denmark", "Derek Williamson", "John Rice", "Chris Gaston", "", "", "", "", "", ""],
+        )
+
+        saved = await update_motion_sheet_settings(
+            MotionSheetSettingsUpdateRequest(
+                officers=[
+                    "Officer One",
+                    "Officer Two",
+                    "Officer Three",
+                    "Officer Four",
+                    "Officer Five",
+                    "Officer Six",
+                    "Officer Seven",
+                    "Officer Eight",
+                    "Officer Nine",
+                    "Officer Ten",
+                ],
+            ),
+            request,
+        )
+        self.assertEqual(
+            saved.officers,
+            [
+                "Officer One",
+                "Officer Two",
+                "Officer Three",
+                "Officer Four",
+                "Officer Five",
+                "Officer Six",
+                "Officer Seven",
+                "Officer Eight",
+                "Officer Nine",
+                "Officer Ten",
+            ],
+        )
+
+        loaded = await motion_sheet_settings(request)
+        self.assertEqual(loaded.officers, saved.officers)
+
+        response = await officers_page(request)
+        html = response.body.decode("utf-8")
+        self.assertIn('id="motionSheetSettingsPanel"', html)
+        self.assertIn("/officers/forms", html)
+        self.assertIn("/forms/motion_sheet", html)
+        self.assertIn('id="motionOfficer10"', html)
 
     async def test_chief_steward_only_sees_in_scope_cases_and_can_edit_in_scope(self) -> None:
         await self._insert_case(

@@ -13,10 +13,16 @@ from ..services.doc_render import render_docx
 from ..services.notification_service import NotificationService
 from ..services.pdf_convert import docx_to_pdf
 from ..services.signature_workflow import resolve_docuseal_template_id
+from ..services.motion_sheet import (
+    MOTION_SHEET_FORM_KEY,
+    build_motion_sheet_context,
+    load_motion_sheet_officers,
+)
 from ..services.standalone_forms import (
     build_standalone_context,
     standalone_document_basename,
     standalone_document_dir,
+    standalone_sharepoint_root_folder,
     standalone_sharepoint_folder_path,
 )
 from .models import (
@@ -66,6 +72,51 @@ def _upload_local_file_to_standalone_folder(
         filename=filename,
         local_path=local_path,
     )
+
+
+def _upload_print_only_file_to_root_folder(
+    *,
+    cfg,  # noqa: ANN001
+    graph,  # noqa: ANN001
+    form_cfg,  # noqa: ANN001
+    local_path: str,
+    filename: str,
+):
+    folder_path = standalone_sharepoint_root_folder(
+        standalone_parent_folder=cfg.graph.standalone_parent_folder,
+        form_cfg=form_cfg,
+    )
+    return graph.upload_local_file_to_folder_path(
+        site_hostname=cfg.graph.site_hostname,
+        site_path=cfg.graph.site_path,
+        library=cfg.graph.document_library,
+        folder_path=folder_path,
+        filename=filename,
+        local_path=local_path,
+    )
+
+
+def _build_pdf_attachment(
+    *,
+    cfg,  # noqa: ANN001
+    filename: str,
+    pdf_path: str | None,
+):
+    path = Path(str(pdf_path or "").strip())
+    if not path.exists() or not path.is_file():
+        return None
+    size_bytes = path.stat().st_size
+    if size_bytes <= 0 or size_bytes > cfg.email.max_attachment_bytes:
+        return None
+    from ..services.graph_mail import MailAttachment
+
+    return [
+        MailAttachment(
+            filename=filename,
+            content_type="application/pdf",
+            content_bytes=path.read_bytes(),
+        )
+    ]
 
 
 def _build_signed_pdf_attachment(
@@ -197,7 +248,8 @@ async def create_standalone_submission(
     resolved_form_key, form_cfg = _resolve_standalone_form(cfg, form_key)
     if body.form_key.strip().lower() != resolved_form_key.lower():
         raise HTTPException(status_code=400, detail="body.form_key must match path form_key")
-    signer_email = _resolve_standalone_signer_email(body=body, form_cfg=form_cfg)
+    requires_signature = bool(getattr(form_cfg, "requires_signature", True))
+    signer_email = _resolve_standalone_signer_email(body=body, form_cfg=form_cfg) if requires_signature else ""
 
     existing = await db.fetchone(
         "SELECT id, status FROM standalone_submissions WHERE request_id=?",
@@ -247,8 +299,8 @@ async def create_standalone_submission(
             resolved_form_key,
             resolved_form_key,
             "processing",
-            1,
-            json.dumps([signer_email], ensure_ascii=False),
+            1 if requires_signature else 0,
+            json.dumps([signer_email] if signer_email else [], ensure_ascii=False),
         ),
     )
     await db.add_standalone_event(
@@ -266,26 +318,33 @@ async def create_standalone_submission(
             submission_id=submission_id,
             document_id=document_id,
         )
+        if resolved_form_key == MOTION_SHEET_FORM_KEY:
+            context = build_motion_sheet_context(
+                base_context=context,
+                officers=await load_motion_sheet_officers(db),
+            )
 
-        render_docx(
-            form_cfg.template_path,
-            context,
-            anchor_docx_path,
-            strip_signature_placeholders=False,
-            normalize_split_placeholders=cfg.rendering.normalize_split_placeholders,
-        )
-        anchor_pdf_path = docx_to_pdf(
-            anchor_docx_path,
-            str(document_dir),
-            cfg.libreoffice_timeout_seconds,
-            engine=cfg.docx_pdf_engine,
-            graph_uploader=graph,
-            graph_site_hostname=cfg.graph.site_hostname,
-            graph_site_path=cfg.graph.site_path,
-            graph_library=cfg.graph.document_library,
-            graph_temp_folder_path=cfg.docx_pdf_graph_temp_folder,
-        )
-        alignment_pdf_bytes = Path(anchor_pdf_path).read_bytes()
+        alignment_pdf_bytes = b""
+        if requires_signature:
+            render_docx(
+                form_cfg.template_path,
+                context,
+                anchor_docx_path,
+                strip_signature_placeholders=False,
+                normalize_split_placeholders=cfg.rendering.normalize_split_placeholders,
+            )
+            anchor_pdf_path = docx_to_pdf(
+                anchor_docx_path,
+                str(document_dir),
+                cfg.libreoffice_timeout_seconds,
+                engine=cfg.docx_pdf_engine,
+                graph_uploader=graph,
+                graph_site_hostname=cfg.graph.site_hostname,
+                graph_site_path=cfg.graph.site_path,
+                graph_library=cfg.graph.document_library,
+                graph_temp_folder_path=cfg.docx_pdf_graph_temp_folder,
+            )
+            alignment_pdf_bytes = Path(anchor_pdf_path).read_bytes()
 
         render_docx(
             form_cfg.template_path,
@@ -311,6 +370,7 @@ async def create_standalone_submission(
 
         sharepoint_generated_url: str | None = None
         sharepoint_folder_path: str | None = None
+        generated_filename = f"{resolved_form_key}_{document_id}.pdf"
         if (
             cfg.graph.site_hostname
             and cfg.graph.site_path
@@ -318,21 +378,34 @@ async def create_standalone_submission(
             and form_cfg.sharepoint_storage.upload_generated
         ):
             try:
-                uploaded_generated = _upload_local_file_to_standalone_folder(
-                    cfg=cfg,
-                    graph=graph,
-                    form_cfg=form_cfg,
-                    submission_id=submission_id,
-                    local_path=pdf_path,
-                    filename=f"{resolved_form_key}_{document_id}.pdf",
-                    subfolder=cfg.graph.generated_subfolder,
-                )
+                if requires_signature:
+                    uploaded_generated = _upload_local_file_to_standalone_folder(
+                        cfg=cfg,
+                        graph=graph,
+                        form_cfg=form_cfg,
+                        submission_id=submission_id,
+                        local_path=pdf_path,
+                        filename=generated_filename,
+                        subfolder=cfg.graph.generated_subfolder,
+                    )
+                    sharepoint_folder_path = standalone_sharepoint_folder_path(
+                        standalone_parent_folder=cfg.graph.standalone_parent_folder,
+                        form_cfg=form_cfg,
+                        submission_id=submission_id,
+                    )
+                else:
+                    uploaded_generated = _upload_print_only_file_to_root_folder(
+                        cfg=cfg,
+                        graph=graph,
+                        form_cfg=form_cfg,
+                        local_path=pdf_path,
+                        filename=generated_filename,
+                    )
+                    sharepoint_folder_path = standalone_sharepoint_root_folder(
+                        standalone_parent_folder=cfg.graph.standalone_parent_folder,
+                        form_cfg=form_cfg,
+                    )
                 sharepoint_generated_url = uploaded_generated.web_url
-                sharepoint_folder_path = standalone_sharepoint_folder_path(
-                    standalone_parent_folder=cfg.graph.standalone_parent_folder,
-                    form_cfg=form_cfg,
-                    submission_id=submission_id,
-                )
                 await db.add_standalone_event(
                     submission_id,
                     document_id,
@@ -346,6 +419,65 @@ async def create_standalone_submission(
                     "sharepoint_generated_upload_failed",
                     {"error": str(exc)},
                 )
+
+        if not requires_signature:
+            await db.exec(
+                """UPDATE standalone_documents
+                   SET status=?, docx_path=?, pdf_path=?, pdf_sha256=?,
+                       sharepoint_generated_url=?, completed_at_utc=?
+                   WHERE id=?""",
+                (
+                    "completed",
+                    docx_path,
+                    pdf_path,
+                    pdf_sha256,
+                    sharepoint_generated_url,
+                    utcnow(),
+                    document_id,
+                ),
+            )
+            await db.exec(
+                """UPDATE standalone_submissions
+                   SET status=?, sharepoint_folder_path=?
+                   WHERE id=?""",
+                ("completed", sharepoint_folder_path, submission_id),
+            )
+            await db.add_standalone_event(
+                submission_id,
+                document_id,
+                "print_only_document_completed",
+                {"document_link": sharepoint_generated_url, "sharepoint_folder_path": sharepoint_folder_path},
+            )
+
+            if cfg.email.enabled:
+                context = _build_standalone_notification_context(
+                    submission_id=submission_id,
+                    form_key=resolved_form_key,
+                    form_title=form_cfg.form_label,
+                    document_id=document_id,
+                    signing_url="",
+                    document_link=sharepoint_generated_url or "",
+                    status="completed",
+                )
+                attachments = _build_pdf_attachment(
+                    cfg=cfg,
+                    filename=generated_filename,
+                    pdf_path=pdf_path,
+                )
+                for recipient in cfg.email.internal_recipients:
+                    await notifications.send_one(
+                        case_id=submission_id,
+                        document_id=document_id,
+                        recipient_email=recipient,
+                        template_key="standalone_completion_internal",
+                        context={**context, "signer_email": recipient},
+                        idempotency_key=f"standalone:{submission_id}:{document_id}:print_only_completion:{recipient.lower()}",
+                        attachments=attachments,
+                        form_key=resolved_form_key,
+                        scope_kind="standalone",
+                    )
+
+            return await _load_submission_status(db, submission_id)
 
         submission = docuseal.create_submission(
             pdf_bytes=pdf_bytes,

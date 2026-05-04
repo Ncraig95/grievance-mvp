@@ -251,6 +251,106 @@ class StandaloneWorkflowTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(Exception, "default_signer_email"):
             await create_standalone_submission("att_mobility_bargaining_suggestion", body, request)
 
+    async def test_create_print_only_motion_sheet_skips_docuseal_and_uploads_generated_pdf(self) -> None:
+        docuseal = _FakeDocuSealCreateSubmission()
+        graph = _FakeGraphUploader()
+        notifications = _FakeNotifications()
+        cfg = self._cfg()
+        cfg.standalone_forms["motion_sheet"] = StandaloneFormConfig(
+            template_path="/tmp/motion.docx",
+            form_label="Motion Sheet",
+            sharepoint_folder_label="Motion Sheets",
+            requires_signature=False,
+            signer_count=1,
+            default_signer_email="",
+            sharepoint_storage=StandaloneSharepointStorageConfig(
+                root_folder="Motion Sheets",
+                label_prefix="Motion Sheet",
+                sequence_scope="none",
+                year_subfolders=False,
+                upload_generated=True,
+                upload_signed=False,
+                upload_audit=False,
+            ),
+        )
+        cfg.graph.site_hostname = "contoso.sharepoint.com"
+        cfg.graph.site_path = "/sites/Grievances"
+        cfg.graph.document_library = "Documents"
+        cfg.email.enabled = True
+        cfg.email.internal_recipients = ("admin@example.org",)
+        await self.db.upsert_app_setting(
+            setting_key="motion_sheet",
+            setting={"officers": ["Officer One", "Officer Two", "Officer Three", "Officer Four"]},
+            updated_by="tester",
+        )
+        state = SimpleNamespace(
+            cfg=cfg,
+            db=self.db,
+            logger=logging.getLogger("test"),
+            graph=graph,
+            docuseal=docuseal,
+            notifications=notifications,
+        )
+        request = _Request(state=state)
+        body = StandaloneSubmissionRequest(
+            request_id="forms-motion-1",
+            form_key="motion_sheet",
+            template_data={
+                "motion_made_by": "Taylor Member",
+                "motion_text": "Adopt the proposed meeting schedule.",
+                "seconded_by": "Jordan Member",
+                "officer_1_yes": "X",
+                "result": "Passed",
+                "motion_date": "2026-05-04",
+            },
+        )
+        rendered_contexts: list[dict[str, object]] = []
+
+        def _capture_render(template_path: str, context: dict[str, object], out_path: str, **kwargs) -> None:  # noqa: ANN001, ANN003
+            rendered_contexts.append(dict(context))
+            _fake_render_docx(template_path, context, out_path, **kwargs)
+
+        with patch("grievance_api.web.routes_standalone.render_docx", _capture_render), patch(
+            "grievance_api.web.routes_standalone.docx_to_pdf",
+            _fake_docx_to_pdf,
+        ):
+            result = await create_standalone_submission("motion_sheet", body, request)
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.documents[0].status, "completed")
+        self.assertIn("https://sharepoint.local/Motion Sheets/motion_sheet_", result.documents[0].document_link or "")
+        self.assertEqual(docuseal.calls, 0)
+        self.assertEqual(len(graph.calls), 1)
+        self.assertEqual(graph.calls[0]["folder_path"], "Motion Sheets")
+        self.assertEqual(rendered_contexts[0]["officer_1_name"], "Officer One")
+        self.assertEqual(rendered_contexts[0]["officer_5_name"], "")
+        self.assertEqual(rendered_contexts[0]["officer_10_name"], "")
+        self.assertEqual(rendered_contexts[0]["motion_made_by"], "Taylor Member")
+        self.assertEqual(rendered_contexts[0]["motion_text"], "Adopt the proposed meeting schedule.")
+        self.assertEqual(rendered_contexts[0]["motion_text_rows"][0]["text"], "Adopt the proposed meeting schedule.")
+        self.assertEqual(rendered_contexts[0]["motion_text_line_count"], 1)
+        self.assertEqual(rendered_contexts[0]["seconded_by"], "")
+        self.assertEqual(rendered_contexts[0]["result"], "")
+        self.assertEqual(rendered_contexts[0]["motion_date"], "")
+        self.assertEqual(rendered_contexts[0]["officer_1_yes"], "")
+        row = await self.db.fetchone(
+            "SELECT signer_email, status, sharepoint_folder_path FROM standalone_submissions WHERE id=?",
+            (result.submission_id,),
+        )
+        self.assertEqual(row[0], "")
+        self.assertEqual(row[1], "completed")
+        self.assertEqual(row[2], "Motion Sheets")
+        doc_row = await self.db.fetchone(
+            "SELECT requires_signature, docuseal_submission_id, sharepoint_generated_url FROM standalone_documents WHERE submission_id=?",
+            (result.submission_id,),
+        )
+        self.assertEqual(int(doc_row[0]), 0)
+        self.assertIsNone(doc_row[1])
+        self.assertIn("motion_sheet_", doc_row[2])
+        self.assertEqual(len(notifications.calls), 1)
+        self.assertEqual(notifications.calls[0]["recipient_email"], "admin@example.org")
+        self.assertEqual(notifications.calls[0]["template_key"], "standalone_completion_internal")
+
     async def test_webhook_marks_standalone_submission_completed(self) -> None:
         submission_id = "S202603270001"
         document_id = "D202603270001"

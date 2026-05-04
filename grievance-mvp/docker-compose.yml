@@ -10,6 +10,8 @@ services:
   api:
     build:
       context: ./apps/api
+      args:
+        INSTALL_DEV_DEPS: "1"
     restart: unless-stopped
     env_file:
       - ./.env

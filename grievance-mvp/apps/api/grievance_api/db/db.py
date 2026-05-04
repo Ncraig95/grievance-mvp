@@ -188,6 +188,38 @@ class Db:
             ),
         )
 
+    async def app_setting(self, setting_key: str):
+        return await self.fetchone(
+            """SELECT setting_json, updated_by, updated_at_utc
+               FROM app_settings
+               WHERE setting_key=?""",
+            (setting_key,),
+        )
+
+    async def upsert_app_setting(
+        self,
+        *,
+        setting_key: str,
+        setting: dict,
+        updated_by: str | None,
+    ) -> None:
+        await self.exec(
+            """
+            INSERT INTO app_settings(setting_key, setting_json, updated_by, updated_at_utc)
+            VALUES(?,?,?,?)
+            ON CONFLICT(setting_key) DO UPDATE SET
+              setting_json=excluded.setting_json,
+              updated_by=excluded.updated_by,
+              updated_at_utc=excluded.updated_at_utc
+            """,
+            (
+                setting_key,
+                json.dumps(setting, ensure_ascii=False),
+                updated_by,
+                utcnow(),
+            ),
+        )
+
     async def add_event(self, case_id: str, document_id: str | None, event_type: str, details: dict) -> None:
         cols = await self.table_columns("events")
         ts = utcnow()

@@ -295,6 +295,14 @@ class OfficerProfileResponse(BaseModel):
     officer_title: str | None = None
 
 
+class MotionSheetSettingsUpdateRequest(BaseModel):
+    officers: list[str] = Field(default_factory=list)
+
+
+class MotionSheetSettingsResponse(BaseModel):
+    officers: list[str] = Field(default_factory=list)
+
+
 class OfficerCaseBulkUpdateResponse(BaseModel):
     selected_case_count: int
     updated_case_count: int

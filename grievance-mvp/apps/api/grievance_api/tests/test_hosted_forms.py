@@ -86,6 +86,7 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         "bst_grievance_form_3g3a",
         "bst_grievance_form_3g3a_extension",
         "att_mobility_bargaining_suggestion",
+        "motion_sheet",
     }
 
     async def asyncSetUp(self) -> None:
@@ -164,8 +165,9 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("grievant_email", names)
         self.assertNotIn("signer_email", names)
         self.assertEqual(
-            names[:9],
+            names[:10],
             [
+                "grievance_id",
                 "grievant_firstname",
                 "grievant_lastname",
                 "grievant_phone",
@@ -200,6 +202,7 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("grievant_email", names)
         self.assertNotIn("signer_email", names)
+        self.assertEqual(names[0], "grievance_id")
         self.assertLess(names.index("attachment_2"), names.index("attachment_10"))
         self.assertEqual(
             names[-10:],
@@ -228,6 +231,22 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("signer_email", names)
             self.assertNotIn("grievant_email", payload)
             self.assertNotIn("signer_email", payload["template_data"])
+
+    def test_brief_grievance_number_alias_populates_intake_identifiers(self) -> None:
+        definition = get_hosted_form_definition("non_discipline_brief")
+        assert definition is not None
+
+        payload = definition.build_payload(
+            _values_for_definition(
+                "non_discipline_brief",
+                grievance_id="",
+                grievance_number="2026001",
+            )
+        )
+
+        self.assertEqual(payload["grievance_id"], "2026001")
+        self.assertEqual(payload["grievance_number"], "2026001")
+        self.assertEqual(payload["template_data"]["local_grievance_number"], "2026001")
 
     def test_settlement_signer_questions_render_before_case_details(self) -> None:
         definition = get_hosted_form_definition("settlement_form")
@@ -327,6 +346,82 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["narrative"], "Issue details")
         self.assertEqual(payload["template_data"]["grievance_number"], "2026001")
         self.assertEqual(payload["documents"][0]["signers"], ["manager@example.org", "steward@example.org"])
+
+    async def test_statement_submission_requires_signature_attestation(self) -> None:
+        request = _Request(state=self._state())
+        values = _values_for_definition(
+            "statement_of_occurrence",
+            contract="Wire Tech",
+            grievant_firstname="Taylor",
+            grievant_lastname="Jones",
+            grievant_email="taylor@example.org",
+            personal_email="taylor.personal@example.org",
+        )
+
+        with self.assertRaises(HTTPException) as ctx:
+            await submit_hosted_form("statement_of_occurrence", values, request, bypass_visibility=True)
+
+        self.assertEqual(ctx.exception.status_code, 422)
+        self.assertIn("electronic signature consent", str(ctx.exception.detail))
+
+    async def test_statement_submission_attaches_attestation_and_redirect_metadata(self) -> None:
+        request = _Request(
+            state=self._state(),
+            headers={"user-agent": "UnitTest Browser"},
+        )
+        request.session["officer_user"] = {
+            "email": "officer@example.org",
+            "display_name": "Officer Example",
+        }
+        values = _values_for_definition(
+            "statement_of_occurrence",
+            contract="Wire Tech",
+            grievant_firstname="Taylor",
+            grievant_lastname="Jones",
+            grievant_email="taylor@example.org",
+            personal_email="taylor.personal@example.org",
+            personal_cell="904-555-0100",
+        )
+        values["_signature_attestation"] = {
+            "accepted": True,
+            "accepted_at_utc": "2026-05-04T12:00:00Z",
+        }
+        backend_response = {
+            "case_id": "C1",
+            "grievance_id": "2026001",
+            "status": "awaiting_signatures",
+            "documents": [
+                {
+                    "document_id": "D1",
+                    "doc_type": "statement_of_occurrence",
+                    "status": "sent_for_signature",
+                    "signing_link": "https://sign.example/D1",
+                }
+            ],
+        }
+
+        with patch("grievance_api.web.routes_hosted_forms._post_internal_json") as mock_post:
+            mock_post.return_value = backend_response
+            result = await submit_hosted_form("statement_of_occurrence", values, request, bypass_visibility=True)
+
+        payload = mock_post.call_args.kwargs["payload"]
+        attestation = payload["_signature_attestation"]
+        self.assertTrue(attestation["accepted"])
+        self.assertEqual(attestation["signer_typed_name"], "Taylor Jones")
+        self.assertEqual(attestation["signer_email"], "taylor.personal@example.org")
+        self.assertEqual(attestation["signer_phone"], "904-555-0100")
+        self.assertEqual(attestation["officer_email"], "officer@example.org")
+        self.assertEqual(attestation["user_agent"], "UnitTest Browser")
+        self.assertEqual(result["signing_redirect_url"], "https://sign.example/D1")
+        self.assertEqual(result["document_status"], "sent_for_signature")
+
+        event = await self.db.fetchone(
+            "SELECT event_type, details_json FROM events WHERE case_id=? AND document_id=?",
+            ("C1", "D1"),
+        )
+        self.assertIsNotNone(event)
+        self.assertEqual(event[0], "signature_immediate_redirect_prepared")
+        self.assertTrue(json.loads(event[1])["signing_link_present"])
 
     def test_builds_existing_grievance_intake_payload(self) -> None:
         definition = get_hosted_form_definition("bellsouth_meeting_request")
@@ -463,6 +558,29 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["template_data"]["demand_text"], "More staffing coverage")
         self.assertEqual(payload["template_data"]["specific_examples_text"], "")
 
+    def test_builds_motion_sheet_print_only_payload(self) -> None:
+        definition = get_hosted_form_definition("motion_sheet")
+        assert definition is not None
+        names = [field.name for field in definition.fields]
+
+        self.assertEqual(names, ["motion_made_by", "motion_text"])
+        self.assertEqual(definition.fields[1].type, "textarea")
+        payload = definition.build_payload(
+            _values_for_definition(
+                "motion_sheet",
+                motion_made_by="Taylor Member",
+                motion_text="Adopt the proposed meeting schedule.",
+            )
+        )
+
+        self.assertEqual(payload["form_key"], "motion_sheet")
+        self.assertNotIn("local_president_signer_email", payload)
+        self.assertEqual(payload["template_data"]["motion_made_by"], "Taylor Member")
+        self.assertEqual(payload["template_data"]["motion_text"], "Adopt the proposed meeting schedule.")
+        self.assertNotIn("seconded_by", payload["template_data"])
+        self.assertNotIn("officer_1_yes", payload["template_data"])
+        self.assertNotIn("notes", payload["template_data"])
+
     async def test_public_page_renders_shared_form(self) -> None:
         response = await hosted_form_page("statement_of_occurrence", _Request(state=self._state()))
         html = response.body.decode("utf-8")
@@ -470,6 +588,8 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Statement of Occurrence", html)
         self.assertIn("/forms/statement_of_occurrence/submissions", html)
         self.assertIn("Hosted form key", html)
+        self.assertIn("autoExpandTextarea", html)
+        self.assertIn("textarea.auto-expand", html)
 
     async def test_private_page_redirects_to_officer_login_gate(self) -> None:
         await self.db.upsert_hosted_form_setting(
@@ -498,9 +618,11 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
             "grievance_api.web.routes_hosted_forms._post_internal_json",
             new=AsyncMock(return_value={"case_id": "C1", "grievance_id": "2026001"}),
         ):
+            values = _values_for_definition("statement_of_occurrence")
+            values["_signature_attestation"] = {"accepted": True}
             result = await submit_hosted_form(
                 "statement_of_occurrence",
-                _values_for_definition("statement_of_occurrence"),
+                values,
                 _Request(state=self._state(), host="198.51.100.10"),
             )
 
@@ -546,9 +668,22 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(response, redirect)
 
+    async def test_admin_page_includes_copyable_public_link_controls(self) -> None:
+        with patch(
+            "grievance_api.web.routes_hosted_forms.require_ops_page_access",
+            new=AsyncMock(return_value=None),
+        ):
+            response = await hosted_forms_admin_page(_Request(state=self._state()))
+        html = response.body.decode("utf-8")
+
+        self.assertIn("data-role=\"public-link\"", html)
+        self.assertIn("data-role=\"copy-public-link\"", html)
+        self.assertIn("Set visibility to public and save to share a public link", html)
+
     async def test_public_submission_rate_limit_returns_429(self) -> None:
         request = _Request(state=self._state(), host="203.0.113.10")
         values = _values_for_definition("statement_of_occurrence")
+        values["_signature_attestation"] = {"accepted": True}
         with patch(
             "grievance_api.web.routes_hosted_forms._post_internal_json",
             new=AsyncMock(return_value={"case_id": "C1", "grievance_id": "2026001"}),

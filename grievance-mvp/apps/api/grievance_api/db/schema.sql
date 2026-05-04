@@ -65,6 +65,13 @@ CREATE TABLE IF NOT EXISTS hosted_form_settings (
   updated_at_utc TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS app_settings (
+  setting_key TEXT PRIMARY KEY,
+  setting_json TEXT NOT NULL,
+  updated_by TEXT,
+  updated_at_utc TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS documents (
   id TEXT PRIMARY KEY,
   case_id TEXT NOT NULL,

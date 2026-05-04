@@ -19,13 +19,18 @@ _GRIEVANCE_DATA_REQUEST_ALIAS_SUBMIT_PATH = "/internal/forms/grievance-data-requ
 _DATA_REQUEST_LETTERHEAD_FORM_KEY = "data_request_letterhead"
 _DATA_REQUEST_LETTERHEAD_ALIAS_PATH = "/internal/forms/data-request-letterhead"
 _DATA_REQUEST_LETTERHEAD_ALIAS_SUBMIT_PATH = "/internal/forms/data-request-letterhead/submissions"
+_STATEMENT_OF_OCCURRENCE_FORM_KEY = "statement_of_occurrence"
+_STATEMENT_OF_OCCURRENCE_ALIAS_PATH = "/internal/forms/statement-of-occurrence"
+_STATEMENT_OF_OCCURRENCE_ALIAS_SUBMIT_PATH = "/internal/forms/statement-of-occurrence/submissions"
 
 
 class NonDisciplineInternalFormSubmission(BaseModel):
     request_id: str | None = None
+    grievance_id: str | None = None
+    grievance_number: str | None = None
     grievant_firstname: str
     grievant_lastname: str
-    grievant_email: str
+    grievant_email: str | None = None
     local_number: str
     local_grievance_number: str | None = None
     location: str
@@ -98,6 +103,9 @@ async def _submit_internal_alias_form(
         "request_id": result["request_id"],
         "document_command": form_key,
         "intake_response": result["backend_response"],
+        "signing_redirect_url": result.get("signing_redirect_url"),
+        "signing_redirect_reason": result.get("signing_redirect_reason"),
+        "document_status": result.get("document_status"),
     }
 
 
@@ -162,6 +170,28 @@ async def submit_data_request_letterhead_internal_form(
 ):
     return await _submit_internal_alias_form(
         form_key=_DATA_REQUEST_LETTERHEAD_FORM_KEY,
+        body=body,
+        request=request,
+    )
+
+
+@router.get(_STATEMENT_OF_OCCURRENCE_ALIAS_PATH)
+async def statement_of_occurrence_internal_form_page(request: Request):
+    return await _render_internal_alias_page(
+        form_key=_STATEMENT_OF_OCCURRENCE_FORM_KEY,
+        submit_path=_STATEMENT_OF_OCCURRENCE_ALIAS_SUBMIT_PATH,
+        request=request,
+        next_path=_STATEMENT_OF_OCCURRENCE_ALIAS_PATH,
+    )
+
+
+@router.post(_STATEMENT_OF_OCCURRENCE_ALIAS_SUBMIT_PATH)
+async def submit_statement_of_occurrence_internal_form(
+    body: dict[str, object],
+    request: Request,
+):
+    return await _submit_internal_alias_form(
+        form_key=_STATEMENT_OF_OCCURRENCE_FORM_KEY,
         body=body,
         request=request,
     )

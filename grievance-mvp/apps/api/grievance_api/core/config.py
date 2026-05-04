@@ -132,6 +132,7 @@ class DocumentPolicyConfig:
     auto_advance: bool = False
     store_all_stage_artifacts: bool = False
     input_source: str = ""
+    signature_dispatch_timing: str = "default"
 
 
 @dataclass(frozen=True)
@@ -158,6 +159,7 @@ class StandaloneFormConfig:
     template_path: str
     form_label: str
     sharepoint_folder_label: str
+    requires_signature: bool = True
     signer_count: int = 1
     default_signer_email: str = ""
     sharepoint_storage: StandaloneSharepointStorageConfig = field(default_factory=StandaloneSharepointStorageConfig)
@@ -535,6 +537,13 @@ def _normalize_input_source(value: object) -> str:
     return mode
 
 
+def _normalize_signature_dispatch_timing(value: object) -> str:
+    mode = str(value or "default").strip().lower()
+    if mode not in {"default", "immediate"}:
+        return "default"
+    return mode
+
+
 def _normalize_standalone_sequence_scope(value: object) -> str:
     scope = str(value or "none").strip().lower()
     if scope not in {"none", "yearly"}:
@@ -609,6 +618,7 @@ def _as_standalone_forms(value: object) -> dict[str, StandaloneFormConfig]:
             template_path=template_path,
             form_label=form_label,
             sharepoint_folder_label=sharepoint_folder_label,
+            requires_signature=_as_bool(raw_form.get("requires_signature", True), True),
             signer_count=signer_count,
             default_signer_email=default_signer_email,
             sharepoint_storage=_parse_standalone_sharepoint_storage(
@@ -666,6 +676,9 @@ def load_config(path: str) -> AppConfig:
                 auto_advance=bool(raw_policy.get("auto_advance", False)),
                 store_all_stage_artifacts=bool(raw_policy.get("store_all_stage_artifacts", False)),
                 input_source=_normalize_input_source(raw_policy.get("input_source")),
+                signature_dispatch_timing=_normalize_signature_dispatch_timing(
+                    raw_policy.get("signature_dispatch_timing")
+                ),
             )
 
     return AppConfig(

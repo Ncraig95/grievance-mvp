@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..core.hmac_auth import compute_signature
-from ..db.db import Db
+from ..db.db import Db, utcnow
 from .admin_common import parse_json_safely
 from .hosted_forms_registry import (
     HostedFormDefinition,
@@ -122,6 +122,137 @@ def _client_ip(request: Request) -> str:
     return str(request.client.host if request.client else "").strip() or "unknown"
 
 
+def _first_text(*values: object) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _boolish(value: object) -> bool:
+    if value is True:
+        return True
+    return str(value or "").strip().lower() in {"true", "1", "yes", "on"}
+
+
+def _signature_redirect_from_backend(backend_response: object) -> dict[str, str | None]:
+    if not isinstance(backend_response, dict):
+        return {"url": None, "document_id": None, "document_status": None}
+    documents = backend_response.get("documents")
+    if not isinstance(documents, list):
+        return {"url": None, "document_id": None, "document_status": None}
+    for doc in documents:
+        if not isinstance(doc, dict):
+            continue
+        url = str(doc.get("signing_link") or "").strip()
+        status = str(doc.get("status") or "").strip()
+        if url:
+            return {
+                "url": url,
+                "document_id": str(doc.get("document_id") or "").strip() or None,
+                "document_status": status or None,
+            }
+    first = next((doc for doc in documents if isinstance(doc, dict)), None)
+    return {
+        "url": None,
+        "document_id": str(first.get("document_id") or "").strip() if first else None,
+        "document_status": str(first.get("status") or "").strip() if first else None,
+    }
+
+
+def _requires_signature_attestation(form_key: str) -> bool:
+    return form_key == "statement_of_occurrence"
+
+
+def _officer_details_from_request(request: Request) -> dict[str, str]:
+    session = getattr(request, "session", {}) or {}
+    user = session.get("officer_user") if isinstance(session, dict) else None
+    if not isinstance(user, dict):
+        return {"email": "", "name": ""}
+    email = str(user.get("email") or "").strip()
+    name = str(user.get("display_name") or "").strip() or email
+    return {"email": email, "name": name}
+
+
+def _attach_signature_attestation(
+    *,
+    form_key: str,
+    payload: dict[str, object],
+    raw_values: dict[str, object],
+    request: Request,
+) -> None:
+    if not _requires_signature_attestation(form_key):
+        return
+    raw_attestation = raw_values.get("_signature_attestation")
+    attestation = raw_attestation if isinstance(raw_attestation, dict) else {}
+    if not _boolish(attestation.get("accepted")):
+        raise HTTPException(status_code=422, detail="electronic signature consent is required before signing")
+
+    template_data = payload.get("template_data")
+    template_data = template_data if isinstance(template_data, dict) else {}
+    signer_name = _first_text(
+        attestation.get("signer_typed_name"),
+        f"{payload.get('grievant_firstname') or ''} {payload.get('grievant_lastname') or ''}",
+    )
+    signer_email = _first_text(
+        attestation.get("signer_email"),
+        template_data.get("personal_email"),
+        payload.get("grievant_email"),
+    )
+    signer_phone = _first_text(
+        attestation.get("signer_phone"),
+        template_data.get("personal_cell"),
+        payload.get("grievant_phone"),
+    )
+    officer = _officer_details_from_request(request)
+    payload["_signature_attestation"] = {
+        "accepted": True,
+        "attestation_version": "statement_of_occurrence_attested_redirect_v1",
+        "accepted_at_utc": _first_text(attestation.get("accepted_at_utc"), utcnow()),
+        "signer_typed_name": signer_name,
+        "signer_email": signer_email,
+        "signer_phone": signer_phone,
+        "officer_email": officer["email"],
+        "officer_name": officer["name"],
+        "client_ip": _client_ip(request),
+        "user_agent": str(request.headers.get("user-agent", "") or "").strip(),
+        "request_path": str(getattr(getattr(request, "url", None), "path", "")),
+        "intent_text": "I agree to use electronic records and signatures and intend to sign this Statement of Occurrence electronically.",
+    }
+
+
+async def _record_signature_redirect_prepared(
+    *,
+    request: Request,
+    form_key: str,
+    backend_response: object,
+    redirect: dict[str, str | None],
+) -> None:
+    if not _requires_signature_attestation(form_key):
+        return
+    url = redirect.get("url")
+    if not url or not isinstance(backend_response, dict):
+        return
+    case_id = str(backend_response.get("case_id") or "").strip()
+    if not case_id:
+        return
+    await request.app.state.db.add_event(
+        case_id,
+        redirect.get("document_id"),
+        "signature_immediate_redirect_prepared",
+        {
+            "form_key": form_key,
+            "prepared_at_utc": utcnow(),
+            "document_status": redirect.get("document_status") or "",
+            "signing_link_present": True,
+            "client_ip": _client_ip(request),
+            "user_agent": str(request.headers.get("user-agent", "") or "").strip(),
+            "officer_email": _officer_details_from_request(request)["email"],
+        },
+    )
+
+
 async def _enforce_public_rate_limit(request: Request, form_key: str) -> None:
     ip = _client_ip(request)
     now = time.monotonic()
@@ -189,6 +320,7 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
     form_key = escape(definition.form_key)
     submit_path_js = json.dumps(submit_path)
     form_key_js = json.dumps(definition.form_key)
+    requires_attestation_js = json.dumps(_requires_signature_attestation(definition.form_key))
     return f"""<!doctype html>
 <html>
 <head>
@@ -255,6 +387,23 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
       box-shadow: var(--shadow);
     }}
     .question:focus-within {{ border-left-color: var(--forms-green); }}
+    .attestation {{
+      background: #fff;
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--forms-green);
+      border-radius: 10px;
+      padding: 16px 18px;
+      margin-bottom: 12px;
+      box-shadow: var(--shadow);
+    }}
+    .attestation label {{
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      margin: 0;
+    }}
+    .attestation input {{ width: auto; margin-top: 3px; }}
+    .attestation span {{ font-weight: 500; }}
     label {{ display: block; font-weight: 600; margin-bottom: 8px; }}
     .required {{ color: var(--error); }}
     .hint {{ color: var(--muted); font-size: 13px; margin: -2px 0 10px; }}
@@ -267,7 +416,7 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
       background: #fff;
       font: inherit;
     }}
-    textarea {{ min-height: 120px; resize: vertical; }}
+    textarea {{ min-height: 120px; overflow: hidden; resize: none; }}
     input:focus, textarea:focus, select:focus {{
       outline: 2px solid rgba(3, 120, 124, 0.25);
       border-color: var(--forms-green);
@@ -365,6 +514,7 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
   <script>
     const FORM_KEY = {form_key_js};
     const FORM_ENDPOINT = {submit_path_js};
+    const REQUIRES_SIGNATURE_ATTESTATION = {requires_attestation_js};
     const fields = {fields_json};
 
     const form = document.getElementById('hostedForm');
@@ -394,7 +544,7 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
 
     function renderControl(field, id, required, placeholder) {{
       if (field.type === 'textarea') {{
-        return `<textarea id="${{id}}" name="${{esc(field.name)}}"${{required}}${{placeholder}}></textarea>`;
+        return `<textarea class="auto-expand" id="${{id}}" name="${{esc(field.name)}}" rows="4"${{required}}${{placeholder}}></textarea>`;
       }}
       if (field.type === 'select') {{
         const options = ['<option value=""></option>'].concat(
@@ -406,7 +556,7 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
     }}
 
     function renderQuestions() {{
-      questions.innerHTML = fields.map((field) => {{
+      const renderedFields = fields.map((field) => {{
         const id = `field-${{field.name}}`;
         const required = field.required ? ' required aria-required="true"' : '';
         const label = `${{esc(field.label)}}${{field.required ? ' <span class="required">*</span>' : ''}}`;
@@ -415,6 +565,29 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
         const control = renderControl(field, id, required, placeholder);
         return `<div class="question"><label for="${{id}}">${{label}}</label>${{hint}}${{control}}</div>`;
       }}).join('');
+      const attestation = REQUIRES_SIGNATURE_ATTESTATION
+        ? `<div class="attestation">
+             <label for="signatureConsent">
+               <input id="signatureConsent" name="signatureConsent" type="checkbox" required aria-required="true" />
+               <span>I agree to use electronic records and signatures for this Statement of Occurrence, and I intend to sign the generated document electronically.</span>
+             </label>
+           </div>`
+        : '';
+      questions.innerHTML = renderedFields + attestation;
+      syncAutoExpandTextareas();
+    }}
+
+    function autoExpandTextarea(textarea) {{
+      if (!textarea) return;
+      textarea.style.height = 'auto';
+      textarea.style.height = `${{textarea.scrollHeight}}px`;
+    }}
+
+    function syncAutoExpandTextareas() {{
+      questions.querySelectorAll('textarea.auto-expand').forEach((textarea) => {{
+        autoExpandTextarea(textarea);
+        textarea.addEventListener('input', () => autoExpandTextarea(textarea));
+      }});
     }}
 
     function setStatus(state, title, message, details) {{
@@ -431,7 +604,33 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
       for (const field of fields) {{
         payload[field.name] = String(data.get(field.name) || '').trim();
       }}
+      if (REQUIRES_SIGNATURE_ATTESTATION) {{
+        const first = String(payload.grievant_firstname || '').trim();
+        const last = String(payload.grievant_lastname || '').trim();
+        payload._signature_attestation = {{
+          accepted: Boolean(data.get('signatureConsent')),
+          accepted_at_utc: new Date().toISOString(),
+          signer_typed_name: `${{first}} ${{last}}`.trim(),
+          signer_email: String(payload.personal_email || payload.grievant_email || '').trim(),
+          signer_phone: String(payload.personal_cell || payload.grievant_phone || '').trim()
+        }};
+      }}
       return payload;
+    }}
+
+    function redirectInfo(data) {{
+      if (!data || typeof data !== 'object') return null;
+      if (data.signing_redirect_url) {{
+        return {{
+          url: data.signing_redirect_url,
+          reason: data.signing_redirect_reason || 'ready'
+        }};
+      }}
+      if (data.intake_response && data.intake_response.documents) {{
+        const doc = data.intake_response.documents.find((item) => item && item.signing_link);
+        if (doc) return {{ url: doc.signing_link, reason: 'ready' }};
+      }}
+      return null;
     }}
 
     function successMessage(data) {{
@@ -451,7 +650,7 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
       if (!form.reportValidity()) return;
       submitBtn.disabled = true;
       savingText.classList.remove('hidden');
-      setStatus('', 'Submitting', 'The request is being sent into the workflow.', null);
+      setStatus('', 'Processing', 'The statement is being generated. The signing page will open when it is ready.', null);
       try {{
         const response = await fetch(FORM_ENDPOINT, {{
           method: 'POST',
@@ -462,7 +661,15 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
         let data = text;
         try {{ data = JSON.parse(text); }} catch {{}}
         if (!response.ok) throw {{ status: response.status, data }};
-        setStatus('success', 'Submitted', successMessage(data), data);
+        const redirect = redirectInfo(data);
+        if (redirect && redirect.url) {{
+          setStatus('success', 'Ready to sign', 'Opening the signature page now.', data);
+          window.setTimeout(() => {{
+            window.location.assign(redirect.url);
+          }}, 650);
+        }} else {{
+          setStatus('success', 'Submitted', successMessage(data), data);
+        }}
         form.reset();
       }} catch (error) {{
         setStatus('error', 'Submission failed', 'Review the response below and try again.', error);
@@ -680,6 +887,32 @@ def _render_admin_page() -> str:
     .meta { color: var(--muted); font-size: 12px; }
     .row-title { font-weight: 700; margin-bottom: 4px; }
     .linkish { color: var(--accent); text-decoration: none; }
+    .public-link-wrap {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      max-width: 420px;
+    }
+    .public-link-input {
+      width: 100%;
+      min-width: 0;
+      border: 1px solid #aab7c2;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font: inherit;
+      color: var(--text);
+      background: #fff;
+    }
+    .copy-button {
+      white-space: nowrap;
+      padding: 8px 10px;
+    }
+    .private-note {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.4;
+    }
     .status {
       margin-top: 12px;
       color: var(--muted);
@@ -735,6 +968,26 @@ def _render_admin_page() -> str:
       statusEl.className = ok ? 'status ok' : 'status';
     }
 
+    function publicUrl(path) {
+      return new URL(path, window.location.origin).toString();
+    }
+
+    function hostedPageCell(row) {
+      if (row.visibility !== 'public') {
+        return `<div class="private-note">Private access. Set visibility to public and save to share a public link.</div>`;
+      }
+      const url = publicUrl(row.public_path);
+      const disabledNote = row.enabled ? '' : '<div class="meta">This form is public but currently disabled.</div>';
+      return `
+        <div class="public-link-wrap">
+          <input class="public-link-input" data-role="public-link" type="text" readonly value="${esc(url)}" />
+          <button class="copy-button" type="button" data-role="copy-public-link">Copy</button>
+        </div>
+        <div class="meta"><a class="linkish" href="${esc(row.public_path)}" target="_blank" rel="noreferrer">${esc(row.public_path)}</a></div>
+        ${disabledNote}
+      `;
+    }
+
     function renderRows(rows) {
       rowsEl.innerHTML = rows.map((row) => {
         const meta = row.updated_at_utc ? `<div class="meta">Updated ${esc(row.updated_at_utc)}${row.updated_by ? ` by ${esc(row.updated_by)}` : ''}</div>` : '';
@@ -746,7 +999,7 @@ def _render_admin_page() -> str:
               ${meta}
             </td>
             <td>${esc(row.route_type)}</td>
-            <td><a class="linkish" href="${esc(row.public_path)}" target="_blank" rel="noreferrer">${esc(row.public_path)}</a></td>
+            <td>${hostedPageCell(row)}</td>
             <td><span class="meta">${esc(row.target_path)}</span></td>
             <td>
               <select data-role="visibility">
@@ -764,6 +1017,22 @@ def _render_admin_page() -> str:
           </tr>
         `;
       }).join('');
+    }
+
+    async function copyText(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', 'readonly');
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      textarea.remove();
     }
 
     async function loadRows() {
@@ -800,6 +1069,19 @@ def _render_admin_page() -> str:
     }
 
     rowsEl.addEventListener('click', (event) => {
+      const copyButton = event.target.closest('[data-role="copy-public-link"]');
+      if (copyButton) {
+        const tr = copyButton.closest('tr');
+        const input = tr ? tr.querySelector('[data-role="public-link"]') : null;
+        if (!input) return;
+        void copyText(input.value).then(() => {
+          input.select();
+          setStatus(`Copied public link for ${tr.dataset.formKey}.`, true);
+        }).catch((error) => {
+          setStatus(`Unable to copy link: ${error.message}`, false);
+        });
+        return;
+      }
       const button = event.target.closest('[data-role="save"]');
       if (!button) return;
       const tr = button.closest('tr');
@@ -841,16 +1123,32 @@ async def submit_hosted_form(
         payload = definition.build_payload(raw_values)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _attach_signature_attestation(
+        form_key=definition.form_key,
+        payload=payload,
+        raw_values=raw_values,
+        request=request,
+    )
     backend_response = await _post_internal_json(
         cfg=request.app.state.cfg,
         url=f"{_INTERNAL_API_BASE}{definition.target_path}",
         payload=payload,
+    )
+    redirect = _signature_redirect_from_backend(backend_response)
+    await _record_signature_redirect_prepared(
+        request=request,
+        form_key=definition.form_key,
+        backend_response=backend_response,
+        redirect=redirect,
     )
     return {
         "request_id": payload["request_id"],
         "form_key": definition.form_key,
         "route_type": definition.route_type,
         "backend_response": backend_response,
+        "signing_redirect_url": redirect.get("url"),
+        "signing_redirect_reason": "ready" if redirect.get("url") else "not_available",
+        "document_status": redirect.get("document_status"),
     }
 
 

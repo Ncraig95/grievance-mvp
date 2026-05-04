@@ -15,6 +15,7 @@ from grievance_api.services.doc_render import (
     _sync_checkbox_content_controls,
     render_docx,
 )
+from grievance_api.services.motion_sheet import build_motion_sheet_context
 
 
 class DocRenderPlaceholderTests(unittest.TestCase):
@@ -182,6 +183,59 @@ class DocRenderPlaceholderTests(unittest.TestCase):
             self.assertNotIn("{{", document_xml)
             self.assertNotIn("{{", header2_xml)
             self.assertIn("2026001", header2_xml)
+
+    def test_motion_sheet_template_renders_roster_and_vote_fields(self) -> None:
+        template_path = Path("Docx Files Template/Motion Sheet.docx")
+        if not template_path.exists():
+            self.skipTest("motion sheet template not available in test environment")
+
+        context = build_motion_sheet_context(
+            base_context={
+                "motion_made_by": "Taylor & Member",
+                "motion_text": "Adopt the AT&T proposed meeting schedule and create a new typed line for the motion.",
+                "seconded_by": "Jordan Member",
+                "result": "Passed",
+                "motion_date": "2026-05-04",
+                "officer_1_yes": "X",
+            },
+            officers=(
+                "Officer One",
+                "Officer Two",
+                "Officer Three",
+                "Officer Four",
+                "Officer Five",
+                "Officer Six",
+                "Officer Seven",
+                "Officer Eight",
+                "Officer Nine",
+                "Officer Ten",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "motion-sheet.docx"
+            render_docx(
+                str(template_path),
+                context,
+                str(out_path),
+                strip_signature_placeholders=True,
+                normalize_split_placeholders=True,
+            )
+
+            with zipfile.ZipFile(out_path) as zf:
+                document_xml = zf.read("word/document.xml").decode("utf-8", "ignore")
+
+        self.assertNotIn("{{", document_xml)
+        self.assertNotIn("{%", document_xml)
+        self.assertIn("Taylor &amp; Member", document_xml)
+        self.assertIn("Adopt the AT&amp;T proposed meeting schedule", document_xml)
+        self.assertIn("Officer One", document_xml)
+        self.assertIn("Officer Four", document_xml)
+        self.assertIn("Officer Ten", document_xml)
+        self.assertIn("Seconded by:", document_xml)
+        self.assertNotIn("Jordan Member", document_xml)
+        self.assertNotIn("Passed", document_xml)
+        self.assertNotIn("2026-05-04", document_xml)
+        self.assertNotIn("Notes:", document_xml)
 
     def test_settlement_template_long_render_keeps_both_signer_rows_on_one_page(self) -> None:
         template_path = self._find_settlement_template()

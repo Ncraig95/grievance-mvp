@@ -17,6 +17,7 @@ from ..services.case_folder_naming import build_case_folder_member_name
 from ..services.contract_timeline import parse_incident_date
 from ..services.doc_render import render_docx
 from ..services.grievance_id_allocator import GrievanceIdAllocationError, GrievanceIdAllocator
+from ..services.motion_sheet import load_motion_sheet_officers, save_motion_sheet_officers
 from ..services.notification_service import NotificationService
 from ..services.pdf_convert import docx_to_pdf
 from .admin_common import parse_json_safely
@@ -29,6 +30,8 @@ from .models import (
     DocumentRequest,
     GrievanceNumberPreviewResponse,
     IntakeRequest,
+    MotionSheetSettingsResponse,
+    MotionSheetSettingsUpdateRequest,
     OfficerAutoDataRequestCreateRequest,
     OfficerCaseBulkDeleteRequest,
     OfficerCaseBulkDeleteResponse,
@@ -1553,6 +1556,8 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
         hero_links.append('<a class="link-chip" href="#mutationSplit">Edit Workspace</a>')
     if user.can_manage_chief_assignments:
         hero_links.append('<a class="link-chip" href="#chiefAssignmentPanel">Assignments</a>')
+    if user.role == "admin" or not user.auth_enabled:
+        hero_links.append('<a class="link-chip" href="/officers/forms">Forms</a>')
     hero_links_html = "".join(hero_links)
 
     def _menu_link(label: str, href: str, description: str, *, external: bool = False) -> str:
@@ -1604,6 +1609,13 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
                 "/officers/forms",
                 "Manage hosted form visibility and enabled state.",
                 external=True,
+            )
+        )
+        admin_links.append(
+            _menu_link(
+                "Motion Sheet",
+                "#motionSheetSettingsPanel",
+                "Edit the officer names printed on the Motion Sheet.",
             )
         )
         admin_links.append(
@@ -1837,7 +1849,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     )
     profile_panel = (
         f"""
-  <div class="panel" id="officerProfilePanel">
+    <div class="panel" id="officerProfilePanel">
     <h2>Officer Profile</h2>
     <div class="summary">Set the title used on generated grievance data request documents.</div>
     <div class="grid" style="margin-top:12px;">
@@ -1856,6 +1868,59 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
   </div>
 """
         if user.auth_enabled
+        else ""
+    )
+    motion_sheet_settings_panel = (
+        """
+    <div class="panel" id="motionSheetSettingsPanel">
+      <div class="section-header">
+        <div>
+          <div class="eyebrow">Admin</div>
+          <h2>Motion Sheet Officers</h2>
+          <div class="summary">These names print on new Motion Sheets submitted from the hosted form.</div>
+        </div>
+        <div class="section-actions">
+          <a class="button-link secondary" href="/officers/forms">All Hosted Forms</a>
+          <a class="button-link secondary" href="/forms/motion_sheet">Open Motion Sheet</a>
+          <button id="saveMotionSheetSettingsBtn" type="button">Save Names</button>
+        </div>
+      </div>
+      <div class="grid">
+        <label>Officer 1
+          <input id="motionOfficer1" />
+        </label>
+        <label>Officer 2
+          <input id="motionOfficer2" />
+        </label>
+        <label>Officer 3
+          <input id="motionOfficer3" />
+        </label>
+        <label>Officer 4
+          <input id="motionOfficer4" />
+        </label>
+        <label>Officer 5
+          <input id="motionOfficer5" />
+        </label>
+        <label>Officer 6
+          <input id="motionOfficer6" />
+        </label>
+        <label>Officer 7
+          <input id="motionOfficer7" />
+        </label>
+        <label>Officer 8
+          <input id="motionOfficer8" />
+        </label>
+        <label>Officer 9
+          <input id="motionOfficer9" />
+        </label>
+        <label>Officer 10
+          <input id="motionOfficer10" />
+        </label>
+      </div>
+      <div id="motionSheetSettingsStatus" class="summary"></div>
+    </div>
+"""
+        if user.role == "admin" or not user.auth_enabled
         else ""
     )
     bulk_panel = (
@@ -2339,7 +2404,8 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       flex-wrap: wrap;
       margin-top: 12px;
     }}
-    button {{
+    button,
+    .button-link {{
       border: 0;
       border-radius: 8px;
       padding: 10px 14px;
@@ -2348,11 +2414,15 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       cursor: pointer;
       background: #1f4d7a;
       color: white;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
     }}
     button.danger {{
       background: #a11d2d;
     }}
-    button.secondary {{
+    button.secondary,
+    .button-link.secondary {{
       background: #e6edf3;
       color: #203040;
     }}
@@ -2680,6 +2750,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
   </div>
   {auth_panel}
   {profile_panel}
+  {motion_sheet_settings_panel}
   {chief_assignment_panel}
   {external_steward_panel}
   {case_external_assignment_panel}
@@ -3362,6 +3433,51 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       }}
     }}
 
+    function setMotionSheetStatus(message) {{
+      const status = document.getElementById('motionSheetSettingsStatus');
+      if (status) status.textContent = message || '';
+    }}
+
+    function applyMotionSheetSettings(data) {{
+      const officers = Array.isArray(data.officers) ? data.officers : [];
+      for (let idx = 1; idx <= 10; idx += 1) {{
+        const input = document.getElementById(`motionOfficer${{idx}}`);
+        if (input) input.value = String(officers[idx - 1] || '');
+      }}
+    }}
+
+    async function loadMotionSheetSettings() {{
+      if (!document.getElementById('motionSheetSettingsPanel')) return;
+      try {{
+        const data = await call('/officers/motion-sheet-settings');
+        applyMotionSheetSettings(data);
+      }} catch (e) {{
+        setMotionSheetStatus('Unable to load Motion Sheet names.');
+        show(e);
+      }}
+    }}
+
+    async function saveMotionSheetSettings() {{
+      if (!document.getElementById('motionSheetSettingsPanel')) return;
+      const officers = [];
+      for (let idx = 1; idx <= 10; idx += 1) {{
+        officers.push(valueOf(`motionOfficer${{idx}}`));
+      }}
+      try {{
+        const data = await call('/officers/motion-sheet-settings', {{
+          method: 'PUT',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ officers }})
+        }});
+        applyMotionSheetSettings(data);
+        setMotionSheetStatus('Saved.');
+        show(data);
+      }} catch (e) {{
+        setMotionSheetStatus('Unable to save Motion Sheet names.');
+        show(e);
+      }}
+    }}
+
     async function applyBulkUpdate() {{
       const caseIds = [...selectedCaseIds].filter((caseId) => currentRows.has(caseId));
       if (!caseIds.length) {{
@@ -3901,6 +4017,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     document.getElementById('saveEditBtn') && document.getElementById('saveEditBtn').addEventListener('click', () => {{ void saveEdit(); }});
     document.getElementById('clearEditBtn') && document.getElementById('clearEditBtn').addEventListener('click', clearEditSelection);
     document.getElementById('saveOfficerTitleBtn') && document.getElementById('saveOfficerTitleBtn').addEventListener('click', () => {{ void saveOfficerTitle(); }});
+    document.getElementById('saveMotionSheetSettingsBtn') && document.getElementById('saveMotionSheetSettingsBtn').addEventListener('click', () => {{ void saveMotionSheetSettings(); }});
     document.getElementById('searchDirectoryBtn') && document.getElementById('searchDirectoryBtn').addEventListener('click', () => {{ void searchDirectoryUsers(); }});
     document.getElementById('saveExternalStewardBtn') && document.getElementById('saveExternalStewardBtn').addEventListener('click', () => {{ void saveExternalSteward(); }});
     document.getElementById('assignCaseExternalStewardBtn') && document.getElementById('assignCaseExternalStewardBtn').addEventListener('click', () => {{ void assignExternalStewardToCase(); }});
@@ -3956,6 +4073,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       updateSelectionUi();
       syncTrackerScrollbarMetrics();
       void loadNextGrievanceNumber();
+      void loadMotionSheetSettings();
       void loadCases();
       if (VIEWER.can_manage_chief_assignments) {{
         void loadChiefAssignments();
@@ -4014,6 +4132,25 @@ async def update_officer_profile(body: OfficerProfileUpdateRequest, request: Req
         user=user,
         officer_title=body.officer_title,
     )
+
+
+@router.get("/officers/motion-sheet-settings", response_model=MotionSheetSettingsResponse)
+async def motion_sheet_settings(request: Request):
+    await require_admin_user(request)
+    db: Db = request.app.state.db
+    return MotionSheetSettingsResponse(officers=list(await load_motion_sheet_officers(db)))
+
+
+@router.put("/officers/motion-sheet-settings", response_model=MotionSheetSettingsResponse)
+async def update_motion_sheet_settings(body: MotionSheetSettingsUpdateRequest, request: Request):
+    user = await require_admin_user(request)
+    db: Db = request.app.state.db
+    officers = await save_motion_sheet_officers(
+        db,
+        officers=body.officers,
+        updated_by=actor_identity(user, fallback="admin"),
+    )
+    return MotionSheetSettingsResponse(officers=list(officers))
 
 
 @router.get("/officers/cases", response_model=OfficerCaseListResponse)

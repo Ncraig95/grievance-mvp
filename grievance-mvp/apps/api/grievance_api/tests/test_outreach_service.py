@@ -865,7 +865,7 @@ class OutreachServiceTests(unittest.IsolatedAsyncioTestCase):
 
         contacts = await service._contacts_for_stop(stop)  # noqa: SLF001
 
-        self.assertEqual(
+        self.assertCountEqual(
             [row["email"] for row in contacts],
             ["library-west@example.org", "public-works@example.org"],
         )

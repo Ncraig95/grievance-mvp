@@ -31,6 +31,13 @@ doc_templates:
   bst_grievance_form_3g3a: /app/templates/docx/bst_grievance_form_3g3a.docx
   bst_grievance_form_3g3a_extension: /app/templates/docx/3g3a-extension.docx
 document_policies:
+  statement_of_occurrence:
+    folder_resolution: default
+    default_signer_field: personal_email
+    default_requires_signature: true
+    # Internal Statement of Occurrence submissions open DocuSeal immediately
+    # after generation instead of waiting for grievance_number assignment.
+    signature_dispatch_timing: immediate
   non_discipline_grievance_brief:
     folder_resolution: default
     default_signer_field: ""
@@ -306,6 +313,7 @@ standalone_forms:
     template_path: /app/templates/docx/AT&TMobility2023BargainingSuggestion_Form.docx
     form_label: AT&T Mobility Bargaining Suggestion
     sharepoint_folder_label: AT&T Mobility Bargaining Suggestion
+    requires_signature: true
     signer_count: 1
     # Set this in the live config to the Local President signer email.
     default_signer_email: ""
@@ -317,3 +325,18 @@ standalone_forms:
       upload_generated: false
       upload_signed: true
       upload_audit: true
+  motion_sheet:
+    template_path: /app/templates/docx/Motion Sheet.docx
+    form_label: Motion Sheet
+    sharepoint_folder_label: Motion Sheets
+    requires_signature: false
+    signer_count: 1
+    default_signer_email: ""
+    sharepoint_storage:
+      root_folder: Motion Sheets
+      label_prefix: Motion Sheet
+      sequence_scope: none
+      year_subfolders: false
+      upload_generated: true
+      upload_signed: false
+      upload_audit: false

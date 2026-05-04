@@ -168,6 +168,7 @@ _FORM_FIELD_ORDERS: dict[str, tuple[str, ...]] = {
         "approver_block",
     ),
     "true_intent_brief": (
+        "grievance_id",
         "grievant_firstname",
         "grievant_lastname",
         "grievant_phone",
@@ -216,6 +217,7 @@ _FORM_FIELD_ORDERS: dict[str, tuple[str, ...]] = {
         "attachment_10",
     ),
     "non_discipline_brief": (
+        "grievance_id",
         "grievant_firstname",
         "grievant_lastname",
         "local_number",
@@ -247,6 +249,7 @@ _FORM_FIELD_ORDERS: dict[str, tuple[str, ...]] = {
         "attachment_10",
     ),
     "disciplinary_brief": (
+        "grievance_id",
         "grievant_firstname",
         "grievant_lastname",
         "grievant_phone",
@@ -414,6 +417,10 @@ _FORM_FIELD_ORDERS: dict[str, tuple[str, ...]] = {
         "home_phone",
         "non_work_email",
         "local_president_signer_email",
+    ),
+    "motion_sheet": (
+        "motion_made_by",
+        "motion_text",
     ),
 }
 
@@ -633,6 +640,7 @@ _FORM_CATALOG: tuple[dict[str, object], ...] = (
         "endpointPath": "/intake",
         "documentCommand": "true_intent_brief",
         "topLevelFields": {
+            "grievance_id": "<Existing grievance id>",
             "contract": "CWA",
             "grievant_firstname": "<Grievant first name>",
             "grievant_lastname": "<Grievant last name>",
@@ -693,6 +701,7 @@ _FORM_CATALOG: tuple[dict[str, object], ...] = (
         "endpointPath": "/intake",
         "documentCommand": "non_discipline_brief",
         "topLevelFields": {
+            "grievance_id": "<Existing grievance id>",
             "contract": "CWA",
             "grievant_firstname": "<Grievant first name>",
             "grievant_lastname": "<Grievant last name>",
@@ -736,6 +745,7 @@ _FORM_CATALOG: tuple[dict[str, object], ...] = (
         "endpointPath": "/intake",
         "documentCommand": "disciplinary_brief",
         "topLevelFields": {
+            "grievance_id": "<Existing grievance id>",
             "contract": "CWA",
             "grievant_firstname": "<Grievant first name>",
             "grievant_lastname": "<Grievant last name>",
@@ -1000,6 +1010,18 @@ _FORM_CATALOG: tuple[dict[str, object], ...] = (
             "non_work_email": "<Non-work email>",
         },
     },
+    {
+        "key": "motion_sheet",
+        "title": "Motion Sheet",
+        "routeType": "standalone",
+        "endpointPath": "/standalone/forms/motion_sheet/submissions",
+        "formKey": "motion_sheet",
+        "topLevelFields": {},
+        "templateDataFields": {
+            "motion_made_by": "<Motion made by>",
+            "motion_text": "<Motion text>",
+        },
+    },
 )
 
 
@@ -1021,6 +1043,14 @@ def _settlement_narrative(values: dict[str, str]) -> str:
 
 def _same_grievance_id(values: dict[str, str]) -> str:
     return _value_from(values, "grievance_id")
+
+
+def _same_grievance_ref(values: dict[str, str]) -> str:
+    for key in ("grievance_id", "grievance_number", "local_grievance_number"):
+        value = _value_from(values, key)
+        if value:
+            return value
+    return ""
 
 
 def _mobility_record_incident_date(values: dict[str, str]) -> str:
@@ -1083,6 +1113,7 @@ _FORM_OVERRIDES: dict[str, dict[str, object]] = {
     "true_intent_brief": {
         "description": "Submit a hosted True Intent grievance brief into the standard intake workflow.",
         "hidden_template_keys": {"grievant_name"},
+        "derived_top_level_values": {"grievance_number": _same_grievance_ref},
         "derived_template_values": {"grievant_name": _full_name},
         "optional_fields": {
             "appealed_to_state_date",
@@ -1094,10 +1125,13 @@ _FORM_OVERRIDES: dict[str, dict[str, object]] = {
     },
     "non_discipline_brief": {
         "description": "Submit the hosted Non-Discipline grievance brief using the first-class intake workflow.",
-        "hidden_template_keys": {"grievant_name"},
-        "derived_template_values": {"grievant_name": _full_name},
+        "hidden_template_keys": {"grievant_name", "local_grievance_number"},
+        "derived_top_level_values": {"grievance_number": _same_grievance_ref},
+        "derived_template_values": {
+            "grievant_name": _full_name,
+            "local_grievance_number": _same_grievance_ref,
+        },
         "optional_fields": {
-            "local_grievance_number",
             "date_grievance_appealed_to_executive_level",
             "potential_witnesses",
         },
@@ -1105,6 +1139,7 @@ _FORM_OVERRIDES: dict[str, dict[str, object]] = {
     "disciplinary_brief": {
         "description": "Submit a hosted disciplinary grievance brief into the standard intake workflow.",
         "hidden_template_keys": {"grievant_name"},
+        "derived_top_level_values": {"grievance_number": _same_grievance_ref},
         "derived_template_values": {"grievant_name": _full_name},
         "optional_fields": {
             "appealed_to_state_date",
@@ -1302,6 +1337,9 @@ _FORM_OVERRIDES: dict[str, dict[str, object]] = {
             "non_work_email",
         },
     },
+    "motion_sheet": {
+        "description": "Submit a Motion Sheet for admin printing from the SharePoint Motion Sheets folder.",
+    },
 }
 
 
@@ -1349,6 +1387,8 @@ def _field_type_for(actual_key: str, label: str, placeholder: str, options: tupl
         return "email"
     if lowered_placeholder == "yyyy-mm-dd" or " date" in lowered_label or lowered_key.endswith("_date") or "_date_" in lowered_key:
         return "date"
+    if lowered_key.endswith("_text"):
+        return "textarea"
     for hint in _LONG_TEXT_KEY_HINTS:
         if hint in lowered_key or hint in lowered_label:
             return "textarea"
@@ -1437,6 +1477,16 @@ def _validate_cleaned_value(field: HostedFormField, raw_value: object) -> str:
     return value
 
 
+def _raw_value_for_field(field: HostedFormField, raw_values: dict[str, object]) -> object:
+    if field.name != "grievance_id":
+        return raw_values.get(field.name)
+    for alias in ("grievance_id", "grievance_number", "local_grievance_number"):
+        value = raw_values.get(alias)
+        if str(value or "").strip():
+            return value
+    return raw_values.get(field.name)
+
+
 def _field_value_map(fields: tuple[HostedFormField, ...], raw_values: dict[str, object]) -> dict[str, str]:
     cleaned: dict[str, str] = {}
     seen: set[str] = set()
@@ -1444,7 +1494,7 @@ def _field_value_map(fields: tuple[HostedFormField, ...], raw_values: dict[str, 
         if field.name in seen:
             raise RuntimeError(f"duplicate hosted form field name: {field.name}")
         seen.add(field.name)
-        cleaned[field.name] = _validate_cleaned_value(field, raw_values.get(field.name))
+        cleaned[field.name] = _validate_cleaned_value(field, _raw_value_for_field(field, raw_values))
     return cleaned
 
 

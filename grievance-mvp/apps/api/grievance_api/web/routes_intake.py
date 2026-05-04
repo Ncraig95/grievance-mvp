@@ -585,6 +585,61 @@ def _preferred_signer_email_for_doc(
     return None, "missing"
 
 
+def _payload_extra_dict(payload: IntakeRequest, key: str) -> dict[str, object]:
+    extras = getattr(payload, "model_extra", None)
+    if not isinstance(extras, dict):
+        return {}
+    value = extras.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def _signature_attestation_details(
+    *,
+    payload: IntakeRequest,
+    doc_type: str,
+    template_key: str | None,
+    document_id: str,
+    pdf_sha256: str,
+    signer_order: list[str],
+    signer_source: str,
+) -> dict[str, object] | None:
+    if resolve_form_key_for_attestation(doc_type=doc_type, template_key=template_key) != "statement_of_occurrence":
+        return None
+    attestation = _payload_extra_dict(payload, "_signature_attestation")
+    if not attestation:
+        return None
+    accepted = attestation.get("accepted")
+    if accepted is not True and str(accepted).strip().lower() not in {"true", "1", "yes", "on"}:
+        return None
+    return {
+        "attestation_version": "statement_of_occurrence_attested_redirect_v1",
+        "document_id": document_id,
+        "doc_type": doc_type,
+        "template_key": template_key or "",
+        "pdf_sha256": pdf_sha256,
+        "signer_order": signer_order,
+        "signer_source": signer_source,
+        "signer_typed_name": str(attestation.get("signer_typed_name") or "").strip(),
+        "signer_email": str(attestation.get("signer_email") or "").strip(),
+        "signer_phone": str(attestation.get("signer_phone") or "").strip(),
+        "accepted_at_utc": str(attestation.get("accepted_at_utc") or "").strip(),
+        "officer_email": str(attestation.get("officer_email") or "").strip(),
+        "officer_name": str(attestation.get("officer_name") or "").strip(),
+        "client_ip": str(attestation.get("client_ip") or "").strip(),
+        "user_agent": str(attestation.get("user_agent") or "").strip(),
+        "request_path": str(attestation.get("request_path") or "").strip(),
+        "intent_text": str(attestation.get("intent_text") or "").strip(),
+    }
+
+
+def resolve_form_key_for_attestation(*, doc_type: str, template_key: str | None) -> str:
+    for key in (template_key, doc_type):
+        text = str(key or "").strip().lower()
+        if text:
+            return text
+    return ""
+
+
 def _apply_statement_defaults(
     *,
     context: dict[str, object],
@@ -1352,6 +1407,24 @@ def _doc_uses_auto_grievance_id(doc_req: DocumentRequest) -> bool:
     return doc_type in statement_keys or template_key in statement_keys
 
 
+def _should_wait_for_grievance_number_before_signature(
+    *,
+    cfg,  # noqa: ANN001
+    doc_req: DocumentRequest,
+    grievance_number: str | None,
+) -> bool:
+    if grievance_number:
+        return False
+    policy = _get_document_policy(
+        cfg=cfg,
+        doc_type=doc_req.doc_type,
+        template_key=doc_req.template_key,
+    )
+    if policy and policy.signature_dispatch_timing == "immediate":
+        return False
+    return bool(cfg.wait_for_grievance_number_before_signature)
+
+
 def _should_clear_3g3a_stage_marks(*, cfg, doc_req: DocumentRequest) -> bool:  # noqa: ANN001
     return bool(
         doc_req.requires_signature
@@ -2098,8 +2171,26 @@ async def intake(request: Request):
                 "signature_signer_resolved",
                 {"doc_type": doc_type, "signer_source": signer_source},
             )
-            requires_grievance_number_gate = (
-                cfg.wait_for_grievance_number_before_signature and not grievance_number
+            attestation_details = _signature_attestation_details(
+                payload=payload,
+                doc_type=doc_type,
+                template_key=doc_req.template_key,
+                document_id=document_id,
+                pdf_sha256=pdf_sha,
+                signer_order=signer_order,
+                signer_source=signer_source,
+            )
+            if attestation_details:
+                await db.add_event(
+                    case_id,
+                    document_id,
+                    "signature_attestation_captured",
+                    attestation_details,
+                )
+            requires_grievance_number_gate = _should_wait_for_grievance_number_before_signature(
+                cfg=cfg,
+                doc_req=doc_req,
+                grievance_number=grievance_number,
             )
             if requires_grievance_number_gate:
                 status = "pending_grievance_number"
