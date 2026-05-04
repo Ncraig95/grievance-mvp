@@ -24,35 +24,33 @@ Add these questions in this order:
 
 1. `Grievant first name`
 2. `Grievant last name`
-3. `Grievant email`
-4. `Local number`
-5. `Local grievance number`
-6. `Location`
-7. `Grievant(s) or work group`
-8. `Grievant home address`
-9. `Date grievance occurred`
-10. `Date grievance filed`
-11. `Date grievance appealed to executive level`
-12. `Issue or condition involved`
-13. `Action taken`
-14. `Chronology of facts pertaining to grievance`
-15. `Analysis of grievance`
-16. `Current status of grievant or condition`
-17. `Union position`
-18. `Company position`
-19. `Potential witnesses`
-20. `Recommendation`
-21. `Attachment 1 label`
-22. `Attachment 2 label`
-23. `Attachment 3 label`
-24. `Attachment 4 label`
-25. `Attachment 5 label`
-26. `Attachment 6 label`
-27. `Attachment 7 label`
-28. `Attachment 8 label`
-29. `Attachment 9 label`
-30. `Attachment 10 label`
-31. `Signer email override`
+3. `Local number`
+4. `Local grievance number`
+5. `Location`
+6. `Grievant(s) or work group`
+7. `Grievant home address`
+8. `Date grievance occurred`
+9. `Date grievance filed`
+10. `Date grievance appealed to executive level`
+11. `Issue or condition involved`
+12. `Action taken`
+13. `Chronology of facts pertaining to grievance`
+14. `Analysis of grievance`
+15. `Current status of grievant or condition`
+16. `Union position`
+17. `Company position`
+18. `Potential witnesses`
+19. `Recommendation`
+20. `Attachment 1 label`
+21. `Attachment 2 label`
+22. `Attachment 3 label`
+23. `Attachment 4 label`
+24. `Attachment 5 label`
+25. `Attachment 6 label`
+26. `Attachment 7 label`
+27. `Attachment 8 label`
+28. `Attachment 9 label`
+29. `Attachment 10 label`
 
 Use the CSV `Section` column to group them in Forms if you want separate pages or branches.
 
@@ -96,7 +94,7 @@ concat(<Grievant first name dynamic content>, ' ', <Grievant last name dynamic c
 12. Parse the JSON response and capture at least:
    - `case_id`
    - `grievance_id`
-   - `documents[0].signing_link` when present
+   - `documents[0].status`
 
 ## Shared Form and flow option
 
@@ -117,7 +115,7 @@ If you are using one shared Form/Flow for both brief types:
 
 ## Notes
 
-- Leave `template_data.signer_email` blank unless you need to override the default signer.
+- Brief submissions do not collect grievant email and do not route signatures.
 - Keep the same `request_id` when intentionally replaying the same Forms submission.
-- Do not add DocuSeal signature anchors as Form questions.
+- Do not add email or signature routing fields as Form questions.
 - The attachment fields are labels or exhibit names, not uploaded files.

@@ -74,7 +74,7 @@ Use the detailed field-map docs under `grievance-mvp/docs/power-automate/` when 
 - Document command: `true_intent_brief`
 - The repo already supports the template and intake side.
 - Your remaining work is the Microsoft Form, the Power Automate flow, and the real published Form URL.
-- Prefer `template_data.signer_email` only when you need to override the default signer behavior.
+- Do not collect grievant email or signer email for brief submissions.
 - Use `.\New-TrueIntentBriefPowerAutomatePack.ps1 -Overwrite` when you want the ready-to-wire Forms question sheet and flow body template in `scripts/power-platform/output/true_intent_brief/`.
 - Generate a starter payload with:
   `.\New-GrievancePayloadTemplate.ps1 -FormKey true_intent_brief -OutputPath .\output\true_intent_brief.payload.json -Overwrite`
@@ -88,7 +88,7 @@ Use the detailed field-map docs under `grievance-mvp/docs/power-automate/` when 
 - Full command names that also work: `non_discipline_grievance_brief`, `non_disciplinary_brief`, `non_disciplinary_grievance_brief`
 - This is the first-class intake implementation of the 2010 non-discipline staff guide.
 - The repo supports this as a dedicated option and also documents how to branch to it from a shared True Intent + Non-Discipline Form/Flow.
-- Prefer `template_data.signer_email` only when you need to override the default signer behavior.
+- Do not collect grievant email or signer email for brief submissions.
 - Use `.\New-NonDisciplineBriefPowerAutomatePack.ps1 -Overwrite` when you want the ready-to-wire Forms question sheet and flow body template in `scripts/power-platform/output/non_discipline_brief/`.
 - Generate a starter payload with:
   `.\New-GrievancePayloadTemplate.ps1 -FormKey non_discipline_brief -OutputPath .\output\non_discipline_brief.payload.json -Overwrite`
@@ -100,6 +100,7 @@ Use the detailed field-map docs under `grievance-mvp/docs/power-automate/` when 
 - Document command: `disciplinary_brief`
 - The repo already supports the template and intake side.
 - Live config already has `disciplinary_grievance_brief` email test mode disabled.
+- Do not collect grievant email or signer email for brief submissions.
 - Your remaining work is the Microsoft Form, the Power Automate flow, the real published Form URL, and one real end-to-end tenant submission.
 - Generate a starter payload with:
   `.\New-GrievancePayloadTemplate.ps1 -FormKey disciplinary_brief -OutputPath .\output\disciplinary_brief.payload.json -Overwrite`

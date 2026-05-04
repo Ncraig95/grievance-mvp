@@ -4,7 +4,6 @@
 "contract","Fixed","Submission","","","","Fixed string","CWA","CWA",""
 "grievant_firstname","Form","Grievant","Grievant first name","Text","Yes","Get response details -> Grievant first name","<Map from Forms: Grievant first name>","Taylor",""
 "grievant_lastname","Form","Grievant","Grievant last name","Text","Yes","Get response details -> Grievant last name","<Map from Forms: Grievant last name>","Jones",""
-"grievant_email","Form","Grievant","Grievant email","Email","Yes","Get response details -> Grievant email","<Map from Forms: Grievant email>","taylor.jones@example.com",""
 "narrative","Fixed","Submission","","","","Fixed string","Non-discipline grievance brief","Non-discipline grievance brief",""
 "template_data.grievant_name","Compose","Grievant","","","","Compose from grievant_firstname + grievant_lastname","<Compose from first and last name>","Taylor Jones",""
 "template_data.local_number","Form","Guide","Local number","Text","Yes","Get response details -> Local number","<Map from Forms: Local number>","3106",""
@@ -34,4 +33,3 @@
 "template_data.attachment_8","Form","Attachments","Attachment 8 label","Text","No","Get response details -> Attachment 8 label","<Map from Forms: Attachment 8 label>","",""
 "template_data.attachment_9","Form","Attachments","Attachment 9 label","Text","No","Get response details -> Attachment 9 label","<Map from Forms: Attachment 9 label>","",""
 "template_data.attachment_10","Form","Attachments","Attachment 10 label","Text","No","Get response details -> Attachment 10 label","<Map from Forms: Attachment 10 label>","",""
-"template_data.signer_email","Form","Routing","Signer email override","Email","No","Get response details -> Signer email override","<Optional Forms answer: Signer email override>","steward@example.com",""

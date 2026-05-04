@@ -221,7 +221,6 @@
         "contract": "CWA",
         "grievant_firstname": "<Grievant first name>",
         "grievant_lastname": "<Grievant last name>",
-        "grievant_email": "<Grievant email>",
         "narrative": "True intent grievance brief"
       },
       "templateDataFields": {
@@ -269,8 +268,7 @@
         "union_position": "<Union position>",
         "union_proposed_settlement": "<Union proposed settlement>",
         "union_strengths": "<Union strengths>",
-        "union_weaknesses": "<Union weaknesses>",
-        "signer_email": "<Optional signer email override>"
+        "union_weaknesses": "<Union weaknesses>"
       },
       "notes": [
         "The repo already supports the API and template side for this brief.",
@@ -289,7 +287,6 @@
         "contract": "CWA",
         "grievant_firstname": "<Grievant first name>",
         "grievant_lastname": "<Grievant last name>",
-        "grievant_email": "<Grievant email>",
         "narrative": "Non-discipline grievance brief"
       },
       "templateDataFields": {
@@ -320,7 +317,6 @@
         "location": "<Location>",
         "potential_witnesses": "<Potential witnesses>",
         "recommendation": "<Recommendation>",
-        "signer_email": "<Optional signer email override>",
         "union_position": "<Union position>"
       },
       "notes": [
@@ -341,7 +337,6 @@
         "contract": "CWA",
         "grievant_firstname": "<Grievant first name>",
         "grievant_lastname": "<Grievant last name>",
-        "grievant_email": "<Grievant email>",
         "narrative": "Disciplinary grievance brief"
       },
       "templateDataFields": {
@@ -415,8 +410,7 @@
         "union_argument": "<Union argument>",
         "union_facts": "<Union facts>",
         "union_proposed_settlement": "<Union proposed settlement>",
-        "union_representation": "<Union representation>",
-        "signer_email": "<Optional signer email override>"
+        "union_representation": "<Union representation>"
       },
       "notes": [
         "Live config already has disciplinary_grievance_brief email test mode disabled.",

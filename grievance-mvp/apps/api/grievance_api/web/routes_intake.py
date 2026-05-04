@@ -221,6 +221,15 @@ _DOC_TEMPLATE_FALLBACKS: dict[str, tuple[str, ...]] = {
         "mobility_record_of_grievance",
     ),
 }
+_BRIEF_DOC_TYPES = {
+    "true_intent_grievance_brief",
+    "non_discipline_grievance_brief",
+    "disciplinary_grievance_brief",
+}
+
+
+def _is_brief_document(*, doc_type: str | None, template_key: str | None = None) -> bool:
+    return any(str(value or "").strip().lower() in _BRIEF_DOC_TYPES for value in (doc_type, template_key))
 
 
 def _safe_name(value: str) -> str:
@@ -1263,6 +1272,8 @@ def _resolve_document_command(cfg, document_command: str) -> DocumentRequest:  #
             # Command mode is a convenience for single-doc workflows (Power Automate).
             policy = _get_document_policy(cfg=cfg, doc_type=normalized_key, template_key=template_lookup)
             requires_signature = bool(policy.default_requires_signature) if policy else True
+            if _is_brief_document(doc_type=normalized_key, template_key=template_lookup):
+                requires_signature = False
             return DocumentRequest(
                 doc_type=normalized_key,
                 template_key=template_lookup,
@@ -1290,6 +1301,37 @@ def _get_document_policy(
         if policy:
             return policy
     return None
+
+
+def _scrub_brief_payload_and_docs(
+    *,
+    payload: IntakeRequest,
+    doc_requests: list[DocumentRequest],
+) -> list[DocumentRequest]:
+    scrubbed: list[DocumentRequest] = []
+    saw_brief = False
+    for doc_req in doc_requests:
+        if _is_brief_document(doc_type=doc_req.doc_type, template_key=doc_req.template_key):
+            saw_brief = True
+            scrubbed.append(
+                DocumentRequest(
+                    doc_type=doc_req.doc_type,
+                    template_key=doc_req.template_key,
+                    requires_signature=False,
+                    signers=[],
+                )
+            )
+        else:
+            scrubbed.append(doc_req)
+
+    if saw_brief and all(_is_brief_document(doc_type=req.doc_type, template_key=req.template_key) for req in scrubbed):
+        payload.grievant_email = ""
+        template_data = dict(payload.template_data or {})
+        template_data.pop("signer_email", None)
+        template_data.pop("signerEmail", None)
+        payload.template_data = template_data
+
+    return scrubbed
 
 
 def _doc_requires_existing_exact_folder(*, cfg, doc_req: DocumentRequest) -> bool:  # noqa: ANN001
@@ -1550,6 +1592,7 @@ async def intake(request: Request):
         doc_requests = [_resolve_document_command(cfg, payload.document_command or "")]
     else:
         doc_requests = [DocumentRequest(doc_type="grievance_form", requires_signature=True)]
+    doc_requests = _scrub_brief_payload_and_docs(payload=payload, doc_requests=list(doc_requests))
 
     requires_existing_folder = any(
         _doc_requires_existing_exact_folder(cfg=cfg, doc_req=req) for req in doc_requests

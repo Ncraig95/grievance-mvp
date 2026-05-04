@@ -33,8 +33,16 @@ doc_templates:
 document_policies:
   non_discipline_grievance_brief:
     folder_resolution: default
-    default_signer_field: signer_email
-    default_requires_signature: true
+    default_signer_field: ""
+    default_requires_signature: false
+  true_intent_grievance_brief:
+    folder_resolution: default
+    default_signer_field: ""
+    default_requires_signature: false
+  disciplinary_grievance_brief:
+    folder_resolution: default
+    default_signer_field: ""
+    default_requires_signature: false
   bellsouth_meeting_request:
     folder_resolution: existing_exact_grievance_id
     default_signer_field: union_rep_email

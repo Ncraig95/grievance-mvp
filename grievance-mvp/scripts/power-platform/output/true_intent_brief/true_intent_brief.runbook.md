@@ -24,52 +24,50 @@ Add these questions in this order:
 
 1. `Grievant first name`
 2. `Grievant last name`
-3. `Grievant email`
-4. `Grievant phone`
-5. `Grievant street`
-6. `Grievant city`
-7. `Grievant state`
-8. `Grievant zip`
-9. `Grievant title`
-10. `Department`
-11. `Seniority date`
-12. `Local number`
-13. `Local phone`
-14. `Local street`
-15. `Local city`
-16. `Local state`
-17. `Local zip`
-18. `Date grievance occurred`
-19. `Grievance type`
-20. `Issue involved`
-21. `Articles involved`
-22. `Management structure`
-23. `Step 1 informal date`
-24. `Step 2 formal date`
-25. `Appealed to state date`
-26. `Timeline`
-27. `Union argument`
-28. `Analysis`
-29. `Company name`
-30. `Company position`
-31. `Company strengths`
-32. `Company weaknesses`
-33. `Company proposed settlement`
-34. `Union position`
-35. `Union strengths`
-36. `Union weaknesses`
-37. `Union proposed settlement`
-38. `Attachment 1 label`
-39. `Attachment 2 label`
-40. `Attachment 3 label`
-41. `Attachment 4 label`
-42. `Attachment 5 label`
-43. `Attachment 6 label`
-44. `Attachment 7 label`
-45. `Attachment 8 label`
-46. `Attachment 9 label`
-47. `Attachment 10 label`
-48. `Signer email override`
+3. `Grievant phone`
+4. `Grievant street`
+5. `Grievant city`
+6. `Grievant state`
+7. `Grievant zip`
+8. `Grievant title`
+9. `Department`
+10. `Seniority date`
+11. `Local number`
+12. `Local phone`
+13. `Local street`
+14. `Local city`
+15. `Local state`
+16. `Local zip`
+17. `Date grievance occurred`
+18. `Grievance type`
+19. `Issue involved`
+20. `Articles involved`
+21. `Management structure`
+22. `Step 1 informal date`
+23. `Step 2 formal date`
+24. `Appealed to state date`
+25. `Timeline`
+26. `Union argument`
+27. `Analysis`
+28. `Company name`
+29. `Company position`
+30. `Company strengths`
+31. `Company weaknesses`
+32. `Company proposed settlement`
+33. `Union position`
+34. `Union strengths`
+35. `Union weaknesses`
+36. `Union proposed settlement`
+37. `Attachment 1 label`
+38. `Attachment 2 label`
+39. `Attachment 3 label`
+40. `Attachment 4 label`
+41. `Attachment 5 label`
+42. `Attachment 6 label`
+43. `Attachment 7 label`
+44. `Attachment 8 label`
+45. `Attachment 9 label`
+46. `Attachment 10 label`
 
 Use the CSV `Section` column to group them in Forms if you want separate pages/sections.
 
@@ -113,7 +111,7 @@ concat(<Grievant first name dynamic content>, ' ', <Grievant last name dynamic c
 12. Parse the JSON response and capture at least:
    - `case_id`
    - `grievance_id`
-   - `documents[0].signing_link` when present
+   - `documents[0].status`
 
 ## Fixed values to keep
 
@@ -123,7 +121,7 @@ concat(<Grievant first name dynamic content>, ' ', <Grievant last name dynamic c
 
 ## Notes
 
-- Leave `template_data.signer_email` blank unless you need to override the default signer. If omitted, the app can fall back to `grievant_email`.
+- Brief submissions do not collect grievant email and do not route signatures.
 - Keep the same `request_id` when intentionally replaying the same Forms submission.
-- Do not add DocuSeal signature anchors as Form questions.
+- Do not add email or signature routing fields as Form questions.
 - The attachment fields are labels or exhibit names, not uploaded files.

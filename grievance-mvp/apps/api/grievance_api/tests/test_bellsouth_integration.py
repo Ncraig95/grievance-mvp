@@ -20,6 +20,7 @@ from grievance_api.web.routes_intake import (
     _build_template_context,
     _doc_uses_auto_grievance_id,
     _doc_requires_existing_exact_folder,
+    _scrub_brief_payload_and_docs,
     _should_clear_3g3a_stage_marks,
     _validate_existing_folder_mode,
     _preferred_signer_email_for_doc,
@@ -73,22 +74,55 @@ class BellSouthCommandTests(unittest.TestCase):
         true_intent = _resolve_document_command(cfg, "true_intent_brief")
         self.assertEqual(true_intent.doc_type, "true_intent_grievance_brief")
         self.assertEqual(true_intent.template_key, "true_intent_grievance_brief")
+        self.assertFalse(true_intent.requires_signature)
 
         non_discipline = _resolve_document_command(cfg, "non_discipline_brief")
         self.assertEqual(non_discipline.doc_type, "non_discipline_grievance_brief")
         self.assertEqual(non_discipline.template_key, "non_discipline_grievance_brief")
+        self.assertFalse(non_discipline.requires_signature)
 
         non_disciplinary = _resolve_document_command(cfg, "non_disciplinary_grievance_brief")
         self.assertEqual(non_disciplinary.doc_type, "non_discipline_grievance_brief")
         self.assertEqual(non_disciplinary.template_key, "non_discipline_grievance_brief")
+        self.assertFalse(non_disciplinary.requires_signature)
 
         disciplinary = _resolve_document_command(cfg, "disciplinary_brief")
         self.assertEqual(disciplinary.doc_type, "disciplinary_grievance_brief")
         self.assertEqual(disciplinary.template_key, "disciplinary_grievance_brief")
+        self.assertFalse(disciplinary.requires_signature)
 
         mobility_record = _resolve_document_command(cfg, "mobility_record_of_grievance")
         self.assertEqual(mobility_record.doc_type, "mobility_record_of_grievance")
         self.assertEqual(mobility_record.template_key, "mobility_record_of_grievance")
+
+    def test_brief_payload_scrub_removes_email_and_signature_routing(self) -> None:
+        payload = IntakeRequest(
+            request_id="r1",
+            grievance_id="2026001",
+            contract="CWA",
+            grievant_firstname="John",
+            grievant_lastname="Doe",
+            grievant_email="john@example.org",
+            narrative="Brief",
+            template_data={"signer_email": "signer@example.org", "analysis": "text"},
+            documents=[
+                DocumentRequest(
+                    doc_type="true_intent_grievance_brief",
+                    template_key="true_intent_grievance_brief",
+                    requires_signature=True,
+                    signers=["john@example.org", "signer@example.org"],
+                )
+            ],
+        )
+
+        docs = _scrub_brief_payload_and_docs(payload=payload, doc_requests=list(payload.documents))
+
+        self.assertEqual(payload.grievant_email, "")
+        self.assertNotIn("signer_email", payload.template_data)
+        self.assertEqual(payload.template_data["analysis"], "text")
+        self.assertEqual(len(docs), 1)
+        self.assertFalse(docs[0].requires_signature)
+        self.assertEqual(docs[0].signers, [])
 
     def test_existing_exact_folder_policy_is_applied(self) -> None:
         cfg = SimpleNamespace(

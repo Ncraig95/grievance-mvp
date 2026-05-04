@@ -8,7 +8,7 @@
 ## Recommended Forms questions and key mapping
 
 Core fields:
-- `request_id`, `contract`, `grievant_firstname`, `grievant_lastname`, `grievant_email`, `narrative`
+- `request_id`, `contract`, `grievant_firstname`, `grievant_lastname`, `narrative`
 
 Template-specific (`template_data`):
 - `appealed_to_state_date` (Date)
@@ -48,7 +48,6 @@ Template-specific (`template_data`):
 - `union_facts`
 - `union_proposed_settlement`
 - `union_representation`
-- optional signer override: `signer_email`
 
 ## HTTP body skeleton
 
@@ -59,7 +58,6 @@ Template-specific (`template_data`):
   "contract": "CWA",
   "grievant_firstname": "<first>",
   "grievant_lastname": "<last>",
-  "grievant_email": "<email>",
   "narrative": "Disciplinary grievance brief",
   "template_data": {
     "grievant_name": "<full name>",
@@ -67,10 +65,10 @@ Template-specific (`template_data`):
     "date_discipline_grieved": "<yyyy-mm-dd>",
     "articles": "<articles>",
     "company_facts": "<company facts>",
-    "union_facts": "<union facts>",
-    "signer_email": "<optional signer email>"
+    "union_facts": "<union facts>"
   }
 }
 ```
 
 Add all remaining fields from the list above as needed by your form.
+Do not add grievant email or signer email to disciplinary brief Forms or HTTP bodies.

@@ -16,14 +16,18 @@ class NonDisciplinePackAssetTests(unittest.TestCase):
         form = next((item for item in catalog["forms"] if item["key"] == "non_discipline_brief"), None)
         self.assertIsNotNone(form)
         self.assertEqual(form["documentCommand"], "non_discipline_brief")
+        self.assertNotIn("grievant_email", form["topLevelFields"])
+        self.assertNotIn("signer_email", form["templateDataFields"])
 
         with payload_path.open("r", encoding="utf-8") as fh:
             payload = json.load(fh)
         self.assertEqual(payload["document_command"], "non_discipline_brief")
         self.assertEqual(payload["contract"], "CWA")
         self.assertEqual(payload["narrative"], "Non-discipline grievance brief")
+        self.assertNotIn("grievant_email", payload)
 
         template_data = payload["template_data"]
+        self.assertNotIn("signer_email", template_data)
         for key in (
             "grievant_name",
             "local_number",
@@ -43,7 +47,6 @@ class NonDisciplinePackAssetTests(unittest.TestCase):
             "company_position",
             "potential_witnesses",
             "recommendation",
-            "signer_email",
         ):
             self.assertIn(key, template_data)
 

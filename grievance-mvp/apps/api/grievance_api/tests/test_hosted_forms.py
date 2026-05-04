@@ -161,12 +161,13 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         assert definition is not None
         names = [field.name for field in definition.fields]
 
+        self.assertNotIn("grievant_email", names)
+        self.assertNotIn("signer_email", names)
         self.assertEqual(
-            names[:10],
+            names[:9],
             [
                 "grievant_firstname",
                 "grievant_lastname",
-                "grievant_email",
                 "grievant_phone",
                 "grievant_street",
                 "grievant_city",
@@ -177,7 +178,7 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(
-            names[-11:],
+            names[-10:],
             [
                 "attachment_1",
                 "attachment_2",
@@ -189,7 +190,6 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
                 "attachment_8",
                 "attachment_9",
                 "attachment_10",
-                "signer_email",
             ],
         )
 
@@ -198,9 +198,11 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         assert definition is not None
         names = [field.name for field in definition.fields]
 
+        self.assertNotIn("grievant_email", names)
+        self.assertNotIn("signer_email", names)
         self.assertLess(names.index("attachment_2"), names.index("attachment_10"))
         self.assertEqual(
-            names[-11:],
+            names[-10:],
             [
                 "attachment_1",
                 "attachment_2",
@@ -212,9 +214,20 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
                 "attachment_8",
                 "attachment_9",
                 "attachment_10",
-                "signer_email",
             ],
         )
+
+    def test_all_brief_forms_omit_email_fields_from_payload(self) -> None:
+        for form_key in ("true_intent_brief", "non_discipline_brief", "disciplinary_brief"):
+            definition = get_hosted_form_definition(form_key)
+            assert definition is not None
+            names = [field.name for field in definition.fields]
+            payload = definition.build_payload(_values_for_definition(form_key))
+
+            self.assertNotIn("grievant_email", names)
+            self.assertNotIn("signer_email", names)
+            self.assertNotIn("grievant_email", payload)
+            self.assertNotIn("signer_email", payload["template_data"])
 
     def test_settlement_signer_questions_render_before_case_details(self) -> None:
         definition = get_hosted_form_definition("settlement_form")

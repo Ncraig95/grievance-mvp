@@ -399,7 +399,7 @@ Flow shape:
 1. Trigger: `When a new response is submitted` (Microsoft Forms)
 2. Action: `Get response details`
 3. Action: `HTTP` (POST) to `https://<your-api-host>/intake`
-4. Parse JSON response and store `case_id`, `grievance_id`, and `documents[0].signing_link` if needed
+4. Parse JSON response and store `case_id`, `grievance_id`, and `documents[0].status` for unsigned briefs or `documents[0].signing_link` for signature workflows
 
 HTTP body example:
 
@@ -535,11 +535,8 @@ Minimum payload pattern for all commands:
   "contract": "CWA",
   "grievant_firstname": "John",
   "grievant_lastname": "Doe",
-  "grievant_email": "john@example.com",
   "narrative": "Base narrative text",
-  "template_data": {
-    "union_rep_email": "rep@example.com"
-  }
+  "template_data": {}
 }
 ```
 

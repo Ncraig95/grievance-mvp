@@ -114,7 +114,6 @@ function Get-TrueIntentRows {
         (New-FieldRow -PayloadPath "contract" -SourceType "Fixed" -Section "Submission" -ValueSource "Fixed string" -ValueTemplate "CWA" -ExampleValue "CWA")
         (New-FieldRow -PayloadPath "grievant_firstname" -SourceType "Form" -Section "Grievant" -QuestionTitle "Grievant first name" -QuestionType "Text" -RequiredByDefault "Yes" -ValueSource "Get response details -> Grievant first name" -ValueTemplate "<Map from Forms: Grievant first name>" -ExampleValue "Taylor")
         (New-FieldRow -PayloadPath "grievant_lastname" -SourceType "Form" -Section "Grievant" -QuestionTitle "Grievant last name" -QuestionType "Text" -RequiredByDefault "Yes" -ValueSource "Get response details -> Grievant last name" -ValueTemplate "<Map from Forms: Grievant last name>" -ExampleValue "Jones")
-        (New-FieldRow -PayloadPath "grievant_email" -SourceType "Form" -Section "Grievant" -QuestionTitle "Grievant email" -QuestionType "Email" -RequiredByDefault "Yes" -ValueSource "Get response details -> Grievant email" -ValueTemplate "<Map from Forms: Grievant email>" -ExampleValue "taylor.jones@example.com")
         (New-FieldRow -PayloadPath "narrative" -SourceType "Fixed" -Section "Submission" -ValueSource "Fixed string" -ValueTemplate "True intent grievance brief" -ExampleValue "True intent grievance brief" -Notes "Keep this fixed unless you intentionally want a separate summary question in the Form.")
         (New-FieldRow -PayloadPath "template_data.grievant_name" -SourceType "Compose" -Section "Grievant" -ValueSource "Compose from grievant_firstname + grievant_lastname" -ValueTemplate "<Compose from first and last name>" -ExampleValue "Taylor Jones" -Notes "Do not add a duplicate full-name question unless you want the operator to type it twice.")
         (New-FieldRow -PayloadPath "template_data.date_grievance_occurred" -SourceType "Form" -Section "Grievance" -QuestionTitle "Date grievance occurred" -QuestionType "Date" -RequiredByDefault "Yes" -ValueSource "Get response details -> Date grievance occurred" -ValueTemplate "<Map from Forms: Date grievance occurred>" -ExampleValue "2026-04-02")
@@ -161,7 +160,6 @@ function Get-TrueIntentRows {
         (New-FieldRow -PayloadPath "template_data.attachment_8" -SourceType "Form" -Section "Attachments" -QuestionTitle "Attachment 8 label" -QuestionType "Text" -RequiredByDefault "No" -ValueSource "Get response details -> Attachment 8 label" -ValueTemplate "<Map from Forms: Attachment 8 label>" -ExampleValue "")
         (New-FieldRow -PayloadPath "template_data.attachment_9" -SourceType "Form" -Section "Attachments" -QuestionTitle "Attachment 9 label" -QuestionType "Text" -RequiredByDefault "No" -ValueSource "Get response details -> Attachment 9 label" -ValueTemplate "<Map from Forms: Attachment 9 label>" -ExampleValue "")
         (New-FieldRow -PayloadPath "template_data.attachment_10" -SourceType "Form" -Section "Attachments" -QuestionTitle "Attachment 10 label" -QuestionType "Text" -RequiredByDefault "No" -ValueSource "Get response details -> Attachment 10 label" -ValueTemplate "<Map from Forms: Attachment 10 label>" -ExampleValue "")
-        (New-FieldRow -PayloadPath "template_data.signer_email" -SourceType "Form" -Section "Routing" -QuestionTitle "Signer email override" -QuestionType "Email" -RequiredByDefault "No" -ValueSource "Get response details -> Signer email override" -ValueTemplate "<Optional Forms answer: Signer email override>" -ExampleValue "steward@example.com" -Notes "Leave blank when the default signer should be grievant_email.")
     )
 }
 
@@ -280,7 +278,7 @@ $publishedUrlLine
    - Content-Type: application/json
    - intake auth headers if your environment requires them
 10. Body: paste true_intent_brief.http-body.json and replace each placeholder with the matching Forms answer or Compose output.
-11. Parse the JSON response and capture at least case_id, grievance_id, and documents[0].signing_link when present.
+11. Parse the JSON response and capture at least case_id, grievance_id, and documents[0].status.
 
 ## Fixed values to keep
 
@@ -290,9 +288,9 @@ $publishedUrlLine
 
 ## Important notes
 
-- Leave template_data.signer_email empty unless you need to override the default signer. If you omit it, the app can fall back to grievant_email.
+- Brief submissions do not collect grievant email and do not route signatures.
 - Keep the same request_id when you intentionally replay a Forms submission, or the API may create duplicates.
-- Do not add DocuSeal signature anchors as Form questions.
+- Do not add email or signature routing fields as Form questions.
 - After publish, copy the real Form URL into scripts/power-platform/forms.local.json and replace the placeholder URL in repo docs.
 "@
 

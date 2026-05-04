@@ -170,7 +170,6 @@ _FORM_FIELD_ORDERS: dict[str, tuple[str, ...]] = {
     "true_intent_brief": (
         "grievant_firstname",
         "grievant_lastname",
-        "grievant_email",
         "grievant_phone",
         "grievant_street",
         "grievant_city",
@@ -215,12 +214,10 @@ _FORM_FIELD_ORDERS: dict[str, tuple[str, ...]] = {
         "attachment_8",
         "attachment_9",
         "attachment_10",
-        "signer_email",
     ),
     "non_discipline_brief": (
         "grievant_firstname",
         "grievant_lastname",
-        "grievant_email",
         "local_number",
         "local_grievance_number",
         "location",
@@ -248,12 +245,10 @@ _FORM_FIELD_ORDERS: dict[str, tuple[str, ...]] = {
         "attachment_8",
         "attachment_9",
         "attachment_10",
-        "signer_email",
     ),
     "disciplinary_brief": (
         "grievant_firstname",
         "grievant_lastname",
-        "grievant_email",
         "grievant_phone",
         "grievant_street",
         "grievant_city",
@@ -324,7 +319,6 @@ _FORM_FIELD_ORDERS: dict[str, tuple[str, ...]] = {
         "attachment_17_date",
         "attachment_18_name",
         "attachment_18_date",
-        "signer_email",
     ),
     "settlement_form": (
         "grievance_id",
@@ -642,7 +636,6 @@ _FORM_CATALOG: tuple[dict[str, object], ...] = (
             "contract": "CWA",
             "grievant_firstname": "<Grievant first name>",
             "grievant_lastname": "<Grievant last name>",
-            "grievant_email": "<Grievant email>",
             "narrative": "True intent grievance brief",
         },
         "templateDataFields": {
@@ -691,7 +684,6 @@ _FORM_CATALOG: tuple[dict[str, object], ...] = (
             "union_proposed_settlement": "<Union proposed settlement>",
             "union_strengths": "<Union strengths>",
             "union_weaknesses": "<Union weaknesses>",
-            "signer_email": "<Optional signer email override>",
         },
     },
     {
@@ -704,7 +696,6 @@ _FORM_CATALOG: tuple[dict[str, object], ...] = (
             "contract": "CWA",
             "grievant_firstname": "<Grievant first name>",
             "grievant_lastname": "<Grievant last name>",
-            "grievant_email": "<Grievant email>",
             "narrative": "Non-discipline grievance brief",
         },
         "templateDataFields": {
@@ -735,7 +726,6 @@ _FORM_CATALOG: tuple[dict[str, object], ...] = (
             "location": "<Location>",
             "potential_witnesses": "<Potential witnesses>",
             "recommendation": "<Recommendation>",
-            "signer_email": "<Optional signer email override>",
             "union_position": "<Union position>",
         },
     },
@@ -749,7 +739,6 @@ _FORM_CATALOG: tuple[dict[str, object], ...] = (
             "contract": "CWA",
             "grievant_firstname": "<Grievant first name>",
             "grievant_lastname": "<Grievant last name>",
-            "grievant_email": "<Grievant email>",
             "narrative": "Disciplinary grievance brief",
         },
         "templateDataFields": {
@@ -824,7 +813,6 @@ _FORM_CATALOG: tuple[dict[str, object], ...] = (
             "union_facts": "<Union facts>",
             "union_proposed_settlement": "<Union proposed settlement>",
             "union_representation": "<Union representation>",
-            "signer_email": "<Optional signer email override>",
         },
     },
     {
@@ -1102,7 +1090,6 @@ _FORM_OVERRIDES: dict[str, dict[str, object]] = {
             "seniority_date",
             "step1_informal_date",
             "step2_formal_date",
-            "signer_email",
         },
     },
     "non_discipline_brief": {
@@ -1113,7 +1100,6 @@ _FORM_OVERRIDES: dict[str, dict[str, object]] = {
             "local_grievance_number",
             "date_grievance_appealed_to_executive_level",
             "potential_witnesses",
-            "signer_email",
         },
     },
     "disciplinary_brief": {
@@ -1130,7 +1116,6 @@ _FORM_OVERRIDES: dict[str, dict[str, object]] = {
             "seniority_date",
             "step1_informal_date",
             "step2_formal_date",
-            "signer_email",
         },
     },
     "settlement_form": {

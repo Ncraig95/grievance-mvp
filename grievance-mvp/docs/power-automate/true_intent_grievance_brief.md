@@ -13,8 +13,8 @@
 - API endpoint: `POST /intake`
 - Contract: `CWA`
 - Request id pattern: `forms-<Response Id>`
-- Default signer behavior:
-  `template_data.signer_email` when explicitly supplied, otherwise `grievant_email`
+- Signature behavior:
+  Brief submissions do not collect grievant email and do not route signatures.
 - Default narrative:
   `True intent grievance brief`
 - `grievance_id` is not required for this workflow.
@@ -24,14 +24,14 @@
 ## Who Should Submit This Form
 
 - Use this form when a steward, officer, or local representative needs to prepare a True Intent grievance brief for intake into the grievance system.
-- After submission, the API creates the case intake, renders the document, routes the signing workflow, and continues the normal filing flow used by the app.
+- After submission, the API creates the case intake, renders the document, and continues the normal filing flow used by the app.
 
 ## Form Metadata
 
 - Form title:
   `True Intent Grievance Brief`
 - Form description:
-  `Use this form to prepare and submit a True Intent grievance brief for intake into the grievance system. After submission, the brief is rendered into the app workflow and routed for signature using the configured signer rules.`
+  `Use this form to prepare and submit a True Intent grievance brief for intake into the grievance system. After submission, the brief is rendered into the app workflow without grievant email collection or signature routing.`
 
 ## Do Not Add These As Forms Questions
 
@@ -45,8 +45,8 @@
   Keep this fixed as `True intent grievance brief` unless you intentionally want a different fixed summary.
 - `template_data.grievant_name`
   Compose this in the flow from first name and last name.
-- DocuSeal signature anchors
-  Do not create Forms questions for template signature fields.
+- Email routing fields
+  Briefs do not collect email addresses and do not route signatures.
 - Attachment uploads
   `attachment_1` through `attachment_10` are text labels or exhibit names, not Microsoft Forms file-upload controls.
 
@@ -60,7 +60,6 @@ Use the generated pack in `scripts/power-platform/output/true_intent_brief/` if 
 | --- | --- | --- | --- | --- |
 | Grievant first name | Text | Yes | `grievant_firstname` | Core intake field. |
 | Grievant last name | Text | Yes | `grievant_lastname` | Core intake field. |
-| Grievant email | Email | Yes | `grievant_email` | Core intake field and default signer fallback. |
 | Grievant phone | Text | Yes | `template_data.grievant_phone` | Use a normal phone text field. |
 | Grievant street | Text | Yes | `template_data.grievant_street` | Street address only. |
 | Grievant city | Text | Yes | `template_data.grievant_city` |  |
@@ -120,7 +119,6 @@ Use the generated pack in `scripts/power-platform/output/true_intent_brief/` if 
 | Attachment 8 label | Text | No | `template_data.attachment_8` | Exhibit name, description, or filename only. |
 | Attachment 9 label | Text | No | `template_data.attachment_9` | Exhibit name, description, or filename only. |
 | Attachment 10 label | Text | No | `template_data.attachment_10` | Exhibit name, description, or filename only. |
-| Signer email override | Email | No | `template_data.signer_email` | Optional. Leave blank unless you need to override the default signer routing. |
 
 ## Fixed Flow Values And Non-Question Values
 
@@ -137,7 +135,7 @@ Use the generated pack in `scripts/power-platform/output/true_intent_brief/` if 
 - API URL
   Use `https://api.cwa3106.org/intake`.
 - Do not send `grievance_id` for the standard True Intent Brief flow.
-- Do not send `documents` unless you intentionally want explicit signer control beyond the normal signer fallback logic.
+- Do not send `documents` for the standard brief flow.
 
 ## Power Automate Build
 
@@ -178,7 +176,6 @@ Use the generated pack in `scripts/power-platform/output/true_intent_brief/` if 
   "contract": "CWA",
   "grievant_firstname": "<Grievant first name>",
   "grievant_lastname": "<Grievant last name>",
-  "grievant_email": "<Grievant email>",
   "narrative": "True intent grievance brief",
   "template_data": {
     "grievant_name": "<Compose first name + last name>",
@@ -225,8 +222,7 @@ Use the generated pack in `scripts/power-platform/output/true_intent_brief/` if 
     "attachment_7": "<Attachment 7 label>",
     "attachment_8": "<Attachment 8 label>",
     "attachment_9": "<Attachment 9 label>",
-    "attachment_10": "<Attachment 10 label>",
-    "signer_email": "<Signer email override>"
+    "attachment_10": "<Attachment 10 label>"
   }
 }
 ```
@@ -237,7 +233,7 @@ Use the generated pack in `scripts/power-platform/output/true_intent_brief/` if 
 9. Store or log at least:
    `case_id`
    `grievance_id`
-   `documents[0].signing_link` when present
+   `documents[0].status`
 
 ## Shared Form / Shared Flow Option
 
@@ -256,9 +252,9 @@ If you want one Microsoft Form and one Power Automate flow for both brief types:
 
 ## Go-Live Notes
 
-- If you do not need a signer override, either leave `template_data.signer_email` blank in the Form or remove that property from the JSON body.
+- Do not add grievant email or signer email to the Form or HTTP body.
 - Reuse the same `request_id` when replaying the same Microsoft Forms response to avoid duplicate submissions.
 - Replace placeholder published Form URLs in repo docs after the Form is published.
-- Run one real tenant submission after building the flow and verify case creation, rendered document output, signing-link delivery, and SharePoint filing.
+- Run one real tenant submission after building the flow and verify case creation, rendered document output, and SharePoint filing.
 - The generated operator pack for this form is in:
   `scripts/power-platform/output/true_intent_brief/`
