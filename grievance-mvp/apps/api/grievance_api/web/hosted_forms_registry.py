@@ -52,6 +52,14 @@ _STATEMENT_OF_OCCURRENCE_CONTRACT_OPTIONS = (
     "BST",
     "Utilities",
 )
+_REFERRAL_COMPANY_OPTIONS = (
+    "City of Jacksonville",
+    "Wire Tech",
+    "AT&T",
+    "IHX",
+    "BST",
+    "Utilities",
+)
 _FORM_FIELD_ORDERS: dict[str, tuple[str, ...]] = {
     "statement_of_occurrence": (
         "contract",
@@ -1044,9 +1052,9 @@ _FORM_CATALOG: tuple[dict[str, object], ...] = (
             "referrer_phone": "<Your phone number>",
             "referrer_address": "<Your address>",
             "referrer_email": "<Your email>",
-            "referrer_group": "<Your group>",
+            "referrer_group": "<Your company or group>",
             "referred_name": "<Person you are referring>",
-            "referred_group": "<Referred person's group or company>",
+            "referred_group": "<Referred person's company or group>",
             "referred_att_uid": "<AT&T UID>",
             "referral_notes": "<Referral notes>",
         },
@@ -1377,6 +1385,10 @@ _FORM_OVERRIDES: dict[str, dict[str, object]] = {
             "referred_group",
             "referred_att_uid",
             "referral_notes",
+        },
+        "field_options": {
+            "referrer_group": _REFERRAL_COMPANY_OPTIONS,
+            "referred_group": _REFERRAL_COMPANY_OPTIONS,
         },
     },
 }

@@ -93,6 +93,8 @@ def migrate(db_path: str) -> None:
               status TEXT NOT NULL DEFAULT 'open',
               assignee TEXT,
               officer_notes TEXT,
+              paid INTEGER NOT NULL DEFAULT 0,
+              paid_at_utc TEXT,
               reminder_due_at_utc TEXT NOT NULL,
               reminder_attempted_at_utc TEXT,
               reminder_sent_at_utc TEXT,
@@ -365,6 +367,8 @@ def migrate(db_path: str) -> None:
         _ensure_column(con, "referrals", "status", "TEXT NOT NULL DEFAULT 'open'")
         _ensure_column(con, "referrals", "assignee", "TEXT")
         _ensure_column(con, "referrals", "officer_notes", "TEXT")
+        _ensure_column(con, "referrals", "paid", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(con, "referrals", "paid_at_utc", "TEXT")
         _ensure_column(con, "referrals", "reminder_due_at_utc", "TEXT")
         _ensure_column(con, "referrals", "reminder_attempted_at_utc", "TEXT")
         _ensure_column(con, "referrals", "reminder_sent_at_utc", "TEXT")

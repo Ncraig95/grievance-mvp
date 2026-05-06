@@ -80,6 +80,8 @@ CREATE TABLE IF NOT EXISTS referrals (
   status TEXT NOT NULL DEFAULT 'open',
   assignee TEXT,
   officer_notes TEXT,
+  paid INTEGER NOT NULL DEFAULT 0,
+  paid_at_utc TEXT,
   reminder_due_at_utc TEXT NOT NULL,
   reminder_attempted_at_utc TEXT,
   reminder_sent_at_utc TEXT,

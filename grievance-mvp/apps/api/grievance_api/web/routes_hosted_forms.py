@@ -309,15 +309,50 @@ def _field_payload(fields: tuple[Any, ...]) -> list[dict[str, object]]:
     ]
 
 
+def _form_sections_payload(definition: HostedFormDefinition) -> list[dict[str, object]]:
+    if definition.form_key == "referral":
+        return [
+            {
+                "title": "Your Information",
+                "summary": "Tell us who is making the referral and how officers can reach you.",
+                "fields": ["referrer_name", "referrer_phone", "referrer_address", "referrer_email", "referrer_group"],
+            },
+            {
+                "title": "Person You're Referring",
+                "summary": "Add the person officers should follow up with. The AT&T UID is optional.",
+                "fields": ["referred_name", "referred_group", "referred_att_uid"],
+            },
+            {
+                "title": "Notes",
+                "summary": "Share context that will help the officer follow up.",
+                "fields": ["referral_notes"],
+            },
+        ]
+    return [{"title": "", "summary": "", "fields": [field.name for field in definition.fields]}]
+
+
+def _public_metadata(definition: HostedFormDefinition) -> tuple[tuple[str, str], ...]:
+    return tuple(item for item in definition.metadata if item[0] == "Contract")
+
+
 def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: str) -> str:
     title = escape(definition.title)
     description = escape(definition.description)
     fields_json = json.dumps(_field_payload(definition.fields), ensure_ascii=False)
+    sections_json = json.dumps(_form_sections_payload(definition), ensure_ascii=False)
     metadata_html = "".join(
         f"<span><strong>{escape(label)}</strong> {escape(value)}</span>"
-        for label, value in definition.metadata
+        for label, value in _public_metadata(definition)
     )
-    form_key = escape(definition.form_key)
+    metadata_block = (
+        f"""
+    <div class="fixed-meta" aria-label="Form details">
+      {metadata_html}
+    </div>
+        """
+        if metadata_html
+        else ""
+    )
     submit_path_js = json.dumps(submit_path)
     form_key_js = json.dumps(definition.form_key)
     requires_attestation_js = json.dumps(_requires_signature_attestation(definition.form_key))
@@ -377,15 +412,40 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
     }}
     .fixed-meta strong {{ color: var(--text); font-weight: 600; }}
     form {{ margin: 16px 0 0; }}
-    .question {{
+    .form-section {{
       background: var(--panel-bg);
       border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 18px 20px;
-      margin-bottom: 12px;
-      border-left: 4px solid transparent;
+      border-radius: 12px;
+      padding: 18px;
+      margin-bottom: 14px;
       box-shadow: var(--shadow);
     }}
+    .form-section-header {{
+      margin-bottom: 14px;
+    }}
+    .form-section-header h2 {{
+      margin: 0 0 4px;
+      font-size: 20px;
+      line-height: 1.2;
+    }}
+    .form-section-header p {{
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }}
+    .question-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }}
+    .question {{
+      background: #fbfdfe;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      border-left: 4px solid transparent;
+    }}
+    .question.full-width {{ grid-column: 1 / -1; }}
     .question:focus-within {{ border-left-color: var(--forms-green); }}
     .attestation {{
       background: #fff;
@@ -420,6 +480,34 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
     input:focus, textarea:focus, select:focus {{
       outline: 2px solid rgba(3, 120, 124, 0.25);
       border-color: var(--forms-green);
+    }}
+    .choice-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px;
+    }}
+    .choice-button {{
+      width: 100%;
+      border: 1px solid #aab7c2;
+      border-radius: 10px;
+      background: #fff;
+      color: #18333a;
+      padding: 10px 12px;
+      text-align: center;
+      font-weight: 700;
+    }}
+    .choice-button[aria-pressed="true"] {{
+      border-color: var(--forms-green-dark);
+      background: #e4f3f2;
+      color: var(--forms-green-dark);
+      box-shadow: inset 0 0 0 1px var(--forms-green-dark);
+    }}
+    .choice-button:focus {{
+      outline: 2px solid rgba(3, 120, 124, 0.25);
+      outline-offset: 2px;
+    }}
+    .custom-choice-input {{
+      margin-top: 10px;
     }}
     .actions {{
       display: flex;
@@ -467,15 +555,11 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
       font-size: 13px;
     }}
     .hidden {{ display: none; }}
-    .footer {{
-      color: var(--muted);
-      font-size: 13px;
-      margin-top: 16px;
-      text-align: center;
-    }}
+    .status pre:empty {{ display: none; }}
     @media (max-width: 620px) {{
       .shell {{ padding: 14px 10px 32px; }}
-      .header, .fixed-meta, .question, .status {{ padding-left: 14px; padding-right: 14px; }}
+      .header, .fixed-meta, .form-section, .question, .status {{ padding-left: 14px; padding-right: 14px; }}
+      .question-grid {{ grid-template-columns: 1fr; }}
       h1 {{ font-size: 24px; }}
       .actions button {{ width: 100%; }}
     }}
@@ -487,9 +571,7 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
       <h1>{title}</h1>
       <p class="subtitle">{description}</p>
     </header>
-    <div class="fixed-meta" aria-label="Workflow metadata">
-      {metadata_html}
-    </div>
+    {metadata_block}
 
     <form id="hostedForm">
       <div id="questions"></div>
@@ -506,9 +588,6 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
       <pre id="statusDetails"></pre>
     </section>
 
-    <div class="footer">
-      Hosted form key: <strong>{form_key}</strong>
-    </div>
   </main>
 
   <script>
@@ -516,6 +595,7 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
     const FORM_ENDPOINT = {submit_path_js};
     const REQUIRES_SIGNATURE_ATTESTATION = {requires_attestation_js};
     const fields = {fields_json};
+    const fieldSections = {sections_json};
 
     const form = document.getElementById('hostedForm');
     const questions = document.getElementById('questions');
@@ -546,6 +626,14 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
       if (field.type === 'textarea') {{
         return `<textarea class="auto-expand" id="${{id}}" name="${{esc(field.name)}}" rows="4"${{required}}${{placeholder}}></textarea>`;
       }}
+      if (FORM_KEY === 'referral' && ['referrer_group', 'referred_group'].includes(field.name) && field.options && field.options.length) {{
+        const buttons = field.options.map((option) => `
+          <button class="choice-button" type="button" data-choice-for="${{id}}" data-choice-value="${{esc(option)}}" aria-pressed="false">${{esc(option)}}</button>
+        `).join('');
+        return `<input id="${{id}}" name="${{esc(field.name)}}" type="hidden"${{required}} />` +
+          `<div class="choice-grid" role="group" aria-labelledby="${{id}}-label">${{buttons}}</div>` +
+          `<input class="custom-choice-input" type="text" data-custom-choice-for="${{id}}" placeholder="Type another company or group" aria-label="Type another company or group" />`;
+      }}
       if (field.type === 'select') {{
         const options = ['<option value=""></option>'].concat(
           (field.options || []).map((option) => `<option value="${{esc(option)}}">${{esc(option)}}</option>`)
@@ -555,16 +643,32 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
       return `<input id="${{id}}" name="${{esc(field.name)}}" type="${{esc(field.type || 'text')}}"${{required}}${{placeholder}} />`;
     }}
 
-    function renderQuestions() {{
-      const renderedFields = fields.map((field) => {{
+    function isLongField(field) {{
+      return field.type === 'textarea' || ['referrer_address', 'referral_notes'].includes(field.name);
+    }}
+
+    function renderQuestion(field) {{
         const id = `field-${{field.name}}`;
         const required = field.required ? ' required aria-required="true"' : '';
         const label = `${{esc(field.label)}}${{field.required ? ' <span class="required">*</span>' : ''}}`;
         const hint = field.hint ? `<p class="hint">${{esc(field.hint)}}</p>` : '';
         const placeholder = field.placeholder ? ` placeholder="${{esc(field.placeholder)}}"` : '';
         const control = renderControl(field, id, required, placeholder);
-        return `<div class="question"><label for="${{id}}">${{label}}</label>${{hint}}${{control}}</div>`;
-      }}).join('');
+        return `<div class="question${{isLongField(field) ? ' full-width' : ''}}"><label id="${{id}}-label" for="${{id}}">${{label}}</label>${{hint}}${{control}}</div>`;
+    }}
+
+    function renderSection(section, fieldByName) {{
+      const sectionFields = (section.fields || []).map((name) => fieldByName.get(name)).filter(Boolean);
+      if (!sectionFields.length) return '';
+      const heading = section.title
+        ? `<div class="form-section-header"><h2>${{esc(section.title)}}</h2>${{section.summary ? `<p>${{esc(section.summary)}}</p>` : ''}}</div>`
+        : '';
+      return `<section class="form-section">${{heading}}<div class="question-grid">${{sectionFields.map(renderQuestion).join('')}}</div></section>`;
+    }}
+
+    function renderQuestions() {{
+      const fieldByName = new Map(fields.map((field) => [field.name, field]));
+      const renderedFields = fieldSections.map((section) => renderSection(section, fieldByName)).join('');
       const attestation = REQUIRES_SIGNATURE_ATTESTATION
         ? `<div class="attestation">
              <label for="signatureConsent">
@@ -590,12 +694,49 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
       }});
     }}
 
+    function syncChoiceButtons(input) {{
+      const buttons = questions.querySelectorAll(`[data-choice-for="${{input.id}}"]`);
+      buttons.forEach((button) => {{
+        button.setAttribute('aria-pressed', button.dataset.choiceValue === input.value ? 'true' : 'false');
+      }});
+    }}
+
+    function chooseOption(button) {{
+      const input = document.getElementById(button.dataset.choiceFor || '');
+      if (!input) return;
+      input.value = button.dataset.choiceValue || '';
+      const customInput = questions.querySelector(`[data-custom-choice-for="${{input.id}}"]`);
+      if (customInput) customInput.value = '';
+      input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+      syncChoiceButtons(input);
+    }}
+
+    function typeCustomOption(customInput) {{
+      const input = document.getElementById(customInput.dataset.customChoiceFor || '');
+      if (!input) return;
+      input.value = customInput.value.trim();
+      input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+      syncChoiceButtons(input);
+    }}
+
+    function validateChoiceButtons() {{
+      for (const input of questions.querySelectorAll('input[type="hidden"][required]')) {{
+        if (String(input.value || '').trim()) continue;
+        const label = document.getElementById(`${{input.id}}-label`);
+        setStatus('error', 'Selection required', `Choose ${{label ? label.textContent.replace('*', '').trim().toLowerCase() : 'an option'}} before submitting.`, '');
+        const firstButton = questions.querySelector(`[data-choice-for="${{input.id}}"]`);
+        if (firstButton) firstButton.focus();
+        return false;
+      }}
+      return true;
+    }}
+
     function setStatus(state, title, message, details) {{
       statusPanel.classList.remove('hidden');
       statusPanel.dataset.state = state || '';
       statusTitle.textContent = title || '';
       statusMessage.textContent = message || '';
-      statusDetails.textContent = details ? JSON.stringify(details, null, 2) : '';
+      statusDetails.textContent = details || '';
     }}
 
     function collectPayload() {{
@@ -642,11 +783,27 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
       if (backend && backend.submission_id) {{
         return `Standalone submission ${{backend.submission_id}} was created.`;
       }}
+      if (backend && backend.referral_id) {{
+        return 'Referral submitted. An officer will review it and follow up.';
+      }}
       return 'The form was submitted successfully.';
+    }}
+
+    function failureMessage(error) {{
+      const data = error && error.data ? error.data : error;
+      const detail = data && typeof data === 'object' ? String(data.detail || '') : String(data || '');
+      if (detail.toLowerCase().includes('sunset date has passed')) {{
+        return 'This referral form is currently closed. Please contact an officer if the referral window has been extended.';
+      }}
+      if (detail.toLowerCase().includes('rate limit')) {{
+        return 'Too many attempts were submitted from this connection. Please wait a few minutes and try again.';
+      }}
+      return 'We could not submit the form. Check the required fields and try again.';
     }}
 
     async function submitForm(event) {{
       event.preventDefault();
+      if (!validateChoiceButtons()) return;
       if (!form.reportValidity()) return;
       submitBtn.disabled = true;
       savingText.classList.remove('hidden');
@@ -663,16 +820,16 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
         if (!response.ok) throw {{ status: response.status, data }};
         const redirect = redirectInfo(data);
         if (redirect && redirect.url) {{
-          setStatus('success', 'Ready to sign', 'Opening the signature page now.', data);
+          setStatus('success', 'Ready to sign', 'Opening the signature page now.', '');
           window.setTimeout(() => {{
             window.location.assign(redirect.url);
           }}, 650);
         }} else {{
-          setStatus('success', 'Submitted', successMessage(data), data);
+          setStatus('success', 'Submitted', successMessage(data), '');
         }}
         form.reset();
       }} catch (error) {{
-        setStatus('error', 'Submission failed', 'Review the response below and try again.', error);
+        setStatus('error', 'Submission failed', failureMessage(error), '');
       }} finally {{
         submitBtn.disabled = false;
         savingText.classList.add('hidden');
@@ -680,9 +837,21 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
     }}
 
     renderQuestions();
+    questions.addEventListener('click', (event) => {{
+      const button = event.target.closest('[data-choice-for]');
+      if (!button) return;
+      chooseOption(button);
+    }});
+    questions.addEventListener('input', (event) => {{
+      const customInput = event.target.closest('[data-custom-choice-for]');
+      if (!customInput) return;
+      typeCustomOption(customInput);
+    }});
     form.addEventListener('submit', (event) => {{ void submitForm(event); }});
     resetBtn.addEventListener('click', () => {{
       form.reset();
+      questions.querySelectorAll('[data-custom-choice-for]').forEach((input) => {{ input.value = ''; }});
+      questions.querySelectorAll('input[type="hidden"]').forEach(syncChoiceButtons);
       statusPanel.classList.add('hidden');
     }});
   </script>
@@ -836,6 +1005,33 @@ def _render_admin_page() -> str:
     }
     h1 { margin: 0 0 8px; font-size: 32px; }
     .subtitle { margin: 0; max-width: 780px; font-size: 15px; }
+    .toolbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: end;
+      flex-wrap: wrap;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: var(--shadow);
+      margin-bottom: 14px;
+    }
+    .toolbar label {
+      display: grid;
+      gap: 6px;
+      min-width: min(420px, 100%);
+      font-size: 13px;
+      font-weight: 700;
+      color: #334650;
+    }
+    .toolbar input {
+      border: 1px solid #aab7c2;
+      border-radius: 8px;
+      padding: 9px 10px;
+      font: inherit;
+    }
     .panel {
       background: var(--panel);
       border: 1px solid var(--border);
@@ -886,6 +1082,15 @@ def _render_admin_page() -> str:
     button:disabled { opacity: 0.65; cursor: progress; }
     .meta { color: var(--muted); font-size: 12px; }
     .row-title { font-weight: 700; margin-bottom: 4px; }
+    .route-pill {
+      display: inline-flex;
+      border-radius: 999px;
+      padding: 4px 8px;
+      background: #eef6f7;
+      color: #075b61;
+      font-size: 12px;
+      font-weight: 700;
+    }
     .linkish { color: var(--accent); text-decoration: none; }
     .public-link-wrap {
       display: grid;
@@ -907,6 +1112,41 @@ def _render_admin_page() -> str:
     .copy-button {
       white-space: nowrap;
       padding: 8px 10px;
+    }
+    .form-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .open-button {
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      padding: 8px 10px;
+      font-weight: 700;
+    }
+    .copy-button.secondary {
+      background: #fff;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+    }
+    details {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    summary {
+      cursor: pointer;
+      color: var(--accent);
+      font-weight: 700;
+    }
+    .detail-grid {
+      display: grid;
+      gap: 5px;
+      margin-top: 8px;
     }
     .private-note {
       color: var(--muted);
@@ -931,17 +1171,20 @@ def _render_admin_page() -> str:
       <h1>Hosted Form Controls</h1>
       <p class="subtitle">Manage which hosted forms are enabled, whether they are public or private, and where each page points in the backend. Public/private changes take effect immediately without a redeploy.</p>
     </section>
+    <section class="toolbar">
+      <label>Find a hosted form
+        <input id="formSearchInput" type="search" placeholder="Search by title, key, or route type" />
+      </label>
+      <div class="meta">Use this page to copy the public referral link and control form visibility.</div>
+    </section>
     <section class="panel">
       <table>
         <thead>
           <tr>
             <th>Form</th>
-            <th>Route</th>
-            <th>Hosted Page</th>
-            <th>Backend Path</th>
-            <th>Visibility</th>
-            <th>Enabled</th>
-            <th>Save</th>
+            <th>Public Link</th>
+            <th>Settings</th>
+            <th>Technical Details</th>
           </tr>
         </thead>
         <tbody id="rows"></tbody>
@@ -953,6 +1196,8 @@ def _render_admin_page() -> str:
   <script>
     const rowsEl = document.getElementById('rows');
     const statusEl = document.getElementById('statusText');
+    const searchInput = document.getElementById('formSearchInput');
+    let allRows = [];
 
     function esc(value) {
       return String(value == null ? '' : value)
@@ -981,14 +1226,44 @@ def _render_admin_page() -> str:
       return `
         <div class="public-link-wrap">
           <input class="public-link-input" data-role="public-link" type="text" readonly value="${esc(url)}" />
-          <button class="copy-button" type="button" data-role="copy-public-link">Copy</button>
+          <button class="copy-button secondary" type="button" data-role="copy-public-link">Copy Link</button>
         </div>
-        <div class="meta"><a class="linkish" href="${esc(row.public_path)}" target="_blank" rel="noreferrer">${esc(row.public_path)}</a></div>
+        <div class="form-actions">
+          <a class="open-button" href="${esc(row.public_path)}" target="_blank" rel="noreferrer">Open Public Page</a>
+        </div>
         ${disabledNote}
       `;
     }
 
+    function technicalDetails(row) {
+      return `
+        <details>
+          <summary>Technical details</summary>
+          <div class="detail-grid">
+            <div><strong>Route:</strong> ${esc(row.route_type)}</div>
+            <div><strong>Backend path:</strong> ${esc(row.target_path)}</div>
+            <div><strong>Public path:</strong> ${esc(row.public_path)}</div>
+          </div>
+        </details>
+      `;
+    }
+
+    function filteredRows() {
+      const query = searchInput.value.trim().toLowerCase();
+      if (!query) return allRows;
+      return allRows.filter((row) => [
+        row.title,
+        row.form_key,
+        row.route_type,
+        row.public_path
+      ].join(' ').toLowerCase().includes(query));
+    }
+
     function renderRows(rows) {
+      if (!rows.length) {
+        rowsEl.innerHTML = '<tr><td colspan="4" class="private-note">No hosted forms match the current search.</td></tr>';
+        return;
+      }
       rowsEl.innerHTML = rows.map((row) => {
         const meta = row.updated_at_utc ? `<div class="meta">Updated ${esc(row.updated_at_utc)}${row.updated_by ? ` by ${esc(row.updated_by)}` : ''}</div>` : '';
         return `
@@ -996,24 +1271,22 @@ def _render_admin_page() -> str:
             <td>
               <div class="row-title">${esc(row.title)}</div>
               <div class="meta">${esc(row.form_key)}</div>
+              <div><span class="route-pill">${esc(row.route_type)}</span></div>
               ${meta}
             </td>
-            <td>${esc(row.route_type)}</td>
             <td>${hostedPageCell(row)}</td>
-            <td><span class="meta">${esc(row.target_path)}</span></td>
             <td>
               <select data-role="visibility">
                 <option value="public"${row.visibility === 'public' ? ' selected' : ''}>public</option>
                 <option value="private"${row.visibility === 'private' ? ' selected' : ''}>private</option>
               </select>
-            </td>
-            <td>
               <label class="enabled-wrap">
                 <input data-role="enabled" type="checkbox"${row.enabled ? ' checked' : ''} />
                 <span>${row.enabled ? 'enabled' : 'disabled'}</span>
               </label>
+              <div class="form-actions"><button type="button" data-role="save">Save Settings</button></div>
             </td>
-            <td><button type="button" data-role="save">Save</button></td>
+            <td>${technicalDetails(row)}</td>
           </tr>
         `;
       }).join('');
@@ -1042,8 +1315,9 @@ def _render_admin_page() -> str:
       if (!response.ok) {
         throw new Error(JSON.stringify(data));
       }
-      renderRows(data.rows || []);
-      setStatus('Hosted forms loaded.', true);
+      allRows = data.rows || [];
+      renderRows(filteredRows());
+      setStatus(`${allRows.length} hosted forms loaded.`, true);
     }
 
     async function saveRow(tr) {
@@ -1087,6 +1361,9 @@ def _render_admin_page() -> str:
       const tr = button.closest('tr');
       if (!tr) return;
       void saveRow(tr);
+    });
+    searchInput.addEventListener('input', () => {
+      renderRows(filteredRows());
     });
 
     void loadRows().catch((error) => {

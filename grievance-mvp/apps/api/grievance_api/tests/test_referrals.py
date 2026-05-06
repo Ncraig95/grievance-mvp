@@ -13,6 +13,7 @@ from grievance_api.db.migrate import migrate
 from grievance_api.services.email_templates import EmailTemplateStore
 from grievance_api.services.graph_mail import SentGraphMail
 from grievance_api.services.referral_service import ReferralService
+from grievance_api.web.routes_referrals import _render_referrals_page
 
 
 class _FakeMailer:
@@ -110,8 +111,22 @@ class ReferralTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("referrer_address", cols)
         self.assertIn("referred_att_uid", cols)
+        self.assertIn("paid", cols)
+        self.assertIn("paid_at_utc", cols)
         self.assertIn("reminder_sent_at_utc", cols)
         self.assertIn("idx_referrals_request_id", indexes)
+
+    async def test_referral_portal_renders_readability_controls(self):
+        html = _render_referrals_page()
+
+        self.assertIn("Referral Window", html)
+        self.assertIn("metricGrid", html)
+        self.assertIn("Due or Overdue", html)
+        self.assertIn("Unpaid", html)
+        self.assertIn("paid-badge", html)
+        self.assertIn('data-role="paid"', html)
+        self.assertIn("formatDateTime", html)
+        self.assertIn("status-badge", html)
 
     async def test_program_settings_default_and_update_sunset_date(self):
         service = self._service(mailer=_FakeMailer(), sunset_date="2027-02-05")
@@ -144,9 +159,25 @@ class ReferralTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(first["id"], second["id"])
         self.assertEqual(first["referred_att_uid"], "JR1234")
+        self.assertFalse(first["paid"])
+        self.assertIsNone(first["paid_at_utc"])
         created = datetime.fromisoformat(first["created_at_utc"])
         due = datetime.fromisoformat(first["reminder_due_at_utc"])
         self.assertEqual((due - created).days, 60)
+
+    async def test_officers_can_mark_referral_paid_and_unpaid(self):
+        service = self._service(mailer=_FakeMailer())
+        referral = await service.create_referral(payload=self._payload("pay"), client_ip=None, user_agent=None)
+
+        marked_paid = await service.update_referral(referral["id"], {"paid": True})
+        exported = await service.export_csv([marked_paid])
+        marked_unpaid = await service.update_referral(referral["id"], {"paid": False})
+
+        self.assertTrue(marked_paid["paid"])
+        self.assertIsNotNone(marked_paid["paid_at_utc"])
+        self.assertIn("paid,paid_at_utc", exported)
+        self.assertFalse(marked_unpaid["paid"])
+        self.assertIsNone(marked_unpaid["paid_at_utc"])
 
     async def test_submission_validates_required_fields(self):
         service = self._service(mailer=_FakeMailer())
