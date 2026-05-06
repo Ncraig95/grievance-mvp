@@ -4,7 +4,8 @@ WATCHDOG_STATE_DIR := ./grievance-mvp/data/watchdog
 WATCHDOG_DISABLE_FILE := $(WATCHDOG_STATE_DIR)/disable_auto_restart
 
 .PHONY: up down restart ps logs config pull cloudflare sync-docuseal-url sync-docuseal-webhook \
-	smoke smoke-signed verify-download install-systemd watchdog-check watchdog-disable watchdog-enable watchdog-status
+	smoke smoke-signed verify-download install-systemd watchdog-check watchdog-disable watchdog-enable watchdog-status \
+	referral-run-due
 
 up:
 	$(COMPOSE) up -d --build
@@ -45,6 +46,9 @@ smoke-signed:
 verify-download:
 	./grievance-mvp/scripts/verify-docuseal-download.sh
 
+referral-run-due:
+	./grievance-mvp/scripts/run-referral-reminders.sh
+
 install-systemd:
 	sudo ./grievance-mvp/scripts/install-systemd-services.sh
 
@@ -65,3 +69,4 @@ watchdog-status:
 	@if [ -f "$(WATCHDOG_DISABLE_FILE)" ]; then echo "auto-restart: DISABLED"; else echo "auto-restart: ENABLED"; fi
 	@systemctl --no-pager --full status grievance-mvp.service || true
 	@systemctl --no-pager --full status grievance-mvp-watchdog.timer || true
+	@systemctl --no-pager --full status grievance-mvp-referral-reminders.timer || true

@@ -17,6 +17,7 @@ from .services.email_templates import EmailTemplateStore
 from .services.graph_mail import GraphMailer
 from .services.notification_service import NotificationService
 from .services.outreach_service import OutreachService
+from .services.referral_service import ReferralService
 from .services.sharepoint_graph import GraphUploader
 from .web.routes_approval import router as approval_router
 from .web.routes_health import router as health_router
@@ -28,6 +29,7 @@ from .web.officer_auth import router as officer_auth_router
 from .web.routes_officers import router as officers_router
 from .web.routes_ops import router as ops_router
 from .web.routes_outreach import router as outreach_router
+from .web.routes_referrals import router as referrals_router
 from .web.routes_steward import router as steward_router
 from .web.routes_standalone import router as standalone_router
 from .web.routes_webhook import router as webhook_router
@@ -146,6 +148,15 @@ def create_app() -> FastAPI:
         officer_auth_cfg=cfg.officer_auth,
         mailer=app.state.outreach_mailer,
     )
+    app.state.referrals = ReferralService(
+        db=app.state.db,
+        logger=app.state.logger,
+        referral_cfg=cfg.referrals,
+        email_cfg=cfg.email,
+        officer_auth_cfg=cfg.officer_auth,
+        mailer=app.state.mailer,
+        template_store=app.state.email_templates,
+    )
 
     @app.on_event("startup")
     async def _seed_outreach_data() -> None:
@@ -162,6 +173,7 @@ def create_app() -> FastAPI:
     app.include_router(ops_router)
     app.include_router(officers_router)
     app.include_router(outreach_router)
+    app.include_router(referrals_router)
     app.include_router(steward_router)
     app.include_router(standalone_router)
 

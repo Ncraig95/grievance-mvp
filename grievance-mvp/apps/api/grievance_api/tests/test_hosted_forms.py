@@ -87,6 +87,7 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         "bst_grievance_form_3g3a_extension",
         "att_mobility_bargaining_suggestion",
         "motion_sheet",
+        "referral",
     }
 
     async def asyncSetUp(self) -> None:
@@ -142,6 +143,27 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["grievant_firstname"], "Taylor")
         self.assertEqual(payload["template_data"]["article"], "Article 1")
         self.assertEqual(payload["template_data"]["witness_1_name"], "")
+
+    def test_builds_referral_payload(self) -> None:
+        definition = get_hosted_form_definition("referral")
+        assert definition is not None
+        payload = definition.build_payload(
+            _values_for_definition(
+                "referral",
+                referrer_name="Taylor Referrer",
+                referrer_phone="904-555-0100",
+                referrer_address="1 Union Way",
+                referrer_group="Utilities",
+                referred_name="Jordan Referred",
+                referred_att_uid="JR1234",
+            )
+        )
+
+        self.assertEqual(payload["referrer_name"], "Taylor Referrer")
+        self.assertEqual(payload["referrer_group"], "Utilities")
+        self.assertEqual(payload["referred_name"], "Jordan Referred")
+        self.assertEqual(payload["referred_att_uid"], "JR1234")
+        self.assertNotIn("template_data", payload)
 
     def test_statement_contract_field_uses_supported_contract_dropdown(self) -> None:
         definition = get_hosted_form_definition("statement_of_occurrence")

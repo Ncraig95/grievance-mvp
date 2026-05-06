@@ -102,6 +102,14 @@ class OutreachConfig:
 
 
 @dataclass(frozen=True)
+class ReferralConfig:
+    enabled: bool = True
+    reminder_days: int = 60
+    notification_recipients: tuple[str, ...] = ("officer@cwa3106.com",)
+    sunset_date: str = "2027-02-05"
+
+
+@dataclass(frozen=True)
 class GrievanceIdConfig:
     mode: str
     timezone: str
@@ -232,6 +240,10 @@ def _default_external_steward_auth() -> ExternalStewardAuthConfig:
     return ExternalStewardAuthConfig()
 
 
+def _default_referrals() -> ReferralConfig:
+    return ReferralConfig()
+
+
 @dataclass(frozen=True)
 class AppConfig:
     hmac_shared_secret: str
@@ -245,6 +257,7 @@ class AppConfig:
     email: EmailConfig
     grievance_id: GrievanceIdConfig
     outreach: OutreachConfig = field(default_factory=OutreachConfig)
+    referrals: ReferralConfig = field(default_factory=_default_referrals)
     intake_auth: IntakeAuthConfig = field(default_factory=_default_intake_auth)
     rendering: RenderingConfig = field(default_factory=_default_rendering)
     officer_tracking: OfficerTrackingConfig = field(default_factory=_default_officer_tracking)
@@ -636,6 +649,7 @@ def load_config(path: str) -> AppConfig:
     graph_raw = raw.get("graph", {}) or {}
     email_raw = raw.get("email", {}) or {}
     outreach_raw = raw.get("outreach", {}) or {}
+    referrals_raw = raw.get("referrals", {}) or {}
     grievance_raw = raw.get("grievance_id", {}) or {}
     intake_auth_raw = raw.get("intake_auth", {}) or {}
     rendering_raw = raw.get("rendering", {}) or {}
@@ -802,6 +816,15 @@ def load_config(path: str) -> AppConfig:
             ),
             max_parallel_sends=max(1, int(outreach_raw.get("max_parallel_sends", 1))),
             max_sends_per_run=max(1, int(outreach_raw.get("max_sends_per_run", 200))),
+        ),
+        referrals=ReferralConfig(
+            enabled=_as_bool(referrals_raw.get("enabled"), True),
+            reminder_days=max(1, int(referrals_raw.get("reminder_days", 60))),
+            notification_recipients=(
+                _as_recipients(referrals_raw.get("notification_recipients"))
+                or ("officer@cwa3106.com",)
+            ),
+            sunset_date=str(referrals_raw.get("sunset_date", "2027-02-05")).strip() or "2027-02-05",
         ),
         grievance_id=GrievanceIdConfig(
             mode=_normalize_grievance_mode(grievance_raw.get("mode")),

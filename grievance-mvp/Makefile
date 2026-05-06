@@ -5,7 +5,7 @@ WATCHDOG_DISABLE_FILE := $(WATCHDOG_STATE_DIR)/disable_auto_restart
 
 .PHONY: up down restart ps logs config pull cloudflare sync-docuseal-url sync-docuseal-webhook \
 	smoke smoke-signed verify-download install-systemd watchdog-check watchdog-disable watchdog-enable watchdog-status \
-	outreach-run-due
+	outreach-run-due referral-run-due
 
 up:
 	$(COMPOSE) up -d --build
@@ -49,6 +49,9 @@ verify-download:
 outreach-run-due:
 	./scripts/run-outreach-due.sh
 
+referral-run-due:
+	./scripts/run-referral-reminders.sh
+
 install-systemd:
 	sudo ./scripts/install-systemd-services.sh
 
@@ -70,3 +73,4 @@ watchdog-status:
 	@systemctl --no-pager --full status grievance-mvp.service || true
 	@systemctl --no-pager --full status grievance-mvp-watchdog.timer || true
 	@systemctl --no-pager --full status grievance-mvp-outreach-due.timer || true
+	@systemctl --no-pager --full status grievance-mvp-referral-reminders.timer || true

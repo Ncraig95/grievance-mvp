@@ -85,6 +85,36 @@ def migrate(db_path: str) -> None:
 
         con.execute(
             """
+            CREATE TABLE IF NOT EXISTS referrals (
+              id TEXT PRIMARY KEY,
+              request_id TEXT NOT NULL,
+              created_at_utc TEXT NOT NULL,
+              updated_at_utc TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'open',
+              assignee TEXT,
+              officer_notes TEXT,
+              reminder_due_at_utc TEXT NOT NULL,
+              reminder_attempted_at_utc TEXT,
+              reminder_sent_at_utc TEXT,
+              reminder_error TEXT,
+              referrer_name TEXT NOT NULL,
+              referrer_address TEXT NOT NULL,
+              referrer_phone TEXT NOT NULL,
+              referrer_email TEXT,
+              referrer_group TEXT NOT NULL,
+              referred_name TEXT NOT NULL,
+              referred_group TEXT,
+              referred_att_uid TEXT,
+              referral_notes TEXT,
+              submitter_ip_hash TEXT,
+              submitter_user_agent_hash TEXT,
+              source_payload_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+
+        con.execute(
+            """
             CREATE TABLE IF NOT EXISTS document_stages (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               case_id TEXT NOT NULL,
@@ -329,6 +359,29 @@ def migrate(db_path: str) -> None:
         _ensure_column(con, "hosted_form_settings", "updated_by", "TEXT")
         _ensure_column(con, "hosted_form_settings", "updated_at_utc", "TEXT")
 
+        _ensure_column(con, "referrals", "request_id", "TEXT")
+        _ensure_column(con, "referrals", "created_at_utc", "TEXT")
+        _ensure_column(con, "referrals", "updated_at_utc", "TEXT")
+        _ensure_column(con, "referrals", "status", "TEXT NOT NULL DEFAULT 'open'")
+        _ensure_column(con, "referrals", "assignee", "TEXT")
+        _ensure_column(con, "referrals", "officer_notes", "TEXT")
+        _ensure_column(con, "referrals", "reminder_due_at_utc", "TEXT")
+        _ensure_column(con, "referrals", "reminder_attempted_at_utc", "TEXT")
+        _ensure_column(con, "referrals", "reminder_sent_at_utc", "TEXT")
+        _ensure_column(con, "referrals", "reminder_error", "TEXT")
+        _ensure_column(con, "referrals", "referrer_name", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "referrals", "referrer_address", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "referrals", "referrer_phone", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "referrals", "referrer_email", "TEXT")
+        _ensure_column(con, "referrals", "referrer_group", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "referrals", "referred_name", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "referrals", "referred_group", "TEXT")
+        _ensure_column(con, "referrals", "referred_att_uid", "TEXT")
+        _ensure_column(con, "referrals", "referral_notes", "TEXT")
+        _ensure_column(con, "referrals", "submitter_ip_hash", "TEXT")
+        _ensure_column(con, "referrals", "submitter_user_agent_hash", "TEXT")
+        _ensure_column(con, "referrals", "source_payload_json", "TEXT NOT NULL DEFAULT '{}'")
+
         doc_cols = _table_columns(con, "documents")
         if "pdf_sha256" not in doc_cols and "pdf_sa256" in doc_cols:
             _ensure_column(con, "documents", "pdf_sha256", "TEXT")
@@ -410,6 +463,10 @@ def migrate(db_path: str) -> None:
             "CREATE INDEX IF NOT EXISTS idx_outreach_stops_status_bucket ON outreach_stops(status, audience_status_bucket)",
             "CREATE INDEX IF NOT EXISTS idx_outreach_stops_group_name ON outreach_stops(status, audience_group_name)",
             "CREATE INDEX IF NOT EXISTS idx_outreach_stops_subgroup_name ON outreach_stops(status, audience_subgroup_name)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_referrals_request_id ON referrals(request_id)",
+            "CREATE INDEX IF NOT EXISTS idx_referrals_status_due ON referrals(status, reminder_due_at_utc)",
+            "CREATE INDEX IF NOT EXISTS idx_referrals_referrer_group ON referrals(referrer_group)",
+            "CREATE INDEX IF NOT EXISTS idx_referrals_referred_group ON referrals(referred_group)",
         ]
         for stmt in index_sql:
             try:

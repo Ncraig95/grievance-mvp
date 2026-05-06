@@ -68,6 +68,14 @@ class DocuSealWebhookAuthTests(unittest.TestCase):
         payload = {"event_type": "submission.completed"}
         self.assertTrue(_is_completion_event(payload))
 
+    def test_submitter_completed_is_not_final_without_submission_completion(self) -> None:
+        payload = {"event_type": "submitter.completed", "data": {"submitter": {"status": "completed"}}}
+        self.assertFalse(_is_completion_event(payload))
+
+    def test_completion_status_matching_is_exact(self) -> None:
+        payload = {"event_type": "form.completed", "data": {"submission": {"status": "not_completed"}}}
+        self.assertFalse(_is_completion_event(payload))
+
 
 if __name__ == "__main__":
     unittest.main()

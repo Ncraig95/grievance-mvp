@@ -22,12 +22,15 @@ UP_WRAPPER="/usr/local/bin/${SERVICE_NAME}-up"
 DOWN_WRAPPER="/usr/local/bin/${SERVICE_NAME}-down"
 WATCHDOG_WRAPPER="/usr/local/bin/${SERVICE_NAME}-watchdog"
 OUTREACH_WRAPPER="/usr/local/bin/${SERVICE_NAME}-outreach-due"
+REFERRAL_WRAPPER="/usr/local/bin/${SERVICE_NAME}-referral-reminders"
 
 SERVICE_FILE="${SYSTEMD_DIR}/${SERVICE_NAME}.service"
 WATCHDOG_SERVICE_FILE="${SYSTEMD_DIR}/${SERVICE_NAME}-watchdog.service"
 WATCHDOG_TIMER_FILE="${SYSTEMD_DIR}/${SERVICE_NAME}-watchdog.timer"
 OUTREACH_SERVICE_FILE="${SYSTEMD_DIR}/${SERVICE_NAME}-outreach-due.service"
 OUTREACH_TIMER_FILE="${SYSTEMD_DIR}/${SERVICE_NAME}-outreach-due.timer"
+REFERRAL_SERVICE_FILE="${SYSTEMD_DIR}/${SERVICE_NAME}-referral-reminders.service"
+REFERRAL_TIMER_FILE="${SYSTEMD_DIR}/${SERVICE_NAME}-referral-reminders.timer"
 
 cat >"${UP_WRAPPER}" <<EOF
 #!/usr/bin/env bash
@@ -57,7 +60,14 @@ cd "${PROJECT_DIR}"
 exec "${PROJECT_DIR}/scripts/run-outreach-due.sh"
 EOF
 
-chmod 0755 "${UP_WRAPPER}" "${DOWN_WRAPPER}" "${WATCHDOG_WRAPPER}" "${OUTREACH_WRAPPER}"
+cat >"${REFERRAL_WRAPPER}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd "${PROJECT_DIR}"
+exec "${PROJECT_DIR}/scripts/run-referral-reminders.sh"
+EOF
+
+chmod 0755 "${UP_WRAPPER}" "${DOWN_WRAPPER}" "${WATCHDOG_WRAPPER}" "${OUTREACH_WRAPPER}" "${REFERRAL_WRAPPER}"
 
 cat >"${SERVICE_FILE}" <<EOF
 [Unit]
@@ -136,10 +146,39 @@ Unit=${SERVICE_NAME}-outreach-due.service
 WantedBy=timers.target
 EOF
 
+cat >"${REFERRAL_SERVICE_FILE}" <<EOF
+[Unit]
+Description=Run due referral reminders for Grievance MVP
+After=${SERVICE_NAME}.service
+Requires=${SERVICE_NAME}.service
+
+[Service]
+Type=oneshot
+User=${RUN_USER}
+Group=${RUN_GROUP}
+ExecStart=${REFERRAL_WRAPPER}
+EOF
+
+cat >"${REFERRAL_TIMER_FILE}" <<EOF
+[Unit]
+Description=Process referral reminders every 6 hours
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+RandomizedDelaySec=5min
+Persistent=true
+Unit=${SERVICE_NAME}-referral-reminders.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
 systemctl daemon-reload
 systemctl enable --now "${SERVICE_NAME}.service"
 systemctl enable --now "${SERVICE_NAME}-watchdog.timer"
 systemctl enable --now "${SERVICE_NAME}-outreach-due.timer"
+systemctl enable --now "${SERVICE_NAME}-referral-reminders.timer"
 
 echo "Installed:"
 echo "  - ${SERVICE_FILE}"
@@ -147,8 +186,11 @@ echo "  - ${WATCHDOG_SERVICE_FILE}"
 echo "  - ${WATCHDOG_TIMER_FILE}"
 echo "  - ${OUTREACH_SERVICE_FILE}"
 echo "  - ${OUTREACH_TIMER_FILE}"
+echo "  - ${REFERRAL_SERVICE_FILE}"
+echo "  - ${REFERRAL_TIMER_FILE}"
 echo
 echo "Current status:"
 systemctl --no-pager --full status "${SERVICE_NAME}.service" || true
 systemctl --no-pager --full status "${SERVICE_NAME}-watchdog.timer" || true
 systemctl --no-pager --full status "${SERVICE_NAME}-outreach-due.timer" || true
+systemctl --no-pager --full status "${SERVICE_NAME}-referral-reminders.timer" || true

@@ -650,7 +650,7 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
       if (!form.reportValidity()) return;
       submitBtn.disabled = true;
       savingText.classList.remove('hidden');
-      setStatus('', 'Processing', 'The statement is being generated. The signing page will open when it is ready.', null);
+      setStatus('', 'Processing', 'The form is being submitted. Any next step will open when it is ready.', null);
       try {{
         const response = await fetch(FORM_ENDPOINT, {{
           method: 'POST',

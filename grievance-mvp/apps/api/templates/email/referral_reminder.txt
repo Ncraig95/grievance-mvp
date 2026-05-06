@@ -1,0 +1,24 @@
+A referral has reached the 60-day follow-up mark.
+
+Referral ID: $referral_id
+Status: $status
+Submitted: $created_at_utc
+Reminder due: $reminder_due_at_utc
+
+Referred person:
+$referred_name
+Group/company: $referred_group
+AT&T UID: $referred_att_uid
+
+Referrer:
+$referrer_name
+$referrer_phone
+$referrer_email
+$referrer_address
+Group: $referrer_group
+
+Notes:
+$referral_notes
+
+Portal:
+$portal_url

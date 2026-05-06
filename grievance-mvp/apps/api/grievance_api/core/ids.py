@@ -35,3 +35,7 @@ def new_submission_id() -> str:
 
 def new_document_id() -> str:
     return f"D{_utc_ts()}_{secrets.token_hex(4)}"
+
+
+def new_referral_id() -> str:
+    return f"R{_utc_ts()}_{secrets.token_hex(4)}"

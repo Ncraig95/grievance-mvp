@@ -53,13 +53,44 @@ def _event_type(payload: dict) -> str:
     return ""
 
 
-def _status_is_complete(value: object) -> bool:
+_COMPLETION_STATUSES = {"completed", "finished", "done"}
+_SUBMISSION_COMPLETION_EVENTS = {
+    "completed",
+    "finished",
+    "done",
+    "submission.completed",
+    "submission.finished",
+    "submission.done",
+    "submission_completed",
+    "submission_finished",
+    "submission_done",
+}
+_FORM_COMPLETION_EVENTS = {
+    "form.completed",
+    "form.finished",
+    "form.done",
+    "form_completed",
+    "form_finished",
+    "form_done",
+}
+
+
+def _normalize_status_token(value: object) -> str:
     if not isinstance(value, str):
-        return False
-    normalized = value.strip().lower()
-    if not normalized:
-        return False
-    return any(token in normalized for token in ("completed", "finished", "done"))
+        return ""
+    return value.strip().lower().replace(" ", "_")
+
+
+def _status_is_complete(value: object) -> bool:
+    return _normalize_status_token(value) in _COMPLETION_STATUSES
+
+
+def _event_is_submission_completion(value: object) -> bool:
+    return _normalize_status_token(value) in _SUBMISSION_COMPLETION_EVENTS
+
+
+def _event_is_form_completion(value: object) -> bool:
+    return _normalize_status_token(value) in _FORM_COMPLETION_EVENTS
 
 
 def _submission_status(payload: dict) -> str:
@@ -87,13 +118,95 @@ def _submission_status(payload: dict) -> str:
 
 def _is_completion_event(payload: dict) -> bool:
     et = _event_type(payload)
-    if _status_is_complete(et):
+    if _event_is_submission_completion(et):
+        return True
+    if _event_is_form_completion(et):
         # form.completed can fire per submitter. Only treat it as final completion
         # when the enclosing submission status is also completed.
-        if et.startswith("form."):
-            return _status_is_complete(_submission_status(payload))
-        return True
+        return _status_is_complete(_submission_status(payload))
     return _status_is_complete(_submission_status(payload))
+
+
+def _normalize_email(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _submitter_email(submitter: dict[str, object]) -> str:
+    for key in ("email", "email_address", "emailAddress", "signer_email"):
+        value = submitter.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    email_address = submitter.get("emailAddress")
+    if isinstance(email_address, dict):
+        nested = email_address.get("address")
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
+    return ""
+
+
+def _submitter_is_complete(submitter: dict[str, object]) -> bool:
+    for key in ("completed_at", "completedAt", "completed_at_utc", "completedAtUtc"):
+        if submitter.get(key):
+            return True
+    return _status_is_complete(submitter.get("status"))
+
+
+def _iter_payload_submitters(container: object) -> list[dict[str, object]]:
+    submitters: list[dict[str, object]] = []
+
+    def add_candidate(candidate: object) -> None:
+        if isinstance(candidate, dict):
+            submitters.append(candidate)
+        elif isinstance(candidate, list):
+            submitters.extend([item for item in candidate if isinstance(item, dict)])
+
+    def visit(candidate: object) -> None:
+        if isinstance(candidate, dict):
+            for key in ("submitter", "signer"):
+                add_candidate(candidate.get(key))
+            for key in ("submitters", "signers"):
+                add_candidate(candidate.get(key))
+            for key in ("data", "submission", "event"):
+                value = candidate.get(key)
+                if isinstance(value, (dict, list)):
+                    visit(value)
+        elif isinstance(candidate, list):
+            for item in candidate:
+                if isinstance(item, (dict, list)):
+                    visit(item)
+
+    visit(container)
+    return submitters
+
+
+def _matching_submitter_completed(*, submitters: list[dict[str, object]], signer_email: str) -> bool:
+    normalized_signer = _normalize_email(signer_email)
+    candidates = [item for item in submitters if isinstance(item, dict)]
+    if normalized_signer:
+        matches = [item for item in candidates if _normalize_email(_submitter_email(item)) == normalized_signer]
+        if matches:
+            return any(_submitter_is_complete(item) for item in matches)
+    if len(candidates) == 1:
+        return _submitter_is_complete(candidates[0])
+    return False
+
+
+def _stage_signer_completed(
+    *,
+    payload: dict,
+    submission_details: dict | None,
+    docuseal,  # noqa: ANN001
+    submission_id: str,
+    signer_email: str,
+) -> bool:
+    payload_submitters = _iter_payload_submitters(payload)
+    if submission_details:
+        payload_submitters.extend(_iter_payload_submitters(submission_details))
+    if _matching_submitter_completed(submitters=payload_submitters, signer_email=signer_email):
+        return True
+
+    remote_submitters = docuseal.list_submitters(submission_id=submission_id)
+    return _matching_submitter_completed(submitters=remote_submitters, signer_email=signer_email)
 
 
 def _resolve_submission_id(payload: dict) -> str | None:
@@ -760,6 +873,7 @@ async def webhook_docuseal(request: Request):
             stage_id = int(stage_row[0])
             stage_no = int(stage_row[3])
             stage_status = str(stage_row[5] or "")
+            stage_signer_email = str(stage_row[6] or "").strip()
             stage_count = stage_count_for(form_key=staged_form_key)
             if stage_status == "completed":
                 await db.mark_receipt_handled("docuseal", completion_receipt_key)
@@ -811,6 +925,55 @@ async def webhook_docuseal(request: Request):
                 if downloaded_audit:
                     staged_audit_bytes = downloaded_audit
                     staged_audit_ext = ".zip" if downloaded_audit[:2] == b"PK" else ".pdf"
+
+            signer_completed = _stage_signer_completed(
+                payload=payload,
+                submission_details=submission_details,
+                docuseal=docuseal,
+                submission_id=submission_id,
+                signer_email=stage_signer_email,
+            )
+            if not signer_completed:
+                await db.add_event(
+                    case_id,
+                    document_id,
+                    "document_stage_completion_deferred",
+                    {
+                        "stage_no": stage_no,
+                        "stage_id": stage_id,
+                        "reason": "signer_not_completed",
+                        "submission_id": submission_id,
+                    },
+                )
+                await db.release_receipt_claim("docuseal", completion_receipt_key)
+                await db.mark_receipt_handled("docuseal", receipt_key)
+                return {
+                    "ok": True,
+                    "handled": False,
+                    "reason": "stage_completion_deferred",
+                    "stage_no": stage_no,
+                }
+
+            if staged_signed_bytes is None:
+                await db.add_event(
+                    case_id,
+                    document_id,
+                    "document_stage_completion_deferred",
+                    {
+                        "stage_no": stage_no,
+                        "stage_id": stage_id,
+                        "reason": "missing_signed_pdf",
+                        "submission_id": submission_id,
+                    },
+                )
+                await db.release_receipt_claim("docuseal", completion_receipt_key)
+                await db.mark_receipt_handled("docuseal", receipt_key)
+                return {
+                    "ok": True,
+                    "handled": False,
+                    "reason": "stage_completion_deferred",
+                    "stage_no": stage_no,
+                }
 
             if staged_signed_bytes:
                 signed_path = stage_file_path(

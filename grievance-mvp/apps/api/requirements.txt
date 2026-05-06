@@ -16,3 +16,4 @@ msal==1.30.0
 cryptography==43.0.0
 itsdangerous==2.2.0
 openpyxl==3.1.5
+pytest

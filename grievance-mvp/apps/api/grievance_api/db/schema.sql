@@ -72,6 +72,44 @@ CREATE TABLE IF NOT EXISTS app_settings (
   updated_at_utc TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS referrals (
+  id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL,
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  assignee TEXT,
+  officer_notes TEXT,
+  reminder_due_at_utc TEXT NOT NULL,
+  reminder_attempted_at_utc TEXT,
+  reminder_sent_at_utc TEXT,
+  reminder_error TEXT,
+  referrer_name TEXT NOT NULL,
+  referrer_address TEXT NOT NULL,
+  referrer_phone TEXT NOT NULL,
+  referrer_email TEXT,
+  referrer_group TEXT NOT NULL,
+  referred_name TEXT NOT NULL,
+  referred_group TEXT,
+  referred_att_uid TEXT,
+  referral_notes TEXT,
+  submitter_ip_hash TEXT,
+  submitter_user_agent_hash TEXT,
+  source_payload_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_referrals_request_id
+ON referrals(request_id);
+
+CREATE INDEX IF NOT EXISTS idx_referrals_status_due
+ON referrals(status, reminder_due_at_utc);
+
+CREATE INDEX IF NOT EXISTS idx_referrals_referrer_group
+ON referrals(referrer_group);
+
+CREATE INDEX IF NOT EXISTS idx_referrals_referred_group
+ON referrals(referred_group);
+
 CREATE TABLE IF NOT EXISTS documents (
   id TEXT PRIMARY KEY,
   case_id TEXT NOT NULL,

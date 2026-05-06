@@ -25,6 +25,7 @@ _LONG_TEXT_KEY_HINTS = (
     "facts",
     "issue",
     "narrative",
+    "notes",
     "outside_remedies",
     "position",
     "recommendation",
@@ -421,6 +422,17 @@ _FORM_FIELD_ORDERS: dict[str, tuple[str, ...]] = {
     "motion_sheet": (
         "motion_made_by",
         "motion_text",
+    ),
+    "referral": (
+        "referrer_name",
+        "referrer_phone",
+        "referrer_address",
+        "referrer_email",
+        "referrer_group",
+        "referred_name",
+        "referred_group",
+        "referred_att_uid",
+        "referral_notes",
     ),
 }
 
@@ -1022,6 +1034,24 @@ _FORM_CATALOG: tuple[dict[str, object], ...] = (
             "motion_text": "<Motion text>",
         },
     },
+    {
+        "key": "referral",
+        "title": "CWA Local 3106 Referral",
+        "routeType": "referral",
+        "endpointPath": "/referrals",
+        "topLevelFields": {
+            "referrer_name": "<Your full name>",
+            "referrer_phone": "<Your phone number>",
+            "referrer_address": "<Your address>",
+            "referrer_email": "<Your email>",
+            "referrer_group": "<Your group>",
+            "referred_name": "<Person you are referring>",
+            "referred_group": "<Referred person's group or company>",
+            "referred_att_uid": "<AT&T UID>",
+            "referral_notes": "<Referral notes>",
+        },
+        "templateDataFields": {},
+    },
 )
 
 
@@ -1340,6 +1370,15 @@ _FORM_OVERRIDES: dict[str, dict[str, object]] = {
     "motion_sheet": {
         "description": "Submit a Motion Sheet for admin printing from the SharePoint Motion Sheets folder.",
     },
+    "referral": {
+        "description": "Submit a member referral to CWA Local 3106 for officer follow-up.",
+        "optional_fields": {
+            "referrer_email",
+            "referred_group",
+            "referred_att_uid",
+            "referral_notes",
+        },
+    },
 }
 
 
@@ -1612,6 +1651,29 @@ def _build_standalone_payload_from_catalog(catalog: dict[str, object], cleaned_v
     return payload
 
 
+def _build_referral_payload_from_catalog(catalog: dict[str, object], cleaned_values: dict[str, str]) -> dict[str, object]:
+    form_key = str(catalog["key"])
+    payload: dict[str, object] = {
+        "request_id": cleaned_values.get("request_id") or f"forms-hosted-{form_key}-{uuid4().hex}",
+    }
+    fixed_top = _fixed_values(form_key, "top_level")
+    hidden_top = _hidden_keys(form_key, "top_level")
+    derived_top = _derived_values(form_key, "top_level")
+    for actual_key, raw_value in dict(catalog.get("topLevelFields", {})).items():
+        if actual_key in hidden_top or actual_key in derived_top:
+            continue
+        if actual_key in fixed_top:
+            payload[actual_key] = fixed_top[actual_key]
+            continue
+        if _is_placeholder(raw_value) or raw_value == "":
+            payload[actual_key] = cleaned_values.get(_safe_name(actual_key), "")
+        else:
+            payload[actual_key] = raw_value
+    for actual_key, func in derived_top.items():
+        payload[actual_key] = func(cleaned_values)
+    return payload
+
+
 def _form_metadata(catalog: dict[str, object]) -> tuple[tuple[str, str], ...]:
     form_key = str(catalog["key"])
     top_fields = dict(catalog.get("topLevelFields", {}))
@@ -1660,6 +1722,8 @@ def _build_definition(catalog: dict[str, object]) -> HostedFormDefinition:
     fields = _ordered_fields(form_key, _catalog_fields(catalog))
     if route_type == "standalone":
         payload_builder = lambda cleaned_values, _catalog=catalog: _build_standalone_payload_from_catalog(_catalog, cleaned_values)
+    elif route_type == "referral":
+        payload_builder = lambda cleaned_values, _catalog=catalog: _build_referral_payload_from_catalog(_catalog, cleaned_values)
     else:
         payload_builder = lambda cleaned_values, _catalog=catalog: _build_intake_payload_from_catalog(_catalog, cleaned_values)
     return HostedFormDefinition(

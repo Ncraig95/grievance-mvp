@@ -1574,6 +1574,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     review_links = [
         _menu_link("Filters", "#filtersPanel", "Search, scope, assignee, status, and source filters."),
         _menu_link("Tracker", "#trackerPanel", "Jump straight to the live grievance table."),
+        _menu_link("Referrals", "/officers/referrals", "Open the referral tracking portal.", external=True),
         _menu_link("Response Log", "#responsePanel", "See the latest API response and debug payload."),
     ]
     work_links: list[str] = []

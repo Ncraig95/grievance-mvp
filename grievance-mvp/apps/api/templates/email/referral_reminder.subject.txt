@@ -1,0 +1,1 @@
+Referral reached 60 days: $referred_name
