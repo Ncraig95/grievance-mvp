@@ -17,6 +17,7 @@ from ..services.case_folder_naming import build_case_folder_member_name
 from ..services.contract_timeline import parse_incident_date
 from ..services.doc_render import render_docx
 from ..services.grievance_id_allocator import GrievanceIdAllocationError, GrievanceIdAllocator
+from ..services.grievance_summary import build_grievance_summary
 from ..services.motion_sheet import load_motion_sheet_officers, save_motion_sheet_officers
 from ..services.notification_service import NotificationService
 from ..services.pdf_convert import docx_to_pdf
@@ -83,7 +84,6 @@ _OFFICER_STATUS_VALUES = {
 _PAPER_SOURCE = "paper_manual"
 _DIGITAL_SOURCE = "digital_intake"
 _MANUAL_TRACKING_STATUS = "manual_tracking"
-_FINAL_WORKFLOW_STATUSES = {"approved", "rejected", "uploaded"}
 
 _CASE_SELECT_SQL = """
     SELECT id, grievance_id, grievance_number, member_name, member_email,
@@ -215,12 +215,12 @@ def _effective_officer_source(raw_source: object, workflow_status: object) -> st
 
 
 def _effective_officer_status(raw_status: object, workflow_status: object) -> str:
+    _ = workflow_status
     status = _normalize_optional_text(raw_status)
     if status:
         lowered = status.lower()
         return lowered if lowered in _OFFICER_STATUS_VALUES else "open"
-    workflow = str(workflow_status or "").strip().lower()
-    return "closed" if workflow in _FINAL_WORKFLOW_STATUSES else "open"
+    return "open"
 
 
 def _build_viewer_model(user: OfficerUserContext) -> OfficerViewerContext:
@@ -270,7 +270,8 @@ def _build_officer_case_row(cfg, row: tuple[object, ...]) -> OfficerCaseRow:  # 
             "contract_articles",
         )
     )
-    issue_summary = _normalize_optional_text(row[19]) or _payload_pick(
+    manual_issue_summary = _normalize_optional_text(row[19])
+    issue_summary = manual_issue_summary or _payload_pick(
         payload,
         "issue_summary",
         "issue_text",
@@ -278,6 +279,7 @@ def _build_officer_case_row(cfg, row: tuple[object, ...]) -> OfficerCaseRow:  # 
         "q3_union_statement",
         "narrative",
     )
+    narrative = build_grievance_summary(payload, manual_text=manual_issue_summary)
     first_level_request_sent_date = _normalize_optional_text(row[20]) or _normalize_date_text(
         _payload_pick(payload, "first_level_request_sent_date", "date_sent_first_level_request")
     )
@@ -305,6 +307,9 @@ def _build_officer_case_row(cfg, row: tuple[object, ...]) -> OfficerCaseRow:  # 
         occurrence_date=occurrence_date,
         articles=articles,
         issue_summary=issue_summary,
+        narrative_summary=narrative.summary,
+        narrative_full=narrative.full_text,
+        summary_source=narrative.source,
         first_level_request_sent_date=first_level_request_sent_date,
         second_level_request_sent_date=second_level_request_sent_date,
         third_level_request_sent_date=third_level_request_sent_date,
@@ -375,6 +380,9 @@ def _case_matches_filters(
             row.steward or "",
             row.articles or "",
             row.issue_summary or "",
+            row.narrative_summary or "",
+            row.narrative_full or "",
+            row.summary_source or "",
             row.officer_assignee or "",
             row.officer_status,
             row.workflow_status,
@@ -2154,10 +2162,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       margin: 0;
       padding: 24px;
       color: var(--sheet-text);
-      background:
-        radial-gradient(circle at top left, rgba(149, 207, 70, 0.16), transparent 22%),
-        radial-gradient(circle at top right, rgba(79, 129, 189, 0.14), transparent 20%),
-        linear-gradient(180deg, #f8fbfd 0%, #eef3f7 100%);
+      background: linear-gradient(180deg, #f8fbfd 0%, #eef3f7 100%);
     }}
     h1, h2 {{ margin: 0 0 12px; }}
     .page-shell {{
@@ -2170,19 +2175,18 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     .panel {{
       background: rgba(255, 255, 255, 0.94);
       border: 1px solid #dde4ea;
-      border-radius: 16px;
-      padding: 18px;
-      margin-bottom: 16px;
-      box-shadow: 0 18px 40px rgba(15, 23, 42, 0.06);
+      border-radius: 10px;
+      padding: 14px;
+      margin-bottom: 12px;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
       backdrop-filter: blur(8px);
     }}
     .hero-panel {{
       display: grid;
-      grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.9fr);
-      gap: 18px;
-      padding: 24px;
-      background:
-        linear-gradient(135deg, rgba(255,255,255,0.96) 0%, rgba(248, 252, 255, 0.96) 54%, rgba(231, 244, 252, 0.98) 100%);
+      grid-template-columns: minmax(0, 1.8fr) minmax(240px, 0.8fr);
+      gap: 14px;
+      padding: 16px;
+      background: #ffffff;
     }}
     .eyebrow {{
       margin-bottom: 10px;
@@ -2193,23 +2197,23 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       color: #516574;
     }}
     .hero-panel h1 {{
-      font-size: clamp(30px, 4vw, 42px);
-      line-height: 1.04;
-      letter-spacing: -0.03em;
-      margin-bottom: 10px;
+      font-size: 30px;
+      line-height: 1.1;
+      letter-spacing: 0;
+      margin-bottom: 8px;
     }}
     .hero-subtitle {{
       margin: 0;
       max-width: 64ch;
-      font-size: 15px;
-      line-height: 1.6;
+      font-size: 14px;
+      line-height: 1.45;
       color: #435565;
     }}
     .hero-meta {{
       display: flex;
       flex-wrap: wrap;
       gap: 10px;
-      margin-top: 16px;
+      margin-top: 10px;
       align-items: center;
     }}
     .role-pill,
@@ -2219,7 +2223,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       align-items: center;
       gap: 6px;
       border-radius: 999px;
-      padding: 8px 12px;
+      padding: 6px 10px;
       font-size: 12px;
       font-weight: 700;
       line-height: 1;
@@ -2238,8 +2242,8 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     .hero-links {{
       display: flex;
       flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 16px;
+      gap: 8px;
+      margin-top: 10px;
     }}
     .scope-pill {{
       background: #edf4f8;
@@ -2255,9 +2259,9 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       flex-direction: column;
       justify-content: space-between;
       gap: 16px;
-      border-radius: 14px;
-      padding: 16px;
-      background: linear-gradient(180deg, #f7fbff 0%, #ecf4fb 100%);
+      border-radius: 8px;
+      padding: 12px;
+      background: #f7fbff;
       border: 1px solid #d8e5f0;
     }}
     .hero-tools h2 {{
@@ -2301,7 +2305,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       position: sticky;
       top: 14px;
       z-index: 9;
-      padding: 12px 16px;
+      padding: 10px 12px;
     }}
     .workspace-menu-bar {{
       display: flex;
@@ -2348,7 +2352,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       align-items: center;
       gap: 0;
       border-radius: 999px;
-      padding: 10px 14px;
+      padding: 8px 12px;
       text-decoration: none;
       color: #17334f;
       border: 1px solid #d8e2eb;
@@ -2435,15 +2439,15 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     .metric-grid {{
       display: grid;
       grid-template-columns: repeat(5, minmax(150px, 1fr));
-      gap: 12px;
-      margin-top: 16px;
+      gap: 10px;
+      margin-top: 12px;
     }}
     .metric-card {{
-      padding: 14px 16px;
-      border-radius: 14px;
+      padding: 10px 12px;
+      border-radius: 8px;
       border: 1px solid #d9e3ec;
-      background: linear-gradient(180deg, #ffffff 0%, #f5f8fb 100%);
-      min-height: 104px;
+      background: #ffffff;
+      min-height: 76px;
     }}
     .metric-label {{
       font-size: 12px;
@@ -2454,20 +2458,20 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     }}
     .metric-value {{
       margin-top: 8px;
-      font-size: 32px;
+      font-size: 24px;
       font-weight: 800;
       line-height: 1;
       color: #12212f;
     }}
     .metric-note {{
       margin-top: 8px;
-      font-size: 13px;
+      font-size: 12px;
       color: #5b6b78;
       line-height: 1.45;
     }}
     .table-wrap {{
       overflow-x: auto;
-      border-radius: 12px;
+      border-radius: 8px;
       border: 1px solid var(--sheet-border);
       background: white;
       scrollbar-gutter: stable both-edges;
@@ -2515,7 +2519,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     table {{
       width: 100%;
       border-collapse: collapse;
-      min-width: 1600px;
+      min-width: 1060px;
     }}
     #trackerTable thead th {{
       position: sticky;
@@ -2550,7 +2554,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       position: sticky;
       right: 0;
       z-index: 2;
-      min-width: 180px;
+      min-width: 156px;
       box-shadow: -6px 0 10px rgba(15, 23, 42, 0.06);
       background: white;
     }}
@@ -2583,6 +2587,87 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     .badge.open_at_state {{ background: #fde68a; }}
     .badge.open_at_national {{ background: #fca5a5; }}
     .muted {{ color: #64748b; font-size: 12px; }}
+    .tracker-primary-row {{
+      cursor: pointer;
+    }}
+    .tracker-primary-row:hover td {{
+      background: #f7fbff;
+    }}
+    .tracker-primary-row.closed-row:hover td {{
+      background: #e7ebef;
+    }}
+    .tracker-primary-row[aria-expanded="true"] td {{
+      border-bottom-color: #b9c7d4;
+      background: #f5f9fc;
+    }}
+    .grievance-cell {{
+      min-width: 190px;
+    }}
+    .grievance-title {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 800;
+      color: #152b3f;
+    }}
+    .expand-indicator {{
+      color: #607181;
+      font-size: 12px;
+      line-height: 1;
+    }}
+    .summary-cell {{
+      min-width: 300px;
+      max-width: 440px;
+      line-height: 1.35;
+    }}
+    .next-step-cell {{
+      min-width: 150px;
+      font-weight: 700;
+      color: #243746;
+    }}
+    .detail-row td {{
+      background: #f8fbfd;
+      border-top: 0;
+    }}
+    .detail-cell {{
+      padding: 0;
+    }}
+    .detail-panel {{
+      padding: 14px;
+      border-top: 1px solid #d8e2eb;
+    }}
+    .detail-grid {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(150px, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }}
+    .detail-item {{
+      border: 1px solid #d8e2eb;
+      border-radius: 8px;
+      padding: 10px;
+      background: white;
+      min-height: 54px;
+    }}
+    .detail-label {{
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #64748b;
+    }}
+    .detail-value {{
+      margin-top: 4px;
+      color: #203040;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }}
+    .detail-full {{
+      grid-column: 1 / -1;
+    }}
+    .detail-narrative {{
+      white-space: pre-wrap;
+    }}
     .row-actions {{
       display: flex;
       gap: 8px;
@@ -2654,6 +2739,9 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       .metric-card {{
         min-height: 0;
       }}
+      .detail-grid {{
+        grid-template-columns: 1fr;
+      }}
       .tracker-table-wrap {{
         max-height: none;
         overflow: visible;
@@ -2677,9 +2765,13 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       #trackerTable tr {{
         margin-bottom: 12px;
         border: 1px solid var(--sheet-border);
-        border-radius: 14px;
+        border-radius: 8px;
         overflow: hidden;
         background: white;
+      }}
+      #trackerTable tr.detail-row {{
+        margin-top: -12px;
+        border-top: 0;
       }}
       #trackerTable td {{
         border: 0;
@@ -2698,6 +2790,9 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
         letter-spacing: 0.06em;
         text-transform: uppercase;
         color: #607181;
+      }}
+      #trackerTable td.detail-cell::before {{
+        content: none;
       }}
       #trackerTable th.select-col,
       #trackerTable td.select-col,
@@ -2761,7 +2856,6 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       <div>
         <div class="eyebrow">Control Center</div>
         <h2>Filters</h2>
-        <div class="summary">Slice the tracker by scope, assignee, status, source, or a free-text search across grievance details.</div>
       </div>
       <div class="section-actions">
         <button id="reloadBtn" type="button">Load Tracker</button>
@@ -2836,8 +2930,8 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     <div class="section-header">
       <div>
         <div class="eyebrow">Live Results</div>
-        <h2>Tracker Table</h2>
-        <div class="summary">The header stays visible inside this pane. Use the bottom dock to scroll sideways when the table is wider than the screen.</div>
+        <h2>Grievance Overview</h2>
+        <div class="summary">Click a grievance row to expand the full narrative, dates, notes, and workflow details inline.</div>
       </div>
     </div>
     <div class="table-wrap tracker-table-wrap">
@@ -2845,26 +2939,18 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
         <thead>
           <tr>
             {selection_header}
-            <th class="main">Grievance Number</th>
+            <th class="main">Grievance / Member</th>
             <th class="main">Contract / Scope</th>
-            <th class="main">Department</th>
-            <th class="main">Name</th>
-            <th class="main">Steward</th>
-            <th class="main">Date of Occurrence</th>
-            <th class="main">Issue</th>
-            <th class="request">Date Sent 1st Level Request</th>
-            <th class="request">Date Sent 2nd Level Request</th>
-            <th class="request">Date Sent 3rd Level Request</th>
-            <th class="request">Date Sent 4th Level Request</th>
-            <th class="main">Assigned To</th>
-            <th class="main">Officer Status</th>
-            <th class="main">Workflow Status</th>
-            <th class="main">Source</th>
+            <th class="main">Occurrence</th>
+            <th class="main">Narrative Summary</th>
+            <th class="main">Status</th>
+            <th class="main">Assignee</th>
+            <th class="main">Next Step</th>
             {actions_header}
           </tr>
         </thead>
         <tbody id="tableBody">
-          <tr><td colspan="15">No cases loaded.</td></tr>
+          <tr><td colspan="7">No cases loaded.</td></tr>
         </tbody>
       </table>
     </div>
@@ -2888,7 +2974,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     const SCOPE_LABELS = {scope_labels_json};
     const ENABLE_SELECTION = {str(show_selection).lower()};
     const SHOW_ACTIONS = {str(show_actions).lower()};
-    const EMPTY_COLSPAN = 15 + (ENABLE_SELECTION ? 1 : 0) + (SHOW_ACTIONS ? 1 : 0);
+    const EMPTY_COLSPAN = 7 + (ENABLE_SELECTION ? 1 : 0) + (SHOW_ACTIONS ? 1 : 0);
     const out = document.getElementById('out');
     const trackerTable = document.getElementById('trackerTable');
     const trackerTableWrap = trackerTable ? trackerTable.closest('.table-wrap') : null;
@@ -2926,6 +3012,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     let directorySearchTimer = null;
     let directorySearchRequestSeq = 0;
     let syncingTrackerScroll = false;
+    let expandedCaseId = null;
 
     function esc(value) {{
       return String(value == null ? '' : value)
@@ -2948,7 +3035,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       }}
       const text = await res.text();
       let data = text;
-      try {{ data = JSON.parse(text); }} catch {{}}
+      try {{ data = JSON.parse(text); }} catch (err) {{ void err; }}
       if (!res.ok) throw {{ status: res.status, data }};
       return data;
     }}
@@ -3186,6 +3273,117 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       return '';
     }}
 
+    function nextStepLabel(row) {{
+      if (!row || row.officer_status === 'closed') return 'Closed';
+      if (!row.first_level_request_sent_date) return 'Send 1st level request';
+      if (!row.second_level_request_sent_date) return 'Send 2nd level request';
+      if (!row.third_level_request_sent_date) return 'Send 3rd level request';
+      if (!row.fourth_level_request_sent_date) return 'Send 4th level request';
+      if (row.officer_status === 'waiting') return 'Waiting';
+      if (row.officer_status === 'open_at_state') return 'State level';
+      if (row.officer_status === 'open_at_national') return 'National level';
+      return 'Review / follow up';
+    }}
+
+    function statusCell(row) {{
+      return `
+        <span class="badge ${{esc(row.officer_status)}}">${{esc(labelForStatus(row.officer_status))}}</span>
+        <div class="muted">${{esc(row.workflow_status || '')}}</div>
+      `;
+    }}
+
+    function grievanceCell(row, isExpanded) {{
+      return `
+        <div class="grievance-title">
+          <span class="expand-indicator" aria-hidden="true">${{isExpanded ? 'v' : '>'}}</span>
+          <span>${{esc(row.display_grievance)}}</span>
+        </div>
+        <div class="muted">${{esc(row.member_name || '')}}</div>
+        <div class="muted">${{esc(row.case_id || '')}}</div>
+      `;
+    }}
+
+    function detailItem(label, value) {{
+      return `
+        <div class="detail-item">
+          <div class="detail-label">${{esc(label)}}</div>
+          <div class="detail-value">${{value ? esc(value) : '<span class="muted">Not set</span>'}}</div>
+        </div>
+      `;
+    }}
+
+    function renderExpandedDetails(row) {{
+      const narrative = row.narrative_full || row.issue_summary || '';
+      return `
+        <tr class="detail-row" data-detail-case-id="${{esc(row.case_id)}}">
+          <td class="detail-cell" colspan="${{EMPTY_COLSPAN}}">
+            <div class="detail-panel">
+              <div class="detail-grid">
+                <div class="detail-item detail-full">
+                  <div class="detail-label">Full Narrative</div>
+                  <div class="detail-value detail-narrative">${{narrative ? esc(narrative) : '<span class="muted">No narrative captured.</span>'}}</div>
+                  ${{row.summary_source ? `<div class="muted">Summary source: ${{esc(row.summary_source)}}</div>` : ''}}
+                </div>
+                ${{detailItem('Case ID', row.case_id)}}
+                ${{detailItem('Grievance ID', row.grievance_id)}}
+                ${{detailItem('Grievance Number', row.grievance_number)}}
+                ${{detailItem('Department', row.department)}}
+                ${{detailItem('Steward', row.steward)}}
+                ${{detailItem('Articles', row.articles)}}
+                ${{detailItem('1st Level Sent', row.first_level_request_sent_date)}}
+                ${{detailItem('2nd Level Sent', row.second_level_request_sent_date)}}
+                ${{detailItem('3rd Level Sent', row.third_level_request_sent_date)}}
+                ${{detailItem('4th Level Sent', row.fourth_level_request_sent_date)}}
+                ${{detailItem('Workflow', row.workflow_status)}}
+                ${{detailItem('Approval', row.approval_status)}}
+                ${{detailItem('Source', labelForSource(row.officer_source))}}
+                ${{detailItem('Created', row.created_at_utc)}}
+                ${{detailItem('Closed', row.officer_closed_at_utc ? `${{row.officer_closed_at_utc}}${{row.officer_closed_by ? ` by ${{row.officer_closed_by}}` : ''}}` : '')}}
+                <div class="detail-item detail-full">
+                  <div class="detail-label">Officer Notes</div>
+                  <div class="detail-value detail-narrative">${{row.officer_notes ? esc(row.officer_notes) : '<span class="muted">No notes.</span>'}}</div>
+                </div>
+              </div>
+            </div>
+          </td>
+        </tr>
+      `;
+    }}
+
+    function renderCaseRow(row) {{
+      const isExpanded = expandedCaseId === row.case_id;
+      const classes = [
+        'tracker-primary-row',
+        row.officer_status === 'closed' ? 'closed-row' : '',
+      ].filter(Boolean).join(' ');
+      const summary = row.narrative_summary || row.issue_summary || '';
+      return `
+        <tr class="${{classes}}" data-case-id="${{esc(row.case_id)}}" tabindex="0" aria-expanded="${{isExpanded ? 'true' : 'false'}}">
+          ${{ENABLE_SELECTION ? `
+            <td class="select-col" data-label="Select">
+              <input type="checkbox" data-select-case-id="${{esc(row.case_id)}}" ${{selectedCaseIds.has(row.case_id) ? 'checked' : ''}} />
+            </td>` : ''}}
+          <td class="grievance-cell" data-label="Grievance / Member">${{grievanceCell(row, isExpanded)}}</td>
+          <td data-label="Contract / Scope">${{contractCell(row)}}</td>
+          <td data-label="Occurrence">${{esc(row.occurrence_date || '')}}</td>
+          <td class="summary-cell" data-label="Narrative Summary">${{summary ? esc(summary) : '<span class="muted">No summary yet.</span>'}}</td>
+          <td data-label="Status">${{statusCell(row)}}</td>
+          <td data-label="Assignee">${{esc(row.officer_assignee || '')}}</td>
+          <td class="next-step-cell" data-label="Next Step">${{esc(nextStepLabel(row))}}</td>
+          ${{SHOW_ACTIONS ? `
+            <td class="actions-col" data-label="Actions">
+              <div class="row-actions">
+                ${{VIEWER.can_edit ? `<button type="button" data-action="edit" data-case-id="${{esc(row.case_id)}}">Edit</button>` : ''}}
+                ${{VIEWER.can_edit ? `<button type="button" class="secondary" data-action="auto-data-request" data-case-id="${{esc(row.case_id)}}">Auto Data Request</button>` : ''}}
+                ${{VIEWER.can_view_audit ? `<button type="button" class="secondary" data-action="audit" data-case-id="${{esc(row.case_id)}}">Audit</button>` : ''}}
+                ${{VIEWER.can_delete ? `<button type="button" class="danger" data-action="delete" data-case-id="${{esc(row.case_id)}}">Delete</button>` : ''}}
+              </div>
+            </td>` : ''}}
+        </tr>
+        ${{isExpanded ? renderExpandedDetails(row) : ''}}
+      `;
+    }}
+
     function updateTrackerMetrics(rows) {{
       const scopeSet = new Set();
       let active = 0;
@@ -3220,6 +3418,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       for (const caseId of [...selectedCaseIds]) {{
         if (!currentRows.has(caseId)) selectedCaseIds.delete(caseId);
       }}
+      if (expandedCaseId && !currentRows.has(expandedCaseId)) expandedCaseId = null;
       const selectedFilter = valueOf('filterAssignee');
       refreshRosterOptions(rows, selectedFilter);
       updateSelectionUi();
@@ -3227,47 +3426,22 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
 
       const scopeSet = new Set(rows.map((row) => String(row.contract_scope || '').trim()).filter(Boolean));
       tableSummary.textContent = rows.length
-        ? `${{rows.length}} case(s) loaded across ${{scopeSet.size || 1}} scope(s).`
+        ? `${{rows.length}} case(s) loaded across ${{scopeSet.size || 1}} scope(s). Click a row for details.`
         : 'No matching grievances found for the current filters.';
       if (!rows.length) {{
         tableBody.innerHTML = `<tr><td colspan="${{EMPTY_COLSPAN}}">No matching grievances found.</td></tr>`;
         return;
       }}
 
-      tableBody.innerHTML = rows.map((row) => `
-        <tr class="${{row.officer_status === 'closed' ? 'closed-row' : ''}}">
-          ${{ENABLE_SELECTION ? `
-            <td class="select-col" data-label="Select">
-              <input type="checkbox" data-select-case-id="${{esc(row.case_id)}}" ${{selectedCaseIds.has(row.case_id) ? 'checked' : ''}} />
-            </td>` : ''}}
-          <td data-label="Grievance Number">${{esc(row.display_grievance)}}<div class="muted">${{esc(row.case_id)}}</div></td>
-          <td data-label="Contract / Scope">${{contractCell(row)}}</td>
-          <td data-label="Department">${{esc(row.department || '')}}</td>
-          <td data-label="Name">${{esc(row.member_name || '')}}</td>
-          <td data-label="Steward">${{esc(row.steward || '')}}</td>
-          <td data-label="Date of Occurrence">${{esc(row.occurrence_date || '')}}</td>
-          <td data-label="Issue">${{esc(row.issue_summary || '')}}</td>
-          <td data-label="Date Sent 1st Level Request">${{esc(row.first_level_request_sent_date || '')}}</td>
-          <td data-label="Date Sent 2nd Level Request">${{esc(row.second_level_request_sent_date || '')}}</td>
-          <td data-label="Date Sent 3rd Level Request">${{esc(row.third_level_request_sent_date || '')}}</td>
-          <td data-label="Date Sent 4th Level Request">${{esc(row.fourth_level_request_sent_date || '')}}</td>
-          <td data-label="Assigned To">${{esc(row.officer_assignee || '')}}</td>
-          <td data-label="Officer Status"><span class="badge ${{esc(row.officer_status)}}">${{esc(labelForStatus(row.officer_status))}}</span></td>
-          <td data-label="Workflow Status">${{esc(row.workflow_status || '')}}</td>
-          <td data-label="Source">${{esc(labelForSource(row.officer_source))}}</td>
-          ${{SHOW_ACTIONS ? `
-            <td class="actions-col" data-label="Actions">
-              <div class="row-actions">
-                ${{VIEWER.can_edit ? `<button type="button" data-action="edit" data-case-id="${{esc(row.case_id)}}">Edit</button>` : ''}}
-                ${{VIEWER.can_edit ? `<button type="button" class="secondary" data-action="auto-data-request" data-case-id="${{esc(row.case_id)}}">Auto Data Request</button>` : ''}}
-                ${{VIEWER.can_view_audit ? `<button type="button" class="secondary" data-action="audit" data-case-id="${{esc(row.case_id)}}">Audit</button>` : ''}}
-                ${{VIEWER.can_delete ? `<button type="button" class="danger" data-action="delete" data-case-id="${{esc(row.case_id)}}">Delete</button>` : ''}}
-              </div>
-            </td>` : ''}}
-        </tr>
-      `).join('');
+      tableBody.innerHTML = rows.map(renderCaseRow).join('');
       updateSelectionUi();
       syncTrackerScrollbarMetrics();
+    }}
+
+    function toggleExpandedCase(caseId) {{
+      if (!caseId || !currentRows.has(caseId)) return;
+      expandedCaseId = expandedCaseId === caseId ? null : caseId;
+      renderRows([...currentRows.values()]);
     }}
 
     function queryString() {{
@@ -3946,21 +4120,35 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
 
     tableBody.addEventListener('click', (event) => {{
       const button = event.target.closest('button[data-case-id][data-action]');
-      if (!button) return;
-      const caseId = button.dataset.caseId || '';
-      if (button.dataset.action === 'delete') {{
-        void deleteCase(caseId);
+      if (button) {{
+        const caseId = button.dataset.caseId || '';
+        if (button.dataset.action === 'delete') {{
+          void deleteCase(caseId);
+          return;
+        }}
+        if (button.dataset.action === 'audit') {{
+          void loadAudit(caseId);
+          return;
+        }}
+        if (button.dataset.action === 'auto-data-request') {{
+          void autoDataRequest(caseId);
+          return;
+        }}
+        startEdit(caseId);
         return;
       }}
-      if (button.dataset.action === 'audit') {{
-        void loadAudit(caseId);
-        return;
-      }}
-      if (button.dataset.action === 'auto-data-request') {{
-        void autoDataRequest(caseId);
-        return;
-      }}
-      startEdit(caseId);
+      if (event.target.closest('a, input, select, textarea, label')) return;
+      const row = event.target.closest('tr[data-case-id]');
+      if (!row) return;
+      toggleExpandedCase(row.dataset.caseId || '');
+    }});
+    tableBody.addEventListener('keydown', (event) => {{
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      if (event.target.closest('button, a, input, select, textarea, label')) return;
+      const row = event.target.closest('tr[data-case-id]');
+      if (!row) return;
+      event.preventDefault();
+      toggleExpandedCase(row.dataset.caseId || '');
     }});
     chiefAssignmentsBody && chiefAssignmentsBody.addEventListener('click', (event) => {{
       const button = event.target.closest('button[data-chief-assignment-id]');

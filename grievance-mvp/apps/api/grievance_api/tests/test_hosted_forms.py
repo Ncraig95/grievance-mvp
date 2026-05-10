@@ -20,6 +20,7 @@ from grievance_api.web.routes_hosted_forms import (
     _PUBLIC_RATE_LIMIT_BUCKETS,
     hosted_forms_admin_page,
     hosted_form_page,
+    hosted_forms_index,
     hosted_forms_admin_settings,
     submit_hosted_form,
     update_hosted_form_setting,
@@ -630,6 +631,18 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Backend path", html)
         self.assertIn("autoExpandTextarea", html)
         self.assertIn("textarea.auto-expand", html)
+        self.assertIn('class="top-menu"', html)
+        self.assertIn('href="/officers"', html)
+        self.assertIn('href="/forms"', html)
+
+    async def test_public_forms_index_renders_navigation_menu(self) -> None:
+        response = await hosted_forms_index(_Request(state=self._state()))
+        html = response.body.decode("utf-8")
+
+        self.assertIn("Hosted Forms", html)
+        self.assertIn('class="top-menu"', html)
+        self.assertIn('href="/officers"', html)
+        self.assertIn('href="/forms" aria-current="page"', html)
 
     async def test_referral_public_page_renders_human_sections(self) -> None:
         response = await hosted_form_page("referral", _Request(state=self._state()))

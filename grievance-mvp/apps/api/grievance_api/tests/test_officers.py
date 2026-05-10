@@ -9,6 +9,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+try:
+    import esprima
+except ImportError:  # pragma: no cover - dev dependency in test container
+    esprima = None
+
 from fastapi import HTTPException
 from fastapi.responses import RedirectResponse
 
@@ -342,9 +347,45 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row.steward, "Steward Smith")
         self.assertEqual(row.occurrence_date, "2026-03-20")
         self.assertEqual(row.issue_summary, "Contract issue details")
+        self.assertEqual(row.narrative_summary, "Contract issue details")
+        self.assertEqual(row.narrative_full, "Contract issue details")
+        self.assertEqual(row.summary_source, "template_data.issue_text")
         self.assertEqual(row.contract, "AT&T Mobility")
         self.assertEqual(row.contract_scope, "mobility")
         self.assertEqual(result.viewer.role, "read_only")
+
+    async def test_completed_workflow_does_not_auto_close_tracker_status(self) -> None:
+        await self.db.exec(
+            """INSERT INTO cases(
+                 id, grievance_id, created_at_utc, status, approval_status, grievance_number,
+                 member_name, member_email, intake_request_id, intake_payload_json
+               ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "C-approved",
+                "2026099",
+                "2026-03-27T15:00:00+00:00",
+                "approved",
+                "approved",
+                None,
+                "Pat Member",
+                "pat@example.org",
+                "forms-approved",
+                json.dumps(
+                    {
+                        "request_id": "forms-approved",
+                        "contract": "AT&T Mobility",
+                        "narrative": "Approved workflow should remain open in officer tracker until settlement is complete.",
+                    }
+                ),
+            ),
+        )
+        request = _Request(state=SimpleNamespace(cfg=self._cfg(auth_enabled=False), db=self.db))
+
+        result = await officer_cases(request)
+
+        self.assertEqual(result.count, 1)
+        self.assertEqual(result.rows[0].workflow_status, "approved")
+        self.assertEqual(result.rows[0].officer_status, "open")
 
     async def test_officers_page_hides_mutation_controls_when_auth_disabled(self) -> None:
         request = _Request(state=SimpleNamespace(cfg=self._cfg(auth_enabled=False), db=self.db))
@@ -511,6 +552,40 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="metricTotalValue">0</div>', html)
         self.assertIn('id="metricEscalatedValue">0</div>', html)
         self.assertIn('href="#trackerPanel"', html)
+
+    async def test_officers_page_renders_compact_expandable_tracker(self) -> None:
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        response = await officers_page(request)
+        html = response.body.decode("utf-8")
+
+        self.assertIn("Grievance Overview", html)
+        self.assertIn("Narrative Summary", html)
+        self.assertIn("function renderExpandedDetails(row)", html)
+        self.assertIn("Full Narrative", html)
+        self.assertIn("narrative_summary", html)
+        self.assertIn("aria-expanded=", html)
+        self.assertIn("function toggleExpandedCase(caseId)", html)
+
+    @unittest.skipIf(esprima is None, "esprima not installed")
+    async def test_officers_page_inline_script_parses(self) -> None:
+        request = _Request(
+            state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
+            session=self._session_user("admin", email="admin@example.org"),
+            host="8.8.8.8",
+        )
+
+        response = await officers_page(request)
+        html = response.body.decode("utf-8")
+        script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+
+        parsed = esprima.parseScript(script, tolerant=False)
+
+        self.assertIsNotNone(parsed)
 
     async def test_officers_page_deduplicates_scope_pills_for_admin(self) -> None:
         request = _Request(

@@ -75,6 +75,16 @@ def _public_form_path(form_key: str) -> str:
     return f"/forms/{form_key}"
 
 
+def _hosted_forms_nav(*, forms_active: bool = False) -> str:
+    forms_current = ' aria-current="page"' if forms_active else ""
+    return f"""
+    <nav class="top-menu" aria-label="Page navigation">
+      <a href="/officers">Main tracker</a>
+      <a href="/forms"{forms_current}>Hosted forms</a>
+    </nav>
+    """
+
+
 def _build_internal_headers(*, cfg, body: bytes) -> dict[str, str]:  # noqa: ANN001
     headers: dict[str, str] = {"Content-Type": "application/json"}
 
@@ -388,6 +398,31 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
     }}
     a {{ color: var(--forms-green-dark); }}
     .shell {{ max-width: 920px; margin: 0 auto; padding: 28px 16px 44px; }}
+    .top-menu {{
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }}
+    .top-menu a {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 36px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 7px 12px;
+      background: rgba(255, 255, 255, 0.92);
+      color: var(--forms-green-dark);
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 700;
+      box-shadow: 0 8px 18px rgba(14, 30, 37, 0.05);
+    }}
+    .top-menu a:hover, .top-menu a:focus {{
+      border-color: var(--forms-green-dark);
+      outline: none;
+    }}
     .header {{
       background: linear-gradient(180deg, var(--forms-green) 0%, var(--forms-green-dark) 100%);
       color: #fff;
@@ -567,6 +602,7 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
 </head>
 <body>
   <main class="shell">
+    {_hosted_forms_nav()}
     <header class="header">
       <h1>{title}</h1>
       <p class="subtitle">{description}</p>
@@ -903,6 +939,31 @@ def _render_hosted_forms_index(definitions: tuple[HostedFormDefinition, ...]) ->
         linear-gradient(180deg, #f7fbfc 0%, var(--bg) 100%);
     }}
     .shell {{ max-width: 1020px; margin: 0 auto; padding: 28px 16px 48px; }}
+    .top-menu {{
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }}
+    .top-menu a {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 36px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 7px 12px;
+      background: rgba(255, 255, 255, 0.92);
+      color: #025c61;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 700;
+      box-shadow: 0 8px 18px rgba(14, 30, 37, 0.05);
+    }}
+    .top-menu a:hover, .top-menu a:focus, .top-menu a[aria-current="page"] {{
+      border-color: #025c61;
+      outline: none;
+    }}
     .hero {{
       background: linear-gradient(180deg, #03787c 0%, #025c61 100%);
       color: #fff;
@@ -955,6 +1016,7 @@ def _render_hosted_forms_index(definitions: tuple[HostedFormDefinition, ...]) ->
 </head>
 <body>
   <main class="shell">
+    {_hosted_forms_nav(forms_active=True)}
     <section class="hero">
       <h1>Hosted Forms</h1>
       <p class="subtitle">Use these web pages as the second input path alongside Microsoft Forms and Power Automate. Only currently enabled public forms appear here.</p>
