@@ -110,6 +110,22 @@ class ReferralConfig:
 
 
 @dataclass(frozen=True)
+class PayPortalConfig:
+    enabled: bool = True
+    sharepoint_root_folder: str = "Pay Portal"
+    voucher_template_path: str = "/app/templates/docx/Local 3106 Pay - Expense Voucher.docx"
+    receipt_max_file_bytes: int = 10_000_000
+    receipt_max_entry_bytes: int = 50_000_000
+    clamav_host: str = "clamav"
+    clamav_port: int = 3310
+    clamav_timeout_seconds: int = 30
+    president_target_scale: str = "36"
+    president_actual_scale: str = "32"
+    president_target_multiplier: float = 1.20
+    google_maps_api_key: str = ""
+
+
+@dataclass(frozen=True)
 class GrievanceIdConfig:
     mode: str
     timezone: str
@@ -244,6 +260,10 @@ def _default_referrals() -> ReferralConfig:
     return ReferralConfig()
 
 
+def _default_pay_portal() -> PayPortalConfig:
+    return PayPortalConfig()
+
+
 @dataclass(frozen=True)
 class AppConfig:
     hmac_shared_secret: str
@@ -258,6 +278,7 @@ class AppConfig:
     grievance_id: GrievanceIdConfig
     outreach: OutreachConfig = field(default_factory=OutreachConfig)
     referrals: ReferralConfig = field(default_factory=_default_referrals)
+    pay_portal: PayPortalConfig = field(default_factory=_default_pay_portal)
     intake_auth: IntakeAuthConfig = field(default_factory=_default_intake_auth)
     rendering: RenderingConfig = field(default_factory=_default_rendering)
     officer_tracking: OfficerTrackingConfig = field(default_factory=_default_officer_tracking)
@@ -650,6 +671,7 @@ def load_config(path: str) -> AppConfig:
     email_raw = raw.get("email", {}) or {}
     outreach_raw = raw.get("outreach", {}) or {}
     referrals_raw = raw.get("referrals", {}) or {}
+    pay_portal_raw = raw.get("pay_portal", {}) or {}
     grievance_raw = raw.get("grievance_id", {}) or {}
     intake_auth_raw = raw.get("intake_auth", {}) or {}
     rendering_raw = raw.get("rendering", {}) or {}
@@ -825,6 +847,50 @@ def load_config(path: str) -> AppConfig:
                 or ("officer@cwa3106.com",)
             ),
             sunset_date=str(referrals_raw.get("sunset_date", "2027-02-05")).strip() or "2027-02-05",
+        ),
+        pay_portal=PayPortalConfig(
+            enabled=_as_bool(pay_portal_raw.get("enabled"), True),
+            sharepoint_root_folder=(
+                str(pay_portal_raw.get("sharepoint_root_folder", "Pay Portal")).strip()
+                or "Pay Portal"
+            ),
+            voucher_template_path=(
+                str(
+                    pay_portal_raw.get(
+                        "voucher_template_path",
+                        "/app/templates/docx/Local 3106 Pay - Expense Voucher.docx",
+                    )
+                ).strip()
+                or "/app/templates/docx/Local 3106 Pay - Expense Voucher.docx"
+            ),
+            receipt_max_file_bytes=max(
+                1,
+                int(pay_portal_raw.get("receipt_max_file_bytes", 10_000_000)),
+            ),
+            receipt_max_entry_bytes=max(
+                1,
+                int(pay_portal_raw.get("receipt_max_entry_bytes", 50_000_000)),
+            ),
+            clamav_host=str(pay_portal_raw.get("clamav_host", "clamav")).strip() or "clamav",
+            clamav_port=max(1, int(pay_portal_raw.get("clamav_port", 3310))),
+            clamav_timeout_seconds=max(
+                1,
+                int(pay_portal_raw.get("clamav_timeout_seconds", 30)),
+            ),
+            president_target_scale=(
+                str(pay_portal_raw.get("president_target_scale", "36")).strip() or "36"
+            ),
+            president_actual_scale=(
+                str(pay_portal_raw.get("president_actual_scale", "32")).strip() or "32"
+            ),
+            president_target_multiplier=max(
+                0.0,
+                _as_float(pay_portal_raw.get("president_target_multiplier", 1.20), 1.20),
+            ),
+            google_maps_api_key=(
+                str(pay_portal_raw.get("google_maps_api_key", "")).strip()
+                or os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
+            ),
         ),
         grievance_id=GrievanceIdConfig(
             mode=_normalize_grievance_mode(grievance_raw.get("mode")),
