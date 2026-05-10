@@ -609,3 +609,176 @@ CREATE TABLE IF NOT EXISTS document_stage_field_values (
 
 CREATE INDEX IF NOT EXISTS idx_document_stage_field_values_stage
 ON document_stage_field_values(document_stage_id);
+
+CREATE TABLE IF NOT EXISTS pay_users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL,
+  display_name TEXT,
+  role TEXT NOT NULL DEFAULT 'guest',
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL,
+  invited_by TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_users_email
+ON pay_users(email);
+
+CREATE INDEX IF NOT EXISTS idx_pay_users_status
+ON pay_users(status);
+
+CREATE TABLE IF NOT EXISTS pay_periods (
+  id TEXT PRIMARY KEY,
+  period_start TEXT NOT NULL,
+  period_end TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  revision INTEGER NOT NULL DEFAULT 1,
+  locked_by TEXT,
+  locked_at_utc TEXT,
+  completed_at_utc TEXT,
+  president_email TEXT,
+  sharepoint_folder_path TEXT,
+  sharepoint_folder_web_url TEXT,
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_periods_range_revision
+ON pay_periods(period_start, period_end, revision);
+
+CREATE INDEX IF NOT EXISTS idx_pay_periods_status
+ON pay_periods(status);
+
+CREATE TABLE IF NOT EXISTS pay_wage_scales (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  effective_date TEXT NOT NULL,
+  weekly_basis_hours REAL NOT NULL,
+  target_scale TEXT NOT NULL DEFAULT '36',
+  actual_scale TEXT NOT NULL DEFAULT '32',
+  target_weekly_amount REAL NOT NULL,
+  actual_weekly_amount REAL,
+  target_multiplier REAL NOT NULL DEFAULT 1.2,
+  notes TEXT,
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL,
+  updated_by TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pay_wage_scales_effective
+ON pay_wage_scales(effective_date, weekly_basis_hours);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_wage_scales_unique_row
+ON pay_wage_scales(effective_date, weekly_basis_hours, target_scale, actual_scale);
+
+CREATE TABLE IF NOT EXISTS pay_entries (
+  id TEXT PRIMARY KEY,
+  period_id TEXT NOT NULL,
+  user_email TEXT NOT NULL,
+  display_name TEXT,
+  entry_date TEXT NOT NULL,
+  local_number TEXT,
+  address TEXT,
+  hourly_rate REAL NOT NULL DEFAULT 0,
+  hours REAL NOT NULL DEFAULT 0,
+  mileage_miles REAL NOT NULL DEFAULT 0,
+  mileage_rate REAL NOT NULL DEFAULT 0,
+  mileage_amount REAL NOT NULL DEFAULT 0,
+  rentals_amount REAL NOT NULL DEFAULT 0,
+  meals_amount REAL NOT NULL DEFAULT 0,
+  hotel_amount REAL NOT NULL DEFAULT 0,
+  miscellaneous_amount REAL NOT NULL DEFAULT 0,
+  president_diff_hours REAL NOT NULL DEFAULT 0,
+  president_diff_rate REAL NOT NULL DEFAULT 0,
+  president_diff_amount REAL NOT NULL DEFAULT 0,
+  wage_scale_id INTEGER,
+  notes TEXT,
+  locked_at_utc TEXT,
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL,
+  FOREIGN KEY (period_id) REFERENCES pay_periods (id),
+  FOREIGN KEY (wage_scale_id) REFERENCES pay_wage_scales (id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_entries_period_user_date
+ON pay_entries(period_id, user_email, entry_date);
+
+CREATE INDEX IF NOT EXISTS idx_pay_entries_period
+ON pay_entries(period_id);
+
+CREATE INDEX IF NOT EXISTS idx_pay_entries_user_date
+ON pay_entries(user_email, entry_date);
+
+CREATE TABLE IF NOT EXISTS pay_attachments (
+  id TEXT PRIMARY KEY,
+  period_id TEXT NOT NULL,
+  entry_id TEXT NOT NULL,
+  uploaded_by TEXT NOT NULL,
+  attachment_type TEXT NOT NULL,
+  original_filename TEXT NOT NULL,
+  stored_filename TEXT NOT NULL,
+  local_path TEXT NOT NULL,
+  content_type TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  scan_status TEXT NOT NULL,
+  scan_result TEXT NOT NULL,
+  sharepoint_url TEXT,
+  sharepoint_path TEXT,
+  created_at_utc TEXT NOT NULL,
+  FOREIGN KEY (period_id) REFERENCES pay_periods (id),
+  FOREIGN KEY (entry_id) REFERENCES pay_entries (id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pay_attachments_entry
+ON pay_attachments(entry_id);
+
+CREATE INDEX IF NOT EXISTS idx_pay_attachments_period
+ON pay_attachments(period_id);
+
+CREATE TABLE IF NOT EXISTS pay_packets (
+  id TEXT PRIMARY KEY,
+  period_id TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL,
+  voucher_paths_json TEXT NOT NULL DEFAULT '[]',
+  voucher_pdf_paths_json TEXT NOT NULL DEFAULT '[]',
+  unsigned_packet_path TEXT,
+  unsigned_packet_sha256 TEXT,
+  docuseal_submission_id TEXT,
+  docuseal_signing_link TEXT,
+  signed_packet_path TEXT,
+  audit_zip_path TEXT,
+  sharepoint_unsigned_url TEXT,
+  sharepoint_signed_url TEXT,
+  sharepoint_audit_url TEXT,
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL,
+  completed_at_utc TEXT,
+  FOREIGN KEY (period_id) REFERENCES pay_periods (id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_packets_period_revision
+ON pay_packets(period_id, revision);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_packets_docuseal_submission
+ON pay_packets(docuseal_submission_id);
+
+CREATE TABLE IF NOT EXISTS pay_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  period_id TEXT,
+  entry_id TEXT,
+  packet_id TEXT,
+  ts_utc TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  actor TEXT,
+  details_json TEXT NOT NULL DEFAULT '{}',
+  FOREIGN KEY (period_id) REFERENCES pay_periods (id),
+  FOREIGN KEY (entry_id) REFERENCES pay_entries (id),
+  FOREIGN KEY (packet_id) REFERENCES pay_packets (id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pay_events_period
+ON pay_events(period_id, ts_utc);
+
+CREATE INDEX IF NOT EXISTS idx_pay_events_packet
+ON pay_events(packet_id, ts_utc);
