@@ -411,6 +411,36 @@ def migrate(db_path: str) -> None:
 
         con.execute("UPDATE cases SET grievance_id=id WHERE grievance_id IS NULL OR grievance_id='' ")
 
+        _ensure_column(con, "pay_entries", "lost_wage_input_type", "TEXT NOT NULL DEFAULT 'hourly'")
+        _ensure_column(con, "pay_entries", "lost_wage_amount", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(con, "pay_entries", "lost_wage_hourly_rate", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(con, "pay_entries", "compensation_stub_id", "TEXT")
+        pay_entry_cols = _table_columns(con, "pay_entries")
+        if "employee_wage_input_type" in pay_entry_cols:
+            con.execute(
+                """UPDATE pay_entries
+                   SET lost_wage_input_type=employee_wage_input_type
+                   WHERE employee_wage_input_type IS NOT NULL
+                     AND employee_wage_input_type <> ''
+                     AND (lost_wage_input_type IS NULL OR lost_wage_input_type='' OR lost_wage_input_type='hourly')"""
+            )
+        if "employee_wage_amount" in pay_entry_cols:
+            con.execute(
+                """UPDATE pay_entries
+                   SET lost_wage_amount=employee_wage_amount
+                   WHERE employee_wage_amount IS NOT NULL
+                     AND employee_wage_amount <> 0
+                     AND (lost_wage_amount IS NULL OR lost_wage_amount=0)"""
+            )
+        if "employee_wage_hourly_rate" in pay_entry_cols:
+            con.execute(
+                """UPDATE pay_entries
+                   SET lost_wage_hourly_rate=employee_wage_hourly_rate
+                   WHERE employee_wage_hourly_rate IS NOT NULL
+                     AND employee_wage_hourly_rate <> 0
+                     AND (lost_wage_hourly_rate IS NULL OR lost_wage_hourly_rate=0)"""
+            )
+
         # Ensure indexes after all columns are present.
         index_sql = [
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_cases_intake_request_id ON cases(intake_request_id)",
@@ -471,12 +501,73 @@ def migrate(db_path: str) -> None:
             "CREATE INDEX IF NOT EXISTS idx_referrals_status_due ON referrals(status, reminder_due_at_utc)",
             "CREATE INDEX IF NOT EXISTS idx_referrals_referrer_group ON referrals(referrer_group)",
             "CREATE INDEX IF NOT EXISTS idx_referrals_referred_group ON referrals(referred_group)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_users_email ON pay_users(email)",
+            "CREATE INDEX IF NOT EXISTS idx_pay_users_status ON pay_users(status)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_periods_range_revision ON pay_periods(period_start, period_end, revision)",
+            "CREATE INDEX IF NOT EXISTS idx_pay_periods_status ON pay_periods(status)",
+            "CREATE INDEX IF NOT EXISTS idx_pay_wage_scales_effective ON pay_wage_scales(effective_date, weekly_basis_hours)",
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_wage_scales_unique_row "
+                "ON pay_wage_scales(effective_date, weekly_basis_hours, target_scale, actual_scale)"
+            ),
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_irs_rate_candidates_unique "
+                "ON pay_irs_rate_candidates(rate_year, effective_date, cents_per_mile, source_url)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_pay_irs_rate_candidates_status_year "
+                "ON pay_irs_rate_candidates(status, rate_year)"
+            ),
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_entries_period_user_date ON pay_entries(period_id, user_email, entry_date)",
+            "CREATE INDEX IF NOT EXISTS idx_pay_entries_period ON pay_entries(period_id)",
+            "CREATE INDEX IF NOT EXISTS idx_pay_entries_user_date ON pay_entries(user_email, entry_date)",
+            "CREATE INDEX IF NOT EXISTS idx_pay_entries_compensation_stub ON pay_entries(compensation_stub_id)",
+            "CREATE INDEX IF NOT EXISTS idx_pay_attachments_entry ON pay_attachments(entry_id)",
+            "CREATE INDEX IF NOT EXISTS idx_pay_attachments_period ON pay_attachments(period_id)",
+            (
+                "CREATE INDEX IF NOT EXISTS idx_pay_compensation_stubs_user_date "
+                "ON pay_compensation_stubs(user_email, created_at_utc)"
+            ),
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_packets_period_revision ON pay_packets(period_id, revision)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_packets_docuseal_submission ON pay_packets(docuseal_submission_id)",
+            "CREATE INDEX IF NOT EXISTS idx_pay_events_period ON pay_events(period_id, ts_utc)",
+            "CREATE INDEX IF NOT EXISTS idx_pay_events_packet ON pay_events(packet_id, ts_utc)",
         ]
         for stmt in index_sql:
             try:
                 con.execute(stmt)
             except sqlite3.OperationalError:
                 continue
+
+        now = "2026-05-10T00:00:00+00:00"
+        for effective_date, target_weekly in (
+            ("2025-09-07", 2065.50),
+            ("2026-09-06", 2132.50),
+            ("2027-09-05", 2207.00),
+            ("2028-09-03", 2278.50),
+        ):
+            con.execute(
+                """
+                INSERT OR IGNORE INTO pay_wage_scales(
+                  effective_date, weekly_basis_hours, target_scale, actual_scale,
+                  target_weekly_amount, actual_weekly_amount, target_multiplier,
+                  notes, created_at_utc, updated_at_utc, updated_by
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    effective_date,
+                    40.0,
+                    "36",
+                    "base",
+                    target_weekly,
+                    None,
+                    1.20,
+                    "Seeded scale 36 weekly base; presidential target is scale 36 plus 20%.",
+                    now,
+                    now,
+                    "migration",
+                ),
+            )
 
         con.commit()
     finally:

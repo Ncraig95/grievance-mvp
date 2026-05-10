@@ -1557,6 +1557,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     hero_links = [
         '<a class="link-chip" href="#filtersPanel">Filters</a>',
         '<a class="link-chip" href="#trackerPanel">Tracker</a>',
+        '<a class="link-chip" href="/pay">Lost Wage</a>',
     ]
     if user.auth_enabled:
         hero_links.append('<a class="link-chip" href="#officerProfilePanel">Profile</a>')
@@ -1582,6 +1583,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     review_links = [
         _menu_link("Filters", "#filtersPanel", "Search, scope, assignee, status, and source filters."),
         _menu_link("Tracker", "#trackerPanel", "Jump straight to the live grievance table."),
+        _menu_link("Lost Wage Portal", "/pay", "Open the payroll and expense voucher portal.", external=True),
         _menu_link("Referrals", "/officers/referrals", "Open the referral tracking portal.", external=True),
         _menu_link("Response Log", "#responsePanel", "See the latest API response and debug payload."),
     ]

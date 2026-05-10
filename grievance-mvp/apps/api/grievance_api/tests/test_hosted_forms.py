@@ -634,6 +634,7 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('class="top-menu"', html)
         self.assertIn('href="/officers"', html)
         self.assertIn('href="/forms"', html)
+        self.assertIn('href="/pay/start"', html)
 
     async def test_public_forms_index_renders_navigation_menu(self) -> None:
         response = await hosted_forms_index(_Request(state=self._state()))
@@ -643,6 +644,7 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('class="top-menu"', html)
         self.assertIn('href="/officers"', html)
         self.assertIn('href="/forms" aria-current="page"', html)
+        self.assertIn('href="/pay/start"', html)
 
     async def test_referral_public_page_renders_human_sections(self) -> None:
         response = await hosted_form_page("referral", _Request(state=self._state()))

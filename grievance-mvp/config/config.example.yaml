@@ -134,6 +134,46 @@ grievance_id:
   separator: ""
 officer_tracking:
   roster: []
+pay_portal:
+  enabled: true
+  sharepoint_root_folder: Pay Portal
+  voucher_template_path: /app/templates/docx/Local 3106 Pay - Expense Voucher.docx
+  receipt_max_file_bytes: 10000000
+  receipt_max_entry_bytes: 50000000
+  clamav_host: clamav
+  clamav_port: 3310
+  clamav_timeout_seconds: 30
+  president_email: ""
+  treasurer_emails: []
+  president_target_scale: "36"
+  # Presidential wages are wage scale 36 plus 20%.
+  president_target_multiplier: 1.20
+  # Optional; can also be supplied through GOOGLE_MAPS_API_KEY.
+  google_maps_api_key: ""
+  irs_rates:
+    "2024": "0.67"
+    "2025": "0.70"
+    "2026": "0.725"
+  irs_rate_sync_enabled: true
+  # New IRS mileage rates are staged for treasurer/admin approval before use.
+  irs_rate_source_urls:
+    - https://www.irs.gov/tax-professionals/standard-mileage-rates
+    - https://www.irs.gov/newsroom/irs-sets-2026-business-standard-mileage-rate-at-725-cents-per-mile-up-25-cents
+  common_places:
+    - label: Union Hall
+      address: 4076 Union Hall Pl, Jacksonville, FL 32205, USA
+    - label: Cumberland Industrial
+      address: 350 Cumberland Industrial Ct, St. Augustine, FL 32095, USA
+    - label: Phillips Hwy
+      address: 11700 Phillips Hwy, Jacksonville, FL 32256, USA
+    - label: Penman Rd
+      address: 98 Penman Rd S, Jacksonville Beach, FL 32250, USA
+  pay_users:
+    # External users only. Microsoft officers/admins use officer_auth access.
+    # - email: steward@example.org
+    #   display_name: Steward Example
+    #   role: guest
+    #   status: active
 officer_auth:
   enabled: false
   tenant_id: ""

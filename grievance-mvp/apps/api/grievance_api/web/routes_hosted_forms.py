@@ -75,12 +75,14 @@ def _public_form_path(form_key: str) -> str:
     return f"/forms/{form_key}"
 
 
-def _hosted_forms_nav(*, forms_active: bool = False) -> str:
+def _hosted_forms_nav(*, forms_active: bool = False, pay_active: bool = False) -> str:
     forms_current = ' aria-current="page"' if forms_active else ""
+    pay_current = ' aria-current="page"' if pay_active else ""
     return f"""
     <nav class="top-menu" aria-label="Page navigation">
       <a href="/officers">Main tracker</a>
       <a href="/forms"{forms_current}>Hosted forms</a>
+      <a href="/pay/start"{pay_current}>Pay Portal</a>
     </nav>
     """
 

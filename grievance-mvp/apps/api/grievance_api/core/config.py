@@ -119,10 +119,19 @@ class PayPortalConfig:
     clamav_host: str = "clamav"
     clamav_port: int = 3310
     clamav_timeout_seconds: int = 30
+    president_email: str = ""
+    treasurer_emails: tuple[str, ...] = ()
     president_target_scale: str = "36"
-    president_actual_scale: str = "32"
     president_target_multiplier: float = 1.20
     google_maps_api_key: str = ""
+    irs_rates: dict[str, str] = field(default_factory=dict)
+    irs_rate_sync_enabled: bool = True
+    irs_rate_source_urls: tuple[str, ...] = (
+        "https://www.irs.gov/tax-professionals/standard-mileage-rates",
+        "https://www.irs.gov/newsroom/irs-sets-2026-business-standard-mileage-rate-at-725-cents-per-mile-up-25-cents",
+    )
+    common_places: tuple[dict[str, str], ...] = field(default_factory=tuple)
+    pay_users: tuple[dict[str, str], ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -323,6 +332,52 @@ def _as_mapping(value: object) -> dict[str, str]:
         if key and val:
             out[key] = val
     return out
+
+
+def _as_place_list(value: object) -> tuple[dict[str, str], ...]:
+    if not isinstance(value, list):
+        return ()
+    places: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        address = str(item.get("address") or "").strip()
+        if label and address:
+            places.append({"label": label, "address": address})
+    return tuple(places)
+
+
+def _as_pay_user_list(value: object) -> tuple[dict[str, str], ...]:
+    if not isinstance(value, list):
+        return ()
+    users: list[dict[str, str]] = []
+    for item in value:
+        if isinstance(item, str):
+            email = item.strip()
+            if email:
+                users.append({"email": email, "display_name": "", "role": "guest", "status": "active"})
+            continue
+        if not isinstance(item, dict):
+            continue
+        email = str(item.get("email") or "").strip()
+        if not email:
+            continue
+        role = str(item.get("role") or "guest").strip().lower()
+        if role not in {"guest", "officer", "treasurer"}:
+            role = "guest"
+        status = str(item.get("status") or "active").strip().lower()
+        if status not in {"active", "inactive"}:
+            status = "active"
+        users.append(
+            {
+                "email": email,
+                "display_name": str(item.get("display_name") or "").strip(),
+                "role": role,
+                "status": status,
+            }
+        )
+    return tuple(users)
 
 
 def _as_int_mapping(value: object) -> dict[str, int]:
@@ -877,11 +932,10 @@ def load_config(path: str) -> AppConfig:
                 1,
                 int(pay_portal_raw.get("clamav_timeout_seconds", 30)),
             ),
+            president_email=str(pay_portal_raw.get("president_email", "")).strip(),
+            treasurer_emails=_as_recipients(pay_portal_raw.get("treasurer_emails")),
             president_target_scale=(
                 str(pay_portal_raw.get("president_target_scale", "36")).strip() or "36"
-            ),
-            president_actual_scale=(
-                str(pay_portal_raw.get("president_actual_scale", "32")).strip() or "32"
             ),
             president_target_multiplier=max(
                 0.0,
@@ -891,6 +945,14 @@ def load_config(path: str) -> AppConfig:
                 str(pay_portal_raw.get("google_maps_api_key", "")).strip()
                 or os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
             ),
+            irs_rates=_as_mapping(pay_portal_raw.get("irs_rates")),
+            irs_rate_sync_enabled=_as_bool(pay_portal_raw.get("irs_rate_sync_enabled"), True),
+            irs_rate_source_urls=(
+                _as_str_tuple(pay_portal_raw.get("irs_rate_source_urls"))
+                or PayPortalConfig().irs_rate_source_urls
+            ),
+            common_places=_as_place_list(pay_portal_raw.get("common_places")),
+            pay_users=_as_pay_user_list(pay_portal_raw.get("pay_users")),
         ),
         grievance_id=GrievanceIdConfig(
             mode=_normalize_grievance_mode(grievance_raw.get("mode")),

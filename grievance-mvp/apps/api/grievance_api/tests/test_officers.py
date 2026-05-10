@@ -625,6 +625,8 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('href="#mutationSplit"', html)
         self.assertIn('href="/ops"', html)
         self.assertIn("Ops Console", html)
+        self.assertIn('href="/pay"', html)
+        self.assertIn("Lost Wage Portal", html)
 
     async def test_officer_mutation_routes_block_when_auth_disabled(self) -> None:
         request = _Request(state=SimpleNamespace(cfg=self._cfg(auth_enabled=False), db=self.db))

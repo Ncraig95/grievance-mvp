@@ -29,6 +29,7 @@ from .web.officer_auth import router as officer_auth_router
 from .web.routes_officers import router as officers_router
 from .web.routes_ops import router as ops_router
 from .web.routes_outreach import router as outreach_router
+from .web.routes_pay import router as pay_router
 from .web.routes_referrals import router as referrals_router
 from .web.routes_steward import router as steward_router
 from .web.routes_standalone import router as standalone_router
@@ -174,6 +175,7 @@ def create_app() -> FastAPI:
     app.include_router(officers_router)
     app.include_router(outreach_router)
     app.include_router(referrals_router)
+    app.include_router(pay_router)
     app.include_router(steward_router)
     app.include_router(standalone_router)
 

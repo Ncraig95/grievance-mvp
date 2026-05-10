@@ -654,7 +654,7 @@ CREATE TABLE IF NOT EXISTS pay_wage_scales (
   effective_date TEXT NOT NULL,
   weekly_basis_hours REAL NOT NULL,
   target_scale TEXT NOT NULL DEFAULT '36',
-  actual_scale TEXT NOT NULL DEFAULT '32',
+  actual_scale TEXT NOT NULL DEFAULT 'base',
   target_weekly_amount REAL NOT NULL,
   actual_weekly_amount REAL,
   target_multiplier REAL NOT NULL DEFAULT 1.2,
@@ -670,6 +670,57 @@ ON pay_wage_scales(effective_date, weekly_basis_hours);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_wage_scales_unique_row
 ON pay_wage_scales(effective_date, weekly_basis_hours, target_scale, actual_scale);
 
+CREATE TABLE IF NOT EXISTS pay_irs_rate_candidates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rate_year TEXT NOT NULL,
+  effective_date TEXT NOT NULL,
+  cents_per_mile REAL NOT NULL,
+  rate_per_mile REAL NOT NULL,
+  source_url TEXT NOT NULL,
+  source_title TEXT,
+  detected_at_utc TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  approved_by TEXT,
+  approved_at_utc TEXT,
+  updated_at_utc TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_irs_rate_candidates_unique
+ON pay_irs_rate_candidates(rate_year, effective_date, cents_per_mile, source_url);
+
+CREATE INDEX IF NOT EXISTS idx_pay_irs_rate_candidates_status_year
+ON pay_irs_rate_candidates(status, rate_year);
+
+CREATE TABLE IF NOT EXISTS pay_compensation_stubs (
+  id TEXT PRIMARY KEY,
+  user_email TEXT NOT NULL,
+  uploaded_by TEXT NOT NULL,
+  base_wage_input_type TEXT NOT NULL DEFAULT 'hourly',
+  base_wage_amount REAL NOT NULL DEFAULT 0,
+  weekly_basis_hours REAL NOT NULL DEFAULT 40,
+  commission_month_1_amount REAL NOT NULL DEFAULT 0,
+  commission_month_2_amount REAL NOT NULL DEFAULT 0,
+  commission_month_3_amount REAL NOT NULL DEFAULT 0,
+  commission_average_monthly REAL NOT NULL DEFAULT 0,
+  commission_hourly_rate REAL NOT NULL DEFAULT 0,
+  calculated_hourly_rate REAL NOT NULL DEFAULT 0,
+  original_filename TEXT NOT NULL,
+  stored_filename TEXT NOT NULL,
+  local_path TEXT NOT NULL,
+  content_type TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  scan_status TEXT NOT NULL,
+  scan_result TEXT NOT NULL,
+  sharepoint_url TEXT,
+  sharepoint_path TEXT,
+  notes TEXT,
+  created_at_utc TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pay_compensation_stubs_user_date
+ON pay_compensation_stubs(user_email, created_at_utc);
+
 CREATE TABLE IF NOT EXISTS pay_entries (
   id TEXT PRIMARY KEY,
   period_id TEXT NOT NULL,
@@ -679,6 +730,10 @@ CREATE TABLE IF NOT EXISTS pay_entries (
   local_number TEXT,
   address TEXT,
   hourly_rate REAL NOT NULL DEFAULT 0,
+  lost_wage_input_type TEXT NOT NULL DEFAULT 'hourly',
+  lost_wage_amount REAL NOT NULL DEFAULT 0,
+  lost_wage_hourly_rate REAL NOT NULL DEFAULT 0,
+  compensation_stub_id TEXT,
   hours REAL NOT NULL DEFAULT 0,
   mileage_miles REAL NOT NULL DEFAULT 0,
   mileage_rate REAL NOT NULL DEFAULT 0,
@@ -696,7 +751,8 @@ CREATE TABLE IF NOT EXISTS pay_entries (
   created_at_utc TEXT NOT NULL,
   updated_at_utc TEXT NOT NULL,
   FOREIGN KEY (period_id) REFERENCES pay_periods (id),
-  FOREIGN KEY (wage_scale_id) REFERENCES pay_wage_scales (id)
+  FOREIGN KEY (wage_scale_id) REFERENCES pay_wage_scales (id),
+  FOREIGN KEY (compensation_stub_id) REFERENCES pay_compensation_stubs (id)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_entries_period_user_date
@@ -707,6 +763,9 @@ ON pay_entries(period_id);
 
 CREATE INDEX IF NOT EXISTS idx_pay_entries_user_date
 ON pay_entries(user_email, entry_date);
+
+CREATE INDEX IF NOT EXISTS idx_pay_entries_compensation_stub
+ON pay_entries(compensation_stub_id);
 
 CREATE TABLE IF NOT EXISTS pay_attachments (
   id TEXT PRIMARY KEY,

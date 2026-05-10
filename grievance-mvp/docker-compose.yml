@@ -26,6 +26,12 @@ services:
     ports:
       - "127.0.0.1:${API_PORT:-8080}:8080"
 
+  clamav:
+    image: clamav/clamav:stable
+    restart: unless-stopped
+    networks:
+      - grievance-net
+
   smtp_graph_bridge:
     build:
       context: ./apps/smtp_graph_bridge

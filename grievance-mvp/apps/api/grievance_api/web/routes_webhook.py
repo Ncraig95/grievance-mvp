@@ -18,6 +18,7 @@ from ..services.contract_timeline import calculate_deadline, deadline_days_for_c
 from ..services.grievance_id_allocator import current_year_in_timezone
 from ..services.graph_mail import MailAttachment
 from ..services.notification_service import NotificationService
+from ..services.pay_portal import add_pay_event, handle_pay_docuseal_completion
 from ..services.standalone_forms import (
     standalone_audit_filename,
     standalone_document_dir,
@@ -452,6 +453,37 @@ async def webhook_docuseal(request: Request):
             (submission_id,),
         )
     if not row and not standalone_row:
+        pay_row = await db.fetchone(
+            "SELECT id, period_id FROM pay_packets WHERE docuseal_submission_id=?",
+            (submission_id,),
+        )
+        if pay_row:
+            await add_pay_event(
+                db,
+                period_id=str(pay_row[1]),
+                packet_id=str(pay_row[0]),
+                event_type="docuseal_webhook_received",
+                actor="docuseal",
+                details={"event_type": _event_type(payload), "receipt_key": receipt_key},
+            )
+            if not _is_completion_event(payload):
+                await db.mark_receipt_handled("docuseal", receipt_key)
+                return {"ok": True, "handled": False, "reason": "non_completion_event"}
+            try:
+                result = await handle_pay_docuseal_completion(
+                    db=db,
+                    cfg=cfg,
+                    graph=graph,
+                    mailer=request.app.state.mailer,
+                    docuseal=docuseal,
+                    submission_id=submission_id,
+                    payload=payload,
+                )
+                await db.mark_receipt_handled("docuseal", receipt_key)
+                return result or {"ok": True, "handled": False, "reason": "unknown_pay_submission"}
+            except Exception:
+                await db.release_receipt_claim("docuseal", receipt_key)
+                raise
         await db.mark_receipt_handled("docuseal", receipt_key)
         logger.warning("docuseal_webhook_unknown_submission", extra={"correlation_id": submission_id})
         return {"ok": True, "handled": False, "reason": "unknown_submission"}
