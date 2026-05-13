@@ -23,6 +23,21 @@ class GrievanceSummaryTests(unittest.TestCase):
         )
         self.assertEqual(result.summary, result.full_text)
 
+    def test_statement_narrative_beats_action_taken_and_current_status(self) -> None:
+        result = build_grievance_summary(
+            {
+                "narrative": "Original statement submitted by the member.",
+                "template_data": {
+                    "action_taken": "Most recent action was a first level request.",
+                    "current_status": "Waiting on a company response.",
+                },
+            }
+        )
+
+        self.assertEqual(result.source, "narrative")
+        self.assertEqual(result.full_text, "Original statement submitted by the member.")
+        self.assertEqual(result.summary, "Original statement submitted by the member.")
+
     def test_short_text_passes_through(self) -> None:
         text = "Member was denied requested vacation in violation of the contract."
 

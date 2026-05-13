@@ -85,6 +85,22 @@ def migrate(db_path: str) -> None:
 
         con.execute(
             """
+            CREATE TABLE IF NOT EXISTS internal_role_assignments (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              principal_id TEXT,
+              principal_email TEXT NOT NULL,
+              principal_display_name TEXT,
+              role TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'active',
+              created_at_utc TEXT NOT NULL,
+              updated_at_utc TEXT NOT NULL,
+              assigned_by TEXT NOT NULL
+            )
+            """
+        )
+
+        con.execute(
+            """
             CREATE TABLE IF NOT EXISTS referrals (
               id TEXT PRIMARY KEY,
               request_id TEXT NOT NULL,
@@ -281,6 +297,15 @@ def migrate(db_path: str) -> None:
         _ensure_column(con, "officer_profiles", "created_at_utc", "TEXT")
         _ensure_column(con, "officer_profiles", "updated_at_utc", "TEXT")
 
+        _ensure_column(con, "internal_role_assignments", "principal_id", "TEXT")
+        _ensure_column(con, "internal_role_assignments", "principal_email", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "internal_role_assignments", "principal_display_name", "TEXT")
+        _ensure_column(con, "internal_role_assignments", "role", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "internal_role_assignments", "status", "TEXT NOT NULL DEFAULT 'active'")
+        _ensure_column(con, "internal_role_assignments", "created_at_utc", "TEXT")
+        _ensure_column(con, "internal_role_assignments", "updated_at_utc", "TEXT")
+        _ensure_column(con, "internal_role_assignments", "assigned_by", "TEXT NOT NULL DEFAULT ''")
+
         _ensure_column(con, "external_steward_users", "email", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(con, "external_steward_users", "display_name", "TEXT")
         _ensure_column(con, "external_steward_users", "status", "TEXT NOT NULL DEFAULT 'active'")
@@ -297,6 +322,25 @@ def migrate(db_path: str) -> None:
         _ensure_column(con, "external_steward_case_assignments", "created_at_utc", "TEXT")
         _ensure_column(con, "external_steward_case_assignments", "updated_at_utc", "TEXT")
         _ensure_column(con, "external_steward_case_assignments", "assigned_by", "TEXT NOT NULL DEFAULT ''")
+
+        _ensure_column(con, "pay_profiles", "principal_id", "TEXT")
+        _ensure_column(con, "pay_profiles", "principal_email", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "pay_profiles", "principal_display_name", "TEXT")
+        _ensure_column(con, "pay_profiles", "pay_basis", "TEXT NOT NULL DEFAULT 'expense_only'")
+        _ensure_column(con, "pay_profiles", "base_wage_input_type", "TEXT NOT NULL DEFAULT 'hourly'")
+        _ensure_column(con, "pay_profiles", "base_wage_amount", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(con, "pay_profiles", "weekly_basis_hours", "REAL NOT NULL DEFAULT 40")
+        _ensure_column(con, "pay_profiles", "commission_month_1_amount", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(con, "pay_profiles", "commission_month_2_amount", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(con, "pay_profiles", "commission_month_3_amount", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(con, "pay_profiles", "commission_average_monthly", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(con, "pay_profiles", "commission_hourly_rate", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(con, "pay_profiles", "calculated_hourly_rate", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(con, "pay_profiles", "status", "TEXT NOT NULL DEFAULT 'active'")
+        _ensure_column(con, "pay_profiles", "notes", "TEXT")
+        _ensure_column(con, "pay_profiles", "created_at_utc", "TEXT")
+        _ensure_column(con, "pay_profiles", "updated_at_utc", "TEXT")
+        _ensure_column(con, "pay_profiles", "updated_by", "TEXT")
 
         _ensure_column(con, "documents", "template_key", "TEXT")
         _ensure_column(con, "documents", "signed_pdf_path", "TEXT")
@@ -415,6 +459,16 @@ def migrate(db_path: str) -> None:
         _ensure_column(con, "pay_entries", "lost_wage_amount", "REAL NOT NULL DEFAULT 0")
         _ensure_column(con, "pay_entries", "lost_wage_hourly_rate", "REAL NOT NULL DEFAULT 0")
         _ensure_column(con, "pay_entries", "compensation_stub_id", "TEXT")
+        _ensure_column(con, "pay_demo_feedback", "created_at_utc", "TEXT")
+        _ensure_column(con, "pay_demo_feedback", "actor_email", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "pay_demo_feedback", "actor_display_name", "TEXT")
+        _ensure_column(con, "pay_demo_feedback", "actor_role", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "pay_demo_feedback", "demo_step", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(con, "pay_demo_feedback", "demo_cycle_title", "TEXT")
+        _ensure_column(con, "pay_demo_feedback", "screen", "TEXT NOT NULL DEFAULT 'demo'")
+        _ensure_column(con, "pay_demo_feedback", "category", "TEXT NOT NULL DEFAULT 'suggestion'")
+        _ensure_column(con, "pay_demo_feedback", "comment", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(con, "pay_demo_feedback", "status", "TEXT NOT NULL DEFAULT 'open'")
         pay_entry_cols = _table_columns(con, "pay_entries")
         if "employee_wage_input_type" in pay_entry_cols:
             con.execute(
@@ -478,6 +532,12 @@ def migrate(db_path: str) -> None:
             "CREATE INDEX IF NOT EXISTS idx_document_stage_field_values_stage ON document_stage_field_values(document_stage_id)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_officer_profiles_email ON officer_profiles(principal_email)",
             "CREATE INDEX IF NOT EXISTS idx_officer_profiles_principal_id ON officer_profiles(principal_id)",
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_internal_role_assignments_email_role "
+                "ON internal_role_assignments(principal_email, role)"
+            ),
+            "CREATE INDEX IF NOT EXISTS idx_internal_role_assignments_principal_id ON internal_role_assignments(principal_id)",
+            "CREATE INDEX IF NOT EXISTS idx_internal_role_assignments_status ON internal_role_assignments(status)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_external_steward_users_email ON external_steward_users(email)",
             (
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_external_steward_users_subject "
@@ -503,6 +563,9 @@ def migrate(db_path: str) -> None:
             "CREATE INDEX IF NOT EXISTS idx_referrals_referred_group ON referrals(referred_group)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_users_email ON pay_users(email)",
             "CREATE INDEX IF NOT EXISTS idx_pay_users_status ON pay_users(status)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_profiles_email ON pay_profiles(principal_email)",
+            "CREATE INDEX IF NOT EXISTS idx_pay_profiles_principal_id ON pay_profiles(principal_id)",
+            "CREATE INDEX IF NOT EXISTS idx_pay_profiles_status ON pay_profiles(status)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_periods_range_revision ON pay_periods(period_start, period_end, revision)",
             "CREATE INDEX IF NOT EXISTS idx_pay_periods_status ON pay_periods(status)",
             "CREATE INDEX IF NOT EXISTS idx_pay_wage_scales_effective ON pay_wage_scales(effective_date, weekly_basis_hours)",
@@ -532,6 +595,8 @@ def migrate(db_path: str) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_packets_docuseal_submission ON pay_packets(docuseal_submission_id)",
             "CREATE INDEX IF NOT EXISTS idx_pay_events_period ON pay_events(period_id, ts_utc)",
             "CREATE INDEX IF NOT EXISTS idx_pay_events_packet ON pay_events(packet_id, ts_utc)",
+            "CREATE INDEX IF NOT EXISTS idx_pay_demo_feedback_status_created ON pay_demo_feedback(status, created_at_utc)",
+            "CREATE INDEX IF NOT EXISTS idx_pay_demo_feedback_actor ON pay_demo_feedback(actor_email, created_at_utc)",
         ]
         for stmt in index_sql:
             try:

@@ -168,6 +168,12 @@ pay_portal:
       address: 11700 Phillips Hwy, Jacksonville, FL 32256, USA
     - label: Penman Rd
       address: 98 Penman Rd S, Jacksonville Beach, FL 32250, USA
+  # Optional SharePoint source for mileage common-place config files.
+  # Example synced path: CWA 3106\Officer Eboard committee - Documents\Local3106\Mileage\Config
+  # Uses graph.site_hostname, graph.site_path, and graph.document_library.
+  # When SharePoint is reachable, the app refreshes data_root/pay/common_places.json.
+  common_places_sharepoint_library: Officer Eboard committee - Documents
+  common_places_sharepoint_folder: Local3106/Mileage/Config
   pay_users:
     # External users only. Microsoft officers/admins use officer_auth access.
     # - email: steward@example.org

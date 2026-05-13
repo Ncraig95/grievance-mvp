@@ -84,7 +84,9 @@ _BOILERPLATE_TEXT = {
     "non discipline grievance brief",
     "true intent grievance brief",
 }
-_NARRATIVE_FIELDS = (
+_PRIMARY_NARRATIVE_FIELDS = (
+    "statement_full_text",
+    "statement_text",
     "q3_union_statement",
     "union_statement",
     "issue_text",
@@ -97,12 +99,14 @@ _NARRATIVE_FIELDS = (
     "union_argument",
     "company_facts",
     "company_argument",
-    "action_taken",
-    "current_status",
     "q4_contract_basis",
     "issue_summary",
     "issue_contract_section",
     "narrative",
+)
+_LOW_PRIORITY_NARRATIVE_FIELDS = (
+    "action_taken",
+    "current_status",
 )
 
 
@@ -165,25 +169,47 @@ def _candidate_texts(
     candidates: list[tuple[str, str]] = []
     seen: set[str] = set()
 
-    def add(source: str, value: object) -> None:
-        text = _normalize_text(value)
-        if not text:
-            return
-        key = text.lower()
-        if key in seen:
-            return
-        seen.add(key)
-        candidates.append((source, text))
-
-    add("tracking_issue_summary", manual_text)
-
-    template_data = payload.get("template_data")
-    template_payload = template_data if isinstance(template_data, dict) else {}
-    for field in _NARRATIVE_FIELDS:
-        add(f"template_data.{field}", template_payload.get(field))
-        add(field, payload.get(field))
+    _add_field_candidates(candidates, seen, payload, _PRIMARY_NARRATIVE_FIELDS)
+    _add_field_candidates(candidates, seen, payload, _LOW_PRIORITY_NARRATIVE_FIELDS)
+    _add_candidate(candidates, seen, "tracking_issue_summary", manual_text)
 
     return candidates
+
+
+def low_priority_grievance_text_candidates(payload: dict[str, object]) -> list[tuple[str, str]]:
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    _add_field_candidates(candidates, seen, payload, _LOW_PRIORITY_NARRATIVE_FIELDS)
+    return candidates
+
+
+def _add_field_candidates(
+    candidates: list[tuple[str, str]],
+    seen: set[str],
+    payload: dict[str, object],
+    fields: tuple[str, ...],
+) -> None:
+    template_data = payload.get("template_data")
+    template_payload = template_data if isinstance(template_data, dict) else {}
+    for field in fields:
+        _add_candidate(candidates, seen, f"template_data.{field}", template_payload.get(field))
+        _add_candidate(candidates, seen, field, payload.get(field))
+
+
+def _add_candidate(
+    candidates: list[tuple[str, str]],
+    seen: set[str],
+    source: str,
+    value: object,
+) -> None:
+    text = _normalize_text(value)
+    if not text:
+        return
+    key = text.lower()
+    if key in seen:
+        return
+    seen.add(key)
+    candidates.append((source, text))
 
 
 def _summarize_sentences(sentences: list[str], *, max_chars: int) -> str:

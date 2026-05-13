@@ -354,6 +354,49 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row.contract_scope, "mobility")
         self.assertEqual(result.viewer.role, "read_only")
 
+    async def test_tracker_full_narrative_uses_original_statement_over_manual_action_summary(self) -> None:
+        await self.db.exec(
+            """INSERT INTO cases(
+                 id, grievance_id, created_at_utc, status, approval_status, grievance_number,
+                 member_name, member_email, intake_request_id, intake_payload_json,
+                 tracking_issue_summary
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "C-narrative",
+                "2026020",
+                "2026-03-27T15:00:00+00:00",
+                "awaiting_signatures",
+                "pending",
+                None,
+                "Jordan Member",
+                "jordan@example.org",
+                "forms-narrative",
+                json.dumps(
+                    {
+                        "request_id": "forms-narrative",
+                        "contract": "AT&T Mobility",
+                        "grievant_firstname": "Jordan",
+                        "grievant_lastname": "Member",
+                        "narrative": "Original statement submitted by the member.",
+                        "template_data": {
+                            "action_taken": "Most recent action was a first level request.",
+                            "current_status": "Waiting on a company response.",
+                        },
+                    }
+                ),
+                "Most recent action was a first level request.",
+            ),
+        )
+        request = _Request(state=SimpleNamespace(cfg=self._cfg(auth_enabled=False), db=self.db))
+
+        result = await officer_cases(request)
+
+        row = result.rows[0]
+        self.assertEqual(row.issue_summary, "Most recent action was a first level request.")
+        self.assertEqual(row.narrative_full, "Original statement submitted by the member.")
+        self.assertEqual(row.narrative_summary, "Original statement submitted by the member.")
+        self.assertEqual(row.summary_source, "narrative")
+
     async def test_completed_workflow_does_not_auto_close_tracker_status(self) -> None:
         await self.db.exec(
             """INSERT INTO cases(
@@ -910,6 +953,10 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="motionSheetSettingsPanel"', html)
         self.assertIn("/officers/forms", html)
         self.assertIn("/forms/motion_sheet", html)
+        self.assertIn("<h2>Motion Sheet Assignments</h2>", html)
+        self.assertIn("<label>Officer 4", html)
+        self.assertIn("<label>Chief Steward 1", html)
+        self.assertNotIn("<label>Officer 5", html)
         self.assertIn('id="motionOfficer10"', html)
 
     async def test_chief_steward_only_sees_in_scope_cases_and_can_edit_in_scope(self) -> None:

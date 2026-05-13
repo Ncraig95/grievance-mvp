@@ -131,6 +131,8 @@ class PayPortalConfig:
         "https://www.irs.gov/newsroom/irs-sets-2026-business-standard-mileage-rate-at-725-cents-per-mile-up-25-cents",
     )
     common_places: tuple[dict[str, str], ...] = field(default_factory=tuple)
+    common_places_sharepoint_library: str = ""
+    common_places_sharepoint_folder: str = "Local3106/Mileage/Config"
     pay_users: tuple[dict[str, str], ...] = field(default_factory=tuple)
 
 
@@ -952,6 +954,18 @@ def load_config(path: str) -> AppConfig:
                 or PayPortalConfig().irs_rate_source_urls
             ),
             common_places=_as_place_list(pay_portal_raw.get("common_places")),
+            common_places_sharepoint_library=(
+                str(pay_portal_raw.get("common_places_sharepoint_library", "")).strip()
+            ),
+            common_places_sharepoint_folder=(
+                str(
+                    pay_portal_raw.get(
+                        "common_places_sharepoint_folder",
+                        PayPortalConfig().common_places_sharepoint_folder,
+                    )
+                ).strip()
+                or PayPortalConfig().common_places_sharepoint_folder
+            ),
             pay_users=_as_pay_user_list(pay_portal_raw.get("pay_users")),
         ),
         grievance_id=GrievanceIdConfig(

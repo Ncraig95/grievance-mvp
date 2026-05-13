@@ -1375,7 +1375,8 @@ async def _local_directory_user_rows(db: Db, *, cfg, query: str, limit: int) -> 
             match_source="local",
         )
 
-    for value in getattr(cfg.officer_tracking, "roster", ()) or ():
+    officer_tracking = getattr(cfg, "officer_tracking", None)
+    for value in getattr(officer_tracking, "roster", ()) or ():
         email = _normalize_optional_text(value)
         if email and "@" in email:
             _add_row(principal_id=None, display_name=None, email=email, user_principal_name=email)
@@ -1405,6 +1406,36 @@ async def _local_directory_user_rows(db: Db, *, cfg, query: str, limit: int) -> 
     for row in external_rows:
         _add_row(
             principal_id=None,
+            email=_normalize_optional_text(row[1]),
+            display_name=_normalize_optional_text(row[2]),
+            user_principal_name=_normalize_optional_text(row[1]),
+        )
+
+    internal_role_rows = await db.fetchall(
+        """
+        SELECT principal_id, principal_email, principal_display_name
+        FROM internal_role_assignments
+        ORDER BY updated_at_utc DESC, id DESC
+        """
+    )
+    for row in internal_role_rows:
+        _add_row(
+            principal_id=_normalize_optional_text(row[0]),
+            email=_normalize_optional_text(row[1]),
+            display_name=_normalize_optional_text(row[2]),
+            user_principal_name=_normalize_optional_text(row[1]),
+        )
+
+    pay_profile_rows = await db.fetchall(
+        """
+        SELECT principal_id, principal_email, principal_display_name
+        FROM pay_profiles
+        ORDER BY updated_at_utc DESC, id DESC
+        """
+    )
+    for row in pay_profile_rows:
+        _add_row(
+            principal_id=_normalize_optional_text(row[0]),
             email=_normalize_optional_text(row[1]),
             display_name=_normalize_optional_text(row[2]),
             user_principal_name=_normalize_optional_text(row[1]),
@@ -1887,8 +1918,8 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       <div class="section-header">
         <div>
           <div class="eyebrow">Admin</div>
-          <h2>Motion Sheet Officers</h2>
-          <div class="summary">These names print on new Motion Sheets submitted from the hosted form.</div>
+          <h2>Motion Sheet Assignments</h2>
+          <div class="summary">The first four names print as officers. The remaining names print as chief stewards.</div>
         </div>
         <div class="section-actions">
           <a class="button-link secondary" href="/officers/forms">All Hosted Forms</a>
@@ -1909,22 +1940,22 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
         <label>Officer 4
           <input id="motionOfficer4" />
         </label>
-        <label>Officer 5
+        <label>Chief Steward 1
           <input id="motionOfficer5" />
         </label>
-        <label>Officer 6
+        <label>Chief Steward 2
           <input id="motionOfficer6" />
         </label>
-        <label>Officer 7
+        <label>Chief Steward 3
           <input id="motionOfficer7" />
         </label>
-        <label>Officer 8
+        <label>Chief Steward 4
           <input id="motionOfficer8" />
         </label>
-        <label>Officer 9
+        <label>Chief Steward 5
           <input id="motionOfficer9" />
         </label>
-        <label>Officer 10
+        <label>Chief Steward 6
           <input id="motionOfficer10" />
         </label>
       </div>
@@ -3358,7 +3389,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
         'tracker-primary-row',
         row.officer_status === 'closed' ? 'closed-row' : '',
       ].filter(Boolean).join(' ');
-      const summary = row.narrative_summary || row.issue_summary || '';
+      const summary = row.issue_summary || row.narrative_summary || '';
       return `
         <tr class="${{classes}}" data-case-id="${{esc(row.case_id)}}" tabindex="0" aria-expanded="${{isExpanded ? 'true' : 'false'}}">
           ${{ENABLE_SELECTION ? `
@@ -4404,9 +4435,12 @@ async def chief_steward_assignments(request: Request):
     )
 
 
-@router.get("/officers/directory/users", response_model=DirectoryUserSearchResponse)
-async def officer_directory_users(request: Request, search: str = "", limit: int = 10):
-    await require_admin_user(request)
+async def search_directory_users_for_request(
+    request: Request,
+    *,
+    search: str = "",
+    limit: int = 10,
+) -> DirectoryUserSearchResponse:
     query = str(search or "").strip()
     if len(query) < 2:
         return DirectoryUserSearchResponse(search=query, count=0, rows=[], warning=None)
@@ -4436,6 +4470,12 @@ async def officer_directory_users(request: Request, search: str = "", limit: int
 
     rows = _merge_directory_user_rows(graph_rows, local_rows, query=query, limit=capped_limit)
     return DirectoryUserSearchResponse(search=query, count=len(rows), rows=rows, warning=warning)
+
+
+@router.get("/officers/directory/users", response_model=DirectoryUserSearchResponse)
+async def officer_directory_users(request: Request, search: str = "", limit: int = 10):
+    await require_admin_user(request)
+    return await search_directory_users_for_request(request, search=search, limit=limit)
 
 
 @router.post("/officers/chief-assignments", response_model=ChiefStewardAssignmentRow)

@@ -20,6 +20,7 @@ data/docuseal_db/
 data/template_compare/
 data/template_compare_after_restore/
 data/watchdog/
+tmp/
 .venv/
 .tmpvenv/
 Docx Files Template/Failed Sign Documents

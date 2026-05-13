@@ -1,47 +1,80 @@
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from html import escape
 from typing import Any
+from urllib.parse import quote
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from ..db.db import Db
 from ..services.pay_portal import (
     PayActor,
     approve_irs_rate_candidate,
+    create_pay_demo_feedback,
     create_mileage_attachment,
     create_revision,
     current_period_bounds,
     decode_content_base64,
     ensure_pay_period,
+    generate_pay_demo_artifacts,
     list_attachments,
     list_compensation_stubs,
     list_entries,
+    list_pay_demo_artifacts,
+    list_pay_demo_feedback,
     list_irs_rate_candidates,
+    list_pay_profiles,
     list_pay_users,
     list_wage_scales,
+    load_common_places_cache,
+    load_sharepoint_common_places,
     lock_period_and_send_packet,
+    merge_common_places,
     normalize_email,
+    pay_demo_settings,
+    pay_demo_artifact_path,
+    pay_profile_by_email,
     pay_settings,
+    save_pay_demo_settings,
     save_pay_settings,
     store_attachment,
     store_compensation_stub,
     sync_irs_mileage_rate_candidates,
     treasurer_recipients,
+    update_pay_demo_feedback_status,
     upsert_entry,
+    upsert_pay_profile,
     upsert_pay_user,
     upsert_wage_scale,
+    write_common_places_cache,
 )
 from ..services.pdf_convert import docx_to_pdf
+from ..services.internal_roles import (
+    active_internal_roles_for_user,
+    delete_internal_role_assignment,
+    internal_role_assignment_by_id,
+    list_internal_role_assignments,
+    normalize_internal_role,
+    upsert_internal_role_assignment,
+)
+from .models import DirectoryUserSearchResponse
 from .officer_auth import (
     current_external_steward_user,
     current_officer_user,
 )
+from .routes_officers import search_directory_users_for_request
 
 
 router = APIRouter()
+_DEMO_JOB_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+_DEMO_JOBS_LOCK = threading.Lock()
+_DEMO_JOBS: dict[str, dict[str, Any]] = {}
 
 
 class PayEntryUpsertRequest(BaseModel):
@@ -91,7 +124,7 @@ class PayCompensationStubRequest(BaseModel):
 
 class PayMileageRequest(BaseModel):
     period_id: str
-    name: str
+    name: str | None = None
     local_number: str | None = "3106"
     date: str
     description: str
@@ -106,11 +139,57 @@ class PaySettingsUpdateRequest(BaseModel):
     common_places: list[dict[str, str]] | None = None
 
 
+class PayDemoFeedbackRequest(BaseModel):
+    screen: str | None = "demo"
+    category: str | None = "suggestion"
+    demo_step: int | None = 0
+    demo_cycle_title: str | None = None
+    comment: str
+
+
+class PayDemoFeedbackStatusRequest(BaseModel):
+    status: str
+
+
+class PayDemoArtifactRequest(BaseModel):
+    demo_step: int | None = 0
+    demo_cycle_title: str | None = None
+
+
+class PayDemoSettingsUpdateRequest(BaseModel):
+    demo_mode_enabled: bool | None = None
+    demo_cycle_title: str | None = None
+    demo_cycle_notes: str | None = None
+
+
 class PayUserUpsertRequest(BaseModel):
     email: str
     display_name: str | None = None
     role: str = "guest"
     status: str = "active"
+
+
+class InternalRoleAssignmentRequest(BaseModel):
+    principal_id: str | None = None
+    principal_email: str
+    principal_display_name: str | None = None
+    role: str
+    status: str = "active"
+
+
+class PayProfileUpsertRequest(BaseModel):
+    principal_id: str | None = None
+    principal_email: str
+    principal_display_name: str | None = None
+    pay_basis: str = "expense_only"
+    base_wage_input_type: str = "hourly"
+    base_wage_amount: float = 0
+    weekly_basis_hours: float = 40.0
+    commission_month_1_amount: float = 0
+    commission_month_2_amount: float = 0
+    commission_month_3_amount: float = 0
+    status: str = "active"
+    notes: str | None = None
 
 
 class PayWageScaleUpsertRequest(BaseModel):
@@ -132,16 +211,97 @@ def _forbidden(message: str) -> HTTPException:
     return HTTPException(status_code=403, detail=message)
 
 
-def _actor_from_officer(user: Any, *, treasurer: bool) -> PayActor:
+def _update_demo_job(job_id: str, **updates: object) -> None:
+    with _DEMO_JOBS_LOCK:
+        job = _DEMO_JOBS.get(job_id)
+        if not job:
+            return
+        job.update(updates)
+        job["updated_at"] = time.time()
+
+
+def _run_demo_artifact_job(
+    *,
+    job_id: str,
+    cfg: Any,
+    graph: Any,
+    actor: PayActor,
+    pay_settings_payload: dict[str, object],
+    demo_step: int,
+    demo_cycle_title: str,
+    period_start: str,
+    period_end: str,
+) -> None:
+    try:
+        _update_demo_job(
+            job_id,
+            status="running",
+            progress={"stage": "start", "current": 0, "total": 1, "message": "Starting demo packet"},
+            message="Starting demo packet",
+        )
+
+        def progress(payload: dict[str, object]) -> None:
+            _update_demo_job(job_id, progress=payload, message=payload.get("message") or "")
+
+        rows = generate_pay_demo_artifacts(
+            cfg=cfg,
+            settings=pay_settings_payload,
+            actor=actor,
+            demo_step=demo_step,
+            demo_cycle_title=demo_cycle_title,
+            period_start=period_start,
+            period_end=period_end,
+            docx_to_pdf_func=docx_to_pdf,
+            graph=graph,
+            progress_callback=progress,
+        )
+        _update_demo_job(
+            job_id,
+            status="completed",
+            rows=rows,
+            progress={"stage": "complete", "current": 1, "total": 1, "message": "Demo packet ready"},
+            message="Demo packet ready",
+        )
+    except Exception as exc:  # noqa: BLE001
+        _update_demo_job(
+            job_id,
+            status="failed",
+            error=str(exc),
+            progress={"stage": "failed", "current": 0, "total": 1, "message": str(exc)},
+            message=str(exc),
+        )
+
+
+def _demo_job_snapshot(job_id: str, *, actor: PayActor, request: Request) -> dict[str, object]:
+    with _DEMO_JOBS_LOCK:
+        job = dict(_DEMO_JOBS.get(job_id) or {})
+    if not job:
+        raise HTTPException(status_code=404, detail="demo job not found")
+    if str(job.get("actor_email") or "") != actor.email and not actor.can_view_all:
+        raise _forbidden("demo job not found")
+    rows = _demo_artifact_rows_for_response(request, actor) if job.get("status") == "completed" else job.get("rows") or []
+    return {**job, "job_id": job_id, "rows": rows}
+
+
+def _actor_from_officer(
+    user: Any,
+    *,
+    treasurer: bool,
+    internal_roles: tuple[str, ...] = (),
+) -> PayActor:
     role = str(getattr(user, "role", "") or "").lower()
     is_admin = role == "admin"
+    role_set = {str(value or "").strip().lower() for value in internal_roles}
+    is_treasurer = bool(treasurer or is_admin or "treasurer" in role_set)
+    is_president = "president" in role_set
+    actor_role = "admin" if is_admin else "treasurer" if is_treasurer else "president" if is_president else "officer"
     return PayActor(
         email=normalize_email(getattr(user, "email", "")),
         display_name=getattr(user, "display_name", None),
-        role="treasurer" if treasurer or is_admin else "officer",
+        role=actor_role,
         can_view_all=True,
-        can_edit_all=bool(treasurer or is_admin),
-        can_lock=bool(treasurer or is_admin),
+        can_edit_all=is_treasurer,
+        can_lock=is_treasurer,
         is_guest=False,
     )
 
@@ -164,7 +324,16 @@ async def _current_pay_actor(request: Request) -> PayActor | None:
     officer = await current_officer_user(request)
     if officer:
         officer_email = normalize_email(officer.email)
-        return _actor_from_officer(officer, treasurer=officer_email in treasurer_emails)
+        internal_roles = await active_internal_roles_for_user(
+            db,
+            user_id=getattr(officer, "user_id", None),
+            email=officer_email,
+        )
+        return _actor_from_officer(
+            officer,
+            treasurer=officer_email in treasurer_emails,
+            internal_roles=internal_roles,
+        )
 
     external = await current_external_steward_user(request)
     if external:
@@ -212,6 +381,50 @@ async def _require_treasurer(request: Request) -> PayActor:
     if not actor.can_lock:
         raise _forbidden("treasurer access required")
     return actor
+
+
+async def _pay_settings_for_request(request: Request) -> dict[str, object]:
+    cfg = request.app.state.cfg
+    settings = await pay_settings(request.app.state.db, pay_cfg=cfg.pay_portal)
+    cached_places = load_common_places_cache(data_root=cfg.data_root)
+    try:
+        sharepoint_places = load_sharepoint_common_places(
+            graph=getattr(request.app.state, "graph", None),
+            graph_cfg=cfg.graph,
+            pay_cfg=cfg.pay_portal,
+        )
+    except Exception as exc:
+        if cached_places:
+            settings["common_places"] = merge_common_places(cached_places, settings.get("common_places"))
+            settings["common_places_source"] = "app_file"
+        else:
+            settings["common_places_source"] = "local"
+        settings["common_places_warning"] = f"SharePoint mileage config unavailable: {exc}"
+        return settings
+
+    if sharepoint_places:
+        synced_places = merge_common_places(sharepoint_places)
+        try:
+            write_common_places_cache(data_root=cfg.data_root, places=synced_places)
+            settings["common_places_cache_updated"] = True
+        except Exception as exc:
+            settings["common_places_cache_updated"] = False
+            settings["common_places_warning"] = f"SharePoint places loaded but app file was not updated: {exc}"
+        settings["common_places"] = merge_common_places(synced_places, settings.get("common_places"))
+        settings["common_places_source"] = "sharepoint"
+    elif cached_places:
+        settings["common_places"] = merge_common_places(cached_places, settings.get("common_places"))
+        settings["common_places_source"] = "app_file"
+    else:
+        settings["common_places_source"] = "local"
+    return settings
+
+
+def _demo_artifact_rows_for_response(request: Request, actor: PayActor) -> list[dict[str, object]]:
+    rows = list_pay_demo_artifacts(data_root=request.app.state.cfg.data_root, actor=actor)
+    for row in rows:
+        row["download_url"] = f"/pay/api/demo/artifacts/{quote(str(row['filename']))}"
+    return rows
 
 
 def _render_pay_page() -> str:
@@ -263,18 +476,12 @@ def _render_pay_page() -> str:
       <form id="entryForm">
         <div class="grid">
           <label>Date<input id="entryDate" name="entry_date" type="date" required></label>
-          <label>Name<input id="displayName" name="display_name"></label>
-          <label>Hourly Rate<input name="hourly_rate" type="number" step="0.01"></label>
-          <label>Lost Wage Type<select name="lost_wage_input_type"><option value="hourly">Hourly</option><option value="weekly">Weekly</option><option value="profile">Saved Profile</option></select></label>
-          <label>Lost Wage Amount<input name="lost_wage_amount" type="number" step="0.01"></label>
+          <input id="displayName" name="display_name" type="hidden">
           <label>Hours<input name="hours" type="number" step="0.25"></label>
-          <label>Mileage Amount<input name="mileage_amount" type="number" step="0.01"></label>
           <label>Rentals<input name="rentals_amount" type="number" step="0.01"></label>
           <label>Meals<input name="meals_amount" type="number" step="0.01"></label>
           <label>Hotel<input name="hotel_amount" type="number" step="0.01"></label>
           <label>Miscellaneous<input name="miscellaneous_amount" type="number" step="0.01"></label>
-          <label>President Diff Hours<input name="president_diff_hours" type="number" step="0.25"></label>
-          <label>Weekly Basis<select name="weekly_basis_hours"><option value="40">40</option><option value="37.5">37.5</option></select></label>
           <label>Local<input name="local_number" value="3106"></label>
         </div>
         <label>Address<input name="address"></label>
@@ -283,7 +490,7 @@ def _render_pay_page() -> str:
       </form>
     </section>
     <section>
-      <h2>Lost Wage Proof</h2>
+      <h2>Pay Proof Attachments</h2>
       <form id="stubForm">
         <div class="grid">
           <label>Member Email<input name="user_email"></label>
@@ -385,7 +592,7 @@ function renderIrsCandidates(rows) {
   if (!rows.length) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 5;
+    td.colSpan = 7;
     td.textContent = 'No staged IRS rates.';
     tr.appendChild(td);
     body.appendChild(tr);
@@ -429,6 +636,7 @@ document.getElementById('entryForm').addEventListener('submit', async event => {
   event.preventDefault();
   const data = Object.fromEntries(new FormData(event.target).entries());
   data.period_id = context.period.id;
+  data.display_name = data.display_name || (context.actor && (context.actor.display_name || context.actor.email)) || '';
   for (const key of ['hourly_rate','lost_wage_amount','hours','mileage_miles','mileage_rate','mileage_amount','rentals_amount','meals_amount','hotel_amount','miscellaneous_amount','president_diff_hours','weekly_basis_hours']) data[key] = Number(data[key] || 0);
   try { await api('/pay/api/entries', { method: 'POST', body: JSON.stringify(data) }); document.getElementById('entryStatus').textContent = 'Saved'; await loadContext(); }
   catch (err) { document.getElementById('entryStatus').textContent = err.message; }
@@ -502,6 +710,7 @@ loadContext().catch(err => { document.querySelector('main').innerHTML = '<sectio
 _PAY_VIEW_TITLES = {
     "entry": "Submit",
     "mileage": "Mileage",
+    "demo": "Demo",
     "president": "President",
     "treasurer": "Treasurer",
     "admin": "Admin",
@@ -509,7 +718,7 @@ _PAY_VIEW_TITLES = {
 
 
 def _pay_nav_html(*, view: str, actor: PayActor) -> str:
-    links = [("entry", "Submit"), ("mileage", "Mileage")]
+    links = [("entry", "Submit"), ("mileage", "Mileage"), ("demo", "Demo")]
     if not actor.is_guest:
         links.append(("president", "President"))
     if actor.can_view_all:
@@ -523,38 +732,33 @@ def _pay_nav_html(*, view: str, actor: PayActor) -> str:
     return "".join(rendered)
 
 
-def _entry_form_html(*, president: bool = False) -> str:
+def _entry_form_html(*, president: bool = False, advanced: bool = False) -> str:
     if president:
+        differential_hours_html = (
+            '<label>Differential Hours<input name="president_diff_hours" type="number" step="0.25" placeholder="defaults to union hours"></label>'
+            if advanced
+            else ""
+        )
         return """
         <form id="entryForm" class="form-stack">
           <div class="field-grid">
             <label>Date<input name="entry_date" type="date" required></label>
-            <label>Lost Wage Type<select name="lost_wage_input_type"><option value="profile">Saved Profile</option><option value="hourly">Hourly</option><option value="weekly">Weekly</option></select></label>
-            <label>Lost Wage Amount<input name="lost_wage_amount" type="number" step="0.01"></label>
             <label>Union Hours<input name="hours" type="number" step="0.25"></label>
-            <label>Differential Hours<input name="president_diff_hours" type="number" step="0.25"></label>
-            <label>Weekly Basis<select name="weekly_basis_hours"><option value="40">40</option><option value="37.5">37.5</option></select></label>
+            __DIFFERENTIAL_HOURS__
           </div>
           <label>Notes<textarea name="notes"></textarea></label>
           <div class="toolbar"><button type="submit">Save President Entry</button><span id="entryStatus" class="muted"></span></div>
         </form>
-        """
+        """.replace("__DIFFERENTIAL_HOURS__", differential_hours_html)
     return """
         <form id="entryForm" class="form-stack">
           <div class="field-grid">
             <label>Date<input name="entry_date" type="date" required></label>
-            <label>Name<input name="display_name"></label>
-            <label>Lost Wage Type<select name="lost_wage_input_type"><option value="hourly">Hourly</option><option value="weekly">Weekly</option><option value="profile">Saved Profile</option></select></label>
-            <label>Lost Wage Amount<input name="lost_wage_amount" type="number" step="0.01"></label>
             <label>Hours<input name="hours" type="number" step="0.25"></label>
-            <label>Mileage Miles<input name="mileage_miles" type="number" step="0.01" readonly></label>
-            <label>IRS Rate<input name="mileage_rate" type="number" step="0.001" readonly></label>
-            <label>Mileage Amount<input name="mileage_amount" type="number" step="0.01" readonly></label>
             <label>Meals<input name="meals_amount" type="number" step="0.01"></label>
             <label>Hotel<input name="hotel_amount" type="number" step="0.01"></label>
             <label>Rental<input name="rentals_amount" type="number" step="0.01"></label>
             <label>Miscellaneous<input name="miscellaneous_amount" type="number" step="0.01"></label>
-            <label>Weekly Basis<select name="weekly_basis_hours"><option value="40">40</option><option value="37.5">37.5</option></select></label>
             <label>Local<input name="local_number" value="3106"></label>
           </div>
           <label>Address<input name="address"></label>
@@ -564,12 +768,12 @@ def _entry_form_html(*, president: bool = False) -> str:
     """
 
 
-def _stub_form_html(*, title: str = "First-Time Wage Setup") -> str:
+def _stub_form_html(*, title: str = "Pay Stub Proof") -> str:
     return f"""
     <section class="panel" id="wageProfilePanel">
       <div class="section-head">
-        <div><p class="eyebrow">{escape(title)}</p><h2>Work Wage Proof</h2></div>
-        <div class="muted">Hourly, weekly, or commission based</div>
+        <div><p class="eyebrow">{escape(title)}</p><h2>Historical Proof</h2></div>
+        <div class="muted">Attachment record only</div>
       </div>
       <form id="stubForm" class="form-stack">
         <div class="field-grid">
@@ -583,7 +787,7 @@ def _stub_form_html(*, title: str = "First-Time Wage Setup") -> str:
           <label>Pay Stub<input id="stubFile" type="file" accept=".pdf,image/png,image/jpeg"></label>
         </div>
         <label>Notes<textarea name="notes"></textarea></label>
-        <div class="toolbar"><button type="submit" class="secondary">Save Wage Profile</button><span id="stubStatus" class="muted"></span></div>
+        <div class="toolbar"><button type="submit" class="secondary">Save Pay Proof</button><span id="stubStatus" class="muted"></span></div>
       </form>
       <div class="table-wrap compact-table">
         <table><thead><tr><th>Member</th><th>Base</th><th>Commission Avg</th><th>Commission Hr</th><th>Total Hr</th><th>File</th></tr></thead><tbody id="stubsBody"></tbody></table>
@@ -610,10 +814,7 @@ def _mileage_tracker_form_html() -> str:
             </select>
           </div>
 
-          <div class="mb-3">
-            <label for="name" class="form-label">Name:</label>
-            <input type="text" class="form-control" id="name" name="name" required>
-          </div>
+          <input type="hidden" id="name" name="name">
 
           <div class="mb-3">
             <label for="local_number" class="form-label">Local Number:</label>
@@ -632,9 +833,8 @@ def _mileage_tracker_form_html() -> str:
           </div>
 
           <div class="mb-3">
-            <label for="irs_rate" class="form-label">IRS Rate ($ per mile):</label>
-            <input type="text" class="form-control" id="irs_rate" name="irs_rate" placeholder="auto">
-            <div class="form-text">Leave blank or type "auto" to use the IRS rate for that year. If you enter 72.5 it will be treated as 72.5 cents (0.725).</div>
+            <label class="form-label">Mileage Rate:</label>
+            <div class="form-control" id="irsRateDisplay" aria-live="polite">Select a date</div>
           </div>
 
           <div class="mb-3">
@@ -642,6 +842,7 @@ def _mileage_tracker_form_html() -> str:
             <select id="commonPlaceSelect" class="form-control">
               <option value="">Select a place...</option>
             </select>
+            <datalist id="commonPlaceOptions"></datalist>
             <button type="button" class="btn btn-outline-secondary w-100 mt-2" id="addCommonPlaceBtn">Add selected place to locations</button>
           </div>
 
@@ -649,11 +850,11 @@ def _mileage_tracker_form_html() -> str:
             <label class="form-label">Locations:</label>
             <div id="locations">
               <div class="input-group mb-2">
-                <input type="text" class="form-control address-input" name="locations" placeholder="Origin" required autocomplete="off">
+                <input type="text" class="form-control address-input" name="locations" placeholder="Origin" required autocomplete="off" list="commonPlaceOptions">
                 <button class="btn btn-danger remove-location" type="button" aria-label="Remove location">&times;</button>
               </div>
               <div class="input-group mb-2">
-                <input type="text" class="form-control address-input" name="locations" placeholder="Destination" required autocomplete="off">
+                <input type="text" class="form-control address-input" name="locations" placeholder="Destination" required autocomplete="off" list="commonPlaceOptions">
                 <button class="btn btn-danger remove-location" type="button" aria-label="Remove location">&times;</button>
               </div>
             </div>
@@ -671,6 +872,20 @@ def _mileage_tracker_form_html() -> str:
       <div class="section-head"><div><p class="eyebrow">Mileage Forms</p><h2>Generated This Period</h2></div></div>
       <div class="table-wrap compact-table">
         <table><thead><tr><th>Date</th><th>Name</th><th>File</th><th>Scan</th></tr></thead><tbody id="mileageFormsBody"></tbody></table>
+      </div>
+    </section>
+    """
+
+
+def _daily_tally_html() -> str:
+    return """
+    <section class="panel" id="dailyTallyPanel">
+      <div class="section-head">
+        <div><p class="eyebrow">Submitter</p><h2>Daily Tally</h2></div>
+        <div id="dailyTallyStats" class="muted"></div>
+      </div>
+      <div class="table-wrap compact-table">
+        <table><thead><tr><th>Date</th><th>Hours</th><th>Lost Wages</th><th>Mileage</th><th>Expenses</th><th>Total</th></tr></thead><tbody id="dailyTallyBody"></tbody></table>
       </div>
     </section>
     """
@@ -707,16 +922,102 @@ def _pay_view_content(view: str, *, actor: PayActor) -> str:
         {_mileage_tracker_form_html()}
         {_entries_table_html(attach=True)}
         """
+    if view == "demo":
+        feedback_table = (
+            """
+        <section class="panel" id="demoFeedbackPanel">
+          <div class="section-head"><div><p class="eyebrow">Officer Feedback</p><h2>Suggestions</h2></div></div>
+          <div class="table-wrap compact-table">
+            <table><thead><tr><th>Date</th><th>Officer</th><th>Area</th><th>Type</th><th>Suggestion</th><th>Status</th><th></th></tr></thead><tbody id="demoFeedbackBody"></tbody></table>
+          </div>
+        </section>
+            """
+            if actor.can_lock
+            else ""
+        )
+        return f"""
+        <section class="panel lead-panel">
+          <div><p class="eyebrow">Training</p><h2>Demo Cycle</h2></div>
+          <div class="metric-row"><div><span id="periodLabel"></span><strong>Live Period</strong></div><div><span id="demoModeLabel"></span><strong>Demo Mode</strong></div></div>
+        </section>
+        <section class="panel hidden" id="demoDisabledPanel">
+          <div class="section-head"><div><p class="eyebrow">Demo</p><h2>Disabled</h2></div></div>
+          <div class="muted">A treasurer can enable the training demo from Admin.</div>
+        </section>
+        <section class="panel" id="demoCyclePanel">
+          <div class="section-head">
+            <div><p class="eyebrow">Practice Cycle</p><h2 id="demoTitle">Training Demo Cycle</h2></div>
+            <span id="demoCycleStatus" class="muted"></span>
+          </div>
+          <div id="demoNotes" class="muted"></div>
+          <div class="demo-two-col">
+            <div>
+              <h3>Training Checklist</h3>
+              <ul id="demoChecklist" class="demo-list"></ul>
+            </div>
+            <div>
+              <h3>Processing Log</h3>
+              <ol id="demoActivityLog" class="demo-list"></ol>
+            </div>
+          </div>
+          <div class="toolbar demo-step-row">
+            <button type="button" data-demo-step="0" class="secondary">Open Period</button>
+            <button type="button" data-demo-step="1" class="secondary">Submit Entry</button>
+            <button type="button" data-demo-step="2" class="secondary">Add Mileage</button>
+            <button type="button" data-demo-step="3" class="secondary">Treasurer Review</button>
+            <button type="button" data-demo-step="4" class="secondary">Demo Lock</button>
+          </div>
+          <div class="metric-row demo-metrics">
+            <div><span id="demoEntryCount"></span><strong>Entries</strong></div>
+            <div><span id="demoLostWages"></span><strong>Lost Wages</strong></div>
+            <div><span id="demoMileageTotal"></span><strong>Mileage</strong></div>
+            <div><span id="demoPacketStatus"></span><strong>Packet</strong></div>
+          </div>
+          <div class="table-wrap">
+            <table><thead><tr><th>Date</th><th>Name</th><th>Hours</th><th>Lost Wages</th><th>Mileage</th><th>Other</th><th>Notes</th></tr></thead><tbody id="demoEntriesBody"></tbody></table>
+          </div>
+        </section>
+        <section class="panel" id="demoFilesPanel">
+          <div class="section-head"><div><p class="eyebrow">Demo Output</p><h2>Combined PDF Packet</h2></div><span id="demoFilesStatus" class="muted"></span></div>
+          <div class="toolbar"><button type="button" id="generateDemoFilesBtn" class="secondary">Generate Demo Packet</button></div>
+          <div class="table-wrap compact-table">
+            <table><thead><tr><th>File</th><th>Size</th><th>Updated</th><th></th></tr></thead><tbody id="demoFilesBody"></tbody></table>
+          </div>
+        </section>
+        <section class="panel" id="demoFeedbackFormPanel">
+          <div class="section-head"><div><p class="eyebrow">Feedback</p><h2>Suggestions From Demo</h2></div><span id="demoFeedbackStatus" class="muted"></span></div>
+          <form id="demoFeedbackForm" class="form-stack">
+            <div class="field-grid">
+              <label>Area<select name="screen">
+                <option value="demo">Overall Demo</option>
+                <option value="entry">Entry Form</option>
+                <option value="mileage">Mileage</option>
+                <option value="treasurer">Treasurer Review</option>
+                <option value="admin">Admin Setup</option>
+              </select></label>
+              <label>Type<select name="category">
+                <option value="suggestion">Suggestion</option>
+                <option value="confusing">Confusing</option>
+                <option value="missing">Missing</option>
+                <option value="bug">Bug</option>
+                <option value="training">Training Need</option>
+              </select></label>
+            </div>
+            <label>Suggestion<textarea name="comment" maxlength="4000" required></textarea></label>
+            <div class="toolbar"><button type="submit" class="secondary">Send Suggestion</button><button type="button" id="resetDemoBtn" class="secondary">Reset Demo</button></div>
+          </form>
+        </section>
+        {feedback_table}
+        """
     if view == "president":
         return f"""
         <section class="panel lead-panel">
           <div><p class="eyebrow">President</p><h2>Differential and Lost Time</h2></div>
           <div class="metric-row"><div><span id="periodLabel"></span><strong>Period</strong></div><div><span id="actorLabel"></span><strong>Signed in</strong></div></div>
         </section>
-        {_stub_form_html(title="President Wage Setup")}
         <section class="panel">
           <div class="section-head"><div><p class="eyebrow">Daily Input</p><h2>President Entry</h2></div><div class="muted">Scale 36 + 20% target</div></div>
-          {_entry_form_html(president=True)}
+          {_entry_form_html(president=True, advanced=actor.can_lock)}
         </section>
         {_entries_table_html(attach=True)}
         """
@@ -763,6 +1064,51 @@ def _pay_view_content(view: str, *, actor: PayActor) -> str:
           </form>
         </section>
         <section class="panel">
+          <div class="section-head"><div><p class="eyebrow">Training</p><h2>Demo Mode</h2></div><span id="demoSettingsStatus" class="muted"></span></div>
+          <form id="demoSettingsForm" class="form-stack">
+            <div class="field-grid">
+              <label>Status<select name="demo_mode_enabled"><option value="true">Enabled</option><option value="false">Disabled</option></select></label>
+              <label>Cycle Title<input name="demo_cycle_title" placeholder="Training Demo Cycle"></label>
+            </div>
+            <label>Demo Notes<textarea name="demo_cycle_notes"></textarea></label>
+            <div class="toolbar"><button type="submit" class="secondary">Save Demo Mode</button><a href="/pay/demo">Open Demo</a></div>
+          </form>
+          <div class="table-wrap compact-table"><table><thead><tr><th>Date</th><th>Officer</th><th>Area</th><th>Type</th><th>Suggestion</th><th>Status</th><th></th></tr></thead><tbody id="demoFeedbackBody"></tbody></table></div>
+        </section>
+        <section class="panel">
+          <div class="section-head"><div><p class="eyebrow">Internal Access</p><h2>Microsoft Role Assignments</h2></div><span id="internalRoleStatus" class="muted"></span></div>
+          <form id="internalRoleSearchForm" class="inline-form">
+            <input name="search" placeholder="Name or email" required>
+            <button type="submit" class="secondary">Search</button>
+          </form>
+          <div class="table-wrap compact-table"><table><thead><tr><th>Name</th><th>Email</th><th>Source</th><th></th></tr></thead><tbody id="internalRoleSearchBody"></tbody></table></div>
+          <form id="payProfileForm" class="form-stack">
+            <input name="principal_id" type="hidden">
+            <div class="field-grid">
+              <label>Email<input name="principal_email" required></label>
+              <label>Name<input name="principal_display_name"></label>
+              <label>Pay Basis<select name="pay_basis">
+                <option value="hourly">Hourly</option>
+                <option value="weekly">Weekly / Salary</option>
+                <option value="commission">Commission</option>
+                <option value="president">President</option>
+                <option value="expense_only">Expense Only</option>
+              </select></label>
+              <label>Base Wage Type<select name="base_wage_input_type"><option value="hourly">Hourly</option><option value="weekly">Weekly</option></select></label>
+              <label>Base Wage Amount<input name="base_wage_amount" type="number" step="0.01"></label>
+              <label>Weekly Basis<select name="weekly_basis_hours"><option value="40">40</option><option value="37.5">37.5</option></select></label>
+              <label>Commission Month 1<input name="commission_month_1_amount" type="number" step="0.01"></label>
+              <label>Commission Month 2<input name="commission_month_2_amount" type="number" step="0.01"></label>
+              <label>Commission Month 3<input name="commission_month_3_amount" type="number" step="0.01"></label>
+              <label>Status<select name="status"><option value="active">Active</option><option value="disabled">Disabled</option></select></label>
+            </div>
+            <label>Notes<textarea name="notes"></textarea></label>
+            <div class="toolbar"><button type="submit" class="secondary">Save Pay Profile</button></div>
+          </form>
+          <div class="table-wrap compact-table"><table><thead><tr><th>Name</th><th>Email</th><th>Pay Basis</th><th>Base</th><th>Commission Hr</th><th>Total Hr</th><th>Status</th></tr></thead><tbody id="payProfilesBody"></tbody></table></div>
+          <div class="table-wrap compact-table"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th></th></tr></thead><tbody id="internalRolesBody"></tbody></table></div>
+        </section>
+        <section class="panel">
           <div class="section-head"><div><p class="eyebrow">External Access</p><h2>Pay User Allowlist</h2></div><span id="payUserStatus" class="muted"></span></div>
           <form id="payUserForm" class="inline-form">
             <input name="email" placeholder="pay.user@example.org" required>
@@ -778,18 +1124,27 @@ def _pay_view_content(view: str, *, actor: PayActor) -> str:
           <div class="toolbar"><button id="irsSyncBtn" type="button" class="secondary">Check IRS Rates</button></div>
           <div class="table-wrap compact-table"><table><thead><tr><th>Year</th><th>Rate</th><th>Source</th><th>Status</th><th></th></tr></thead><tbody id="irsCandidatesBody"></tbody></table></div>
         </section>
+        <section class="panel">
+          <div class="section-head"><div><p class="eyebrow">Mileage</p><h2>Locations</h2></div><span id="commonPlaceStatus" class="muted"></span></div>
+          <form id="commonPlaceForm" class="inline-form">
+            <input name="label" placeholder="Location label" required>
+            <input name="address" placeholder="Full address" required>
+            <button type="submit" class="secondary">Add Location</button>
+          </form>
+          <div class="table-wrap compact-table"><table><thead><tr><th>Label</th><th>Address</th><th></th></tr></thead><tbody id="commonPlacesBody"></tbody></table></div>
+        </section>
         """
     return f"""
     <section class="panel lead-panel">
       <div><p class="eyebrow">Submit</p><h2>Lost Wage Entry</h2></div>
       <div class="metric-row"><div><span id="periodLabel"></span><strong>Period</strong></div><div><span id="actorLabel"></span><strong>Signed in</strong></div></div>
     </section>
-    {_stub_form_html()}
     <section class="panel">
       <div class="section-head"><div><p class="eyebrow">Daily Input</p><h2>Lost Time and Expenses</h2></div><span id="entryStatus" class="muted"></span></div>
       {_entry_form_html()}
     </section>
     {_entries_table_html(attach=True)}
+    {_daily_tally_html()}
     """
 
 
@@ -827,8 +1182,10 @@ def _render_pay_workspace_page(*, view: str, actor: PayActor) -> str:
     h1, h2 { margin:0; letter-spacing:0; }
     h1 { font-size:24px; }
     h2 { font-size:18px; }
+    h3 { margin:0 0 8px; font-size:15px; letter-spacing:0; }
     .eyebrow { margin:0 0 4px; color:var(--accent); font-size:12px; font-weight:800; text-transform:uppercase; }
     .muted { color:var(--muted); font-size:13px; }
+    .hidden { display:none !important; }
     .panel { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:16px; min-width:0; }
     .lead-panel { display:flex; justify-content:space-between; align-items:center; gap:16px; background:var(--soft); }
     .metric-row { display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; }
@@ -847,6 +1204,12 @@ def _render_pay_workspace_page(*, view: str, actor: PayActor) -> str:
     button.danger { background:var(--danger); border-color:var(--danger); }
     .toolbar, .inline-form { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
     .inline-form input, .inline-form select { width:auto; min-width:180px; }
+    .demo-step-row { margin:14px 0; }
+    .demo-step-row button[aria-current="step"] { background:var(--accent); color:#fff; }
+    .demo-metrics { justify-content:flex-start; margin:0 0 12px; }
+    .demo-two-col { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; margin:12px 0; }
+    .demo-two-col > div { border:1px solid var(--line); border-radius:4px; padding:12px; background:#fff; }
+    .demo-list { margin:0; padding-left:20px; color:var(--muted); font-size:13px; line-height:1.45; }
     .mileage-tracker { font-size:18px; }
     .mileage-header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:18px; }
     .mileage-header h2 { font-size:45px; line-height:1.05; }
@@ -867,6 +1230,7 @@ def _render_pay_workspace_page(*, view: str, actor: PayActor) -> str:
     table { width:100%; border-collapse:collapse; min-width:900px; background:#fff; }
     .compact-table table { min-width:680px; }
     th, td { text-align:left; padding:8px; border-bottom:1px solid #e6ebf0; font-size:13px; vertical-align:top; }
+    .compact-table td button + button { margin-left:6px; }
     th { background:#f8fafb; font-weight:800; color:#384656; }
     tr:last-child td { border-bottom:0; }
     @media (max-width: 900px) {
@@ -876,6 +1240,7 @@ def _render_pay_workspace_page(*, view: str, actor: PayActor) -> str:
       .lead-panel, .topbar { align-items:flex-start; flex-direction:column; }
       .metric-row { justify-content:flex-start; }
       .field-grid { grid-template-columns:1fr; }
+      .demo-two-col { grid-template-columns:1fr; }
       .inline-form { display:grid; }
       .inline-form input, .inline-form select, button { width:100%; }
       .mileage-header h2 { font-size:36px; }
@@ -900,6 +1265,9 @@ def _render_pay_workspace_page(*, view: str, actor: PayActor) -> str:
 const PAY_VIEW = "__VIEW__";
 let context = null;
 let selectedEntryId = null;
+let internalRoleSearchRows = [];
+let commonPlaceLookup = new Map();
+let commonPlacesDraft = [];
 const byId = id => document.getElementById(id);
 function money(value) { return Number(value || 0).toFixed(2); }
 function addCell(row, value) { const cell = document.createElement('td'); cell.textContent = value == null ? '' : String(value); row.appendChild(cell); }
@@ -925,6 +1293,258 @@ function renderSummary() {
   setText('periodLabel', `${context.period.period_start} to ${context.period.period_end} - ${context.period.status}`);
   setText('actorLabel', context.actor.display_name || context.actor.email || '');
   setText('periodStats', `${entries.length} entries | $${money(lost + mileage + other)}`);
+}
+function readDemoStepIndex() {
+  try {
+    const value = Number(localStorage.getItem('payDemoStepIndex') || 0);
+    return Number.isFinite(value) ? value : 0;
+  } catch (_err) {
+    return 0;
+  }
+}
+function writeDemoStepIndex(value) {
+  try { localStorage.setItem('payDemoStepIndex', String(value)); } catch (_err) {}
+}
+let demoStepIndex = readDemoStepIndex();
+const DEMO_STEPS = [
+  {
+    label: 'Open Period',
+    status: 'Period open for officer practice',
+    checklist: ['Confirm payroll period dates', 'Confirm officer is signed in', 'Review where suggestions are submitted'],
+    log: ['Demo period opened', 'No production entry has been created'],
+  },
+  {
+    label: 'Submit Entry',
+    status: 'Officer entry saved in demo',
+    checklist: ['Enter date and lost-time hours', 'Confirm pay profile drives the rate', 'Add daily notes for the voucher narrative'],
+    log: ['Demo officer entry validated', 'Lost wages calculated from the saved profile snapshot', 'Daily notes queued for the packet narrative'],
+  },
+  {
+    label: 'Add Mileage',
+    status: 'Mileage attached in demo',
+    checklist: ['Select common locations', 'Confirm IRS rate follows the entry date', 'Attach mileage to the same entry'],
+    log: ['Common place addresses resolved', 'Mileage reimbursement calculated', 'Mileage PDF marked as attached in demo'],
+  },
+  {
+    label: 'Treasurer Review',
+    status: 'Treasurer review ready in demo',
+    checklist: ['Review officer entry totals', 'Review president differential example', 'Check receipts and mileage attachments'],
+    log: ['Second demo entry added for president differential', 'Treasurer review totals refreshed', 'Feedback table available to admins'],
+  },
+  {
+    label: 'Demo Lock',
+    status: 'Demo packet locked without sending',
+    checklist: ['Confirm packet totals', 'Confirm signer order concept', 'Collect officer suggestions before production use'],
+    log: ['Demo packet marked locked', 'Email, DocuSeal, SharePoint, and real pay entries were not touched', 'Suggestions remain available for admin review'],
+  },
+];
+function addDaysText(dateText, days) {
+  const date = new Date(`${dateText || '2026-05-03'}T12:00:00`);
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+function demoRowsForStep() {
+  if (!context || demoStepIndex < 1) return [];
+  const start = context.period && context.period.period_start;
+  const samples = [
+    {
+      offset: 1,
+      entry_date: addDaysText(start, 1),
+      display_name: context.actor.display_name || 'Demo Officer',
+      hours: 4,
+      rate: 38.5,
+      mileage: 24.65,
+      other: 0,
+      notes: 'DEMO TRAINING - reviewed route mileage, receipts, and pay profile rate for officer practice.',
+    },
+    {
+      offset: 3,
+      entry_date: addDaysText(start, 3),
+      display_name: 'Demo President',
+      hours: 2.5,
+      rate: 54.75,
+      mileage: 0,
+      other: 18.75,
+      notes: 'DEMO TRAINING - confirmed president differential example and approval path.',
+    },
+    {
+      offset: 6,
+      entry_date: addDaysText(start, 6),
+      display_name: 'Demo Treasurer',
+      hours: 3,
+      rate: 46.25,
+      mileage: 18.5,
+      other: 24,
+      notes: 'DEMO TRAINING - reconciled mileage attachment with daily expense voucher totals.',
+    },
+    {
+      offset: 9,
+      entry_date: addDaysText(start, 9),
+      display_name: 'Demo Steward',
+      hours: 6,
+      rate: 42.25,
+      mileage: 31.75,
+      other: 12.5,
+      notes: 'DEMO TRAINING - met with member about payroll correction and documented next steps.',
+    },
+  ];
+  const limit = demoStepIndex >= 4 ? samples.length : demoStepIndex >= 3 ? 3 : demoStepIndex >= 2 ? 2 : 1;
+  return samples.slice(0, limit).map(row => ({
+    ...row,
+    lost_wages: row.hours * row.rate,
+    mileage: demoStepIndex >= 2 ? row.mileage : 0,
+    other: demoStepIndex >= 3 ? row.other : 0,
+  }));
+}
+function demoModeEnabled() {
+  if (!context) return true;
+  const settings = context.demo_settings || context.settings || {};
+  const value = settings.demo_mode_enabled;
+  return !(value === false || String(value).toLowerCase() === 'false');
+}
+function renderDemoList(id, items) {
+  const node = byId(id);
+  if (!node) return;
+  node.innerHTML = '';
+  for (const item of items || []) {
+    const li = document.createElement('li');
+    li.textContent = item;
+    node.appendChild(li);
+  }
+}
+function renderDemoCycle() {
+  const panel = byId('demoCyclePanel');
+  if (!panel || !context) return;
+  const enabled = demoModeEnabled();
+  const disabledPanel = byId('demoDisabledPanel');
+  const feedbackPanel = byId('demoFeedbackFormPanel');
+  if (disabledPanel) disabledPanel.classList.toggle('hidden', enabled);
+  if (feedbackPanel) feedbackPanel.classList.toggle('hidden', !enabled);
+  panel.classList.toggle('hidden', !enabled);
+  setText('demoModeLabel', enabled ? 'Enabled' : 'Disabled');
+  if (!enabled) return;
+  if (!Number.isFinite(demoStepIndex) || demoStepIndex < 0 || demoStepIndex >= DEMO_STEPS.length) demoStepIndex = 0;
+  const step = DEMO_STEPS[demoStepIndex];
+  const demoSettings = context.demo_settings || context.settings || {};
+  setText('demoTitle', demoSettings.demo_cycle_title || 'Training Demo Cycle');
+  setText('demoNotes', demoSettings.demo_cycle_notes || 'Practice data only. The demo lock does not send email, DocuSeal, or SharePoint packets.');
+  setText('demoCycleStatus', step.status);
+  renderDemoList('demoChecklist', step.checklist);
+  renderDemoList('demoActivityLog', step.log);
+  document.querySelectorAll('[data-demo-step]').forEach(button => {
+    const isCurrent = Number(button.dataset.demoStep) === demoStepIndex;
+    button.classList.toggle('secondary', !isCurrent);
+    if (isCurrent) button.setAttribute('aria-current', 'step');
+    else button.removeAttribute('aria-current');
+  });
+  const rows = demoRowsForStep();
+  setText('demoEntryCount', String(rows.length));
+  setText('demoLostWages', `$${money(rows.reduce((sum, row) => sum + row.lost_wages, 0))}`);
+  setText('demoMileageTotal', `$${money(rows.reduce((sum, row) => sum + row.mileage, 0))}`);
+  setText('demoPacketStatus', demoStepIndex >= 4 ? 'Locked' : demoStepIndex >= 3 ? 'Review' : 'Open');
+  const body = byId('demoEntriesBody');
+  if (!body) return;
+  body.innerHTML = '';
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 7;
+    td.textContent = 'No demo entries yet.';
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  for (const row of rows) {
+    const tr = document.createElement('tr');
+    addCell(tr, row.entry_date);
+    addCell(tr, row.display_name);
+    addCell(tr, money(row.hours));
+    addCell(tr, money(row.lost_wages));
+    addCell(tr, money(row.mileage));
+    addCell(tr, money(row.other));
+    addCell(tr, row.notes);
+    body.appendChild(tr);
+  }
+}
+function setDemoStep(index) {
+  const parsed = Number(index || 0);
+  demoStepIndex = Number.isFinite(parsed) ? Math.max(0, Math.min(parsed, DEMO_STEPS.length - 1)) : 0;
+  writeDemoStepIndex(demoStepIndex);
+  renderDemoCycle();
+}
+function renderDemoFeedback() {
+  const body = byId('demoFeedbackBody');
+  if (!body || !context) return;
+  const rows = context.demo_feedback || [];
+  body.innerHTML = '';
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 7;
+    td.textContent = 'No demo suggestions submitted yet.';
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  for (const row of rows) {
+    const tr = document.createElement('tr');
+    addCell(tr, row.created_at_utc);
+    addCell(tr, row.actor_display_name || row.actor_email);
+    addCell(tr, `${row.screen} / step ${row.demo_step || 0}`);
+    addCell(tr, row.category);
+    addCell(tr, row.comment);
+    addCell(tr, row.status);
+    const actionCell = document.createElement('td');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'secondary';
+    button.textContent = row.status === 'closed' ? 'Reopen' : 'Close';
+    button.addEventListener('click', () => updateDemoFeedbackStatus(row.id, row.status === 'closed' ? 'open' : 'closed'));
+    actionCell.appendChild(button);
+    tr.appendChild(actionCell);
+    body.appendChild(tr);
+  }
+}
+function renderDemoFiles() {
+  const body = byId('demoFilesBody');
+  if (!body || !context) return;
+  const rows = context.demo_artifacts || [];
+  body.innerHTML = '';
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 4;
+    td.textContent = 'No demo files generated yet.';
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  for (const row of rows) {
+    const tr = document.createElement('tr');
+    addCell(tr, row.filename);
+    addCell(tr, `${row.size_bytes || 0} bytes`);
+    addCell(tr, row.updated_at_utc);
+    const actionCell = document.createElement('td');
+    const link = document.createElement('a');
+    link.href = row.download_url;
+    link.textContent = 'Download';
+    actionCell.appendChild(link);
+    tr.appendChild(actionCell);
+    body.appendChild(tr);
+  }
+}
+async function updateDemoFeedbackStatus(feedbackId, status) {
+  if (!feedbackId) return;
+  try {
+    await api(`/pay/api/demo/feedback/${encodeURIComponent(feedbackId)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ status }),
+    });
+    await loadContext();
+  } catch (err) {
+    setText('demoFeedbackStatus', err.message);
+    setText('demoSettingsStatus', err.message);
+  }
 }
 function renderEntries() {
   const body = byId('entriesBody');
@@ -955,7 +1575,66 @@ function renderEntries() {
   }
   syncMileageFormFromEntry();
 }
+function renderDailyTally() {
+  const body = byId('dailyTallyBody');
+  if (!body || !context) return;
+  const rowsByDate = new Map();
+  for (const row of context.entries || []) {
+    const date = row.entry_date || '';
+    if (!date) continue;
+    if (!rowsByDate.has(date)) rowsByDate.set(date, { hours: 0, lost: 0, mileage: 0, expenses: 0 });
+    const tally = rowsByDate.get(date);
+    tally.hours += Number(row.hours || 0);
+    tally.lost += Number(row.lost_wage_hourly_rate || row.hourly_rate || 0) * Number(row.hours || 0);
+    tally.mileage += Number(row.mileage_amount || 0);
+    tally.expenses += Number(row.rentals_amount || 0) + Number(row.meals_amount || 0) + Number(row.hotel_amount || 0) + Number(row.miscellaneous_amount || 0);
+  }
+  body.innerHTML = '';
+  if (!rowsByDate.size) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 6;
+    td.textContent = 'No entries yet.';
+    tr.appendChild(td);
+    body.appendChild(tr);
+    setText('dailyTallyStats', '$0.00');
+    return;
+  }
+  const totals = { hours: 0, lost: 0, mileage: 0, expenses: 0 };
+  for (const [date, tally] of Array.from(rowsByDate.entries()).sort((left, right) => left[0].localeCompare(right[0]))) {
+    totals.hours += tally.hours;
+    totals.lost += tally.lost;
+    totals.mileage += tally.mileage;
+    totals.expenses += tally.expenses;
+    const tr = document.createElement('tr');
+    addCell(tr, date);
+    addCell(tr, money(tally.hours));
+    addCell(tr, `$${money(tally.lost)}`);
+    addCell(tr, `$${money(tally.mileage)}`);
+    addCell(tr, `$${money(tally.expenses)}`);
+    addCell(tr, `$${money(tally.lost + tally.mileage + tally.expenses)}`);
+    body.appendChild(tr);
+  }
+  setText('dailyTallyStats', `${money(totals.hours)} hrs | $${money(totals.lost + totals.mileage + totals.expenses)}`);
+}
 let activeAddressInput = null;
+function placeKey(value) {
+  return String(value || '').trim().toLowerCase();
+}
+function rememberCommonPlace(label, address) {
+  const cleanLabel = String(label || '').trim();
+  const cleanAddress = String(address || '').trim();
+  if (!cleanAddress) return;
+  for (const value of [cleanLabel, cleanAddress, cleanLabel ? `${cleanLabel} - ${cleanAddress}` : cleanAddress]) {
+    const key = placeKey(value);
+    if (key && !commonPlaceLookup.has(key)) commonPlaceLookup.set(key, cleanAddress);
+  }
+}
+function resolveCommonPlaceInput(input) {
+  if (!input) return;
+  const resolved = commonPlaceLookup.get(placeKey(input.value));
+  if (resolved) input.value = resolved;
+}
 function selectedEntry() {
   if (!context || !selectedEntryId) return null;
   return (context.entries || []).find(row => row.id === selectedEntryId) || null;
@@ -965,13 +1644,21 @@ function mileageRateForYear(year) {
   if (rates && Object.prototype.hasOwnProperty.call(rates, String(year))) return rates[String(year)];
   return '0.67';
 }
+function normalizeMileageRate(value) {
+  const parsed = Number(String(value || '').replace('$', '').replace(',', '').trim());
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0.67;
+  return Math.abs(parsed) >= 10 ? parsed / 100 : parsed;
+}
 function syncMileageRateFromDate() {
   const dateEl = byId('date');
-  const rateEl = byId('irs_rate');
-  if (!dateEl || !rateEl || !dateEl.value) return;
-  const current = String(rateEl.value || '').trim().toLowerCase();
-  if (current && current !== 'auto') return;
-  rateEl.value = mileageRateForYear(dateEl.value.slice(0, 4));
+  const display = byId('irsRateDisplay');
+  if (!display) return;
+  if (!dateEl || !dateEl.value) {
+    display.textContent = 'Select a date';
+    return;
+  }
+  const year = dateEl.value.slice(0, 4);
+  display.textContent = `${year}: $${normalizeMileageRate(mileageRateForYear(year)).toFixed(3)} per mile`;
 }
 function syncMileageFormFromEntry() {
   const form = byId('mileageForm');
@@ -979,13 +1666,13 @@ function syncMileageFormFromEntry() {
   const select = byId('mileageEntrySelect');
   const entry = selectedEntry();
   if (select && select.value !== (selectedEntryId || '')) select.value = selectedEntryId || '';
+  const nameInput = form.elements.namedItem('name');
+  if (nameInput) nameInput.value = entry ? (entry.display_name || context.actor.display_name || entry.user_email || context.actor.email || '') : ((context.actor && (context.actor.display_name || context.actor.email)) || '');
   if (!entry) return;
-  form.name.value = entry.display_name || context.actor.display_name || entry.user_email || context.actor.email || '';
   form.local_number.value = entry.local_number || '3106';
   form.date.value = entry.entry_date || form.date.value;
   form.description.value = entry.notes || form.description.value || 'Union business';
-  const rateEl = byId('irs_rate');
-  if (rateEl && (!rateEl.value || String(rateEl.value).trim().toLowerCase() === 'auto')) syncMileageRateFromDate();
+  syncMileageRateFromDate();
 }
 function renderMileageEntrySelect() {
   const select = byId('mileageEntrySelect');
@@ -1005,7 +1692,10 @@ function renderMileageEntrySelect() {
   syncMileageFormFromEntry();
 }
 function wireAddressInput(input) {
+  input.setAttribute('list', 'commonPlaceOptions');
   input.addEventListener('focus', () => { activeAddressInput = input; });
+  input.addEventListener('change', () => resolveCommonPlaceInput(input));
+  input.addEventListener('blur', () => resolveCommonPlaceInput(input));
 }
 function addMileageLocationField(value, placeholder = 'Enter location') {
   const locationsDiv = byId('locations');
@@ -1019,6 +1709,7 @@ function addMileageLocationField(value, placeholder = 'Enter location') {
   input.className = 'form-control address-input';
   input.required = true;
   input.autocomplete = 'off';
+  input.setAttribute('list', 'commonPlaceOptions');
   if (value) input.value = value;
   const button = document.createElement('button');
   button.className = 'btn btn-danger remove-location';
@@ -1033,15 +1724,92 @@ function addMileageLocationField(value, placeholder = 'Enter location') {
 }
 function renderCommonPlaces() {
   const select = byId('commonPlaceSelect');
-  if (!select || !context) return;
+  const datalist = byId('commonPlaceOptions');
+  if ((!select && !datalist) || !context) return;
   const places = (context.settings && context.settings.common_places) || [];
-  select.innerHTML = '<option value="">Select a place...</option>';
+  commonPlaceLookup = new Map();
+  if (select) select.innerHTML = '<option value="">Select a place...</option>';
+  if (datalist) datalist.innerHTML = '';
   for (const place of places) {
+    const label = place.label || 'Place';
+    const address = place.address || '';
+    rememberCommonPlace(label, address);
+    if (datalist && address) {
+      const byLabel = document.createElement('option');
+      byLabel.value = `${label} - ${address}`;
+      datalist.appendChild(byLabel);
+      const byAddress = document.createElement('option');
+      byAddress.value = address;
+      datalist.appendChild(byAddress);
+    }
+    if (!select) continue;
     const opt = document.createElement('option');
-    opt.value = place.address || '';
-    opt.textContent = `${place.label || 'Place'} - ${place.address || ''}`;
+    opt.value = address;
+    opt.textContent = `${label} - ${address}`;
     select.appendChild(opt);
   }
+}
+function normalizePlaceRows(rows) {
+  const out = [];
+  const seen = new Set();
+  for (const row of rows || []) {
+    const label = String((row && row.label) || '').trim();
+    const address = String((row && row.address) || '').trim();
+    if (!label || !address) continue;
+    const key = `${label.toLowerCase()}|${address.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ label, address });
+  }
+  return out;
+}
+function renderAdminCommonPlaces() {
+  const body = byId('commonPlacesBody');
+  if (!body || !context) return;
+  commonPlacesDraft = normalizePlaceRows((context.settings && context.settings.common_places) || []);
+  body.innerHTML = '';
+  for (const [index, place] of commonPlacesDraft.entries()) {
+    const tr = document.createElement('tr');
+    addCell(tr, place.label);
+    addCell(tr, place.address);
+    const actionCell = document.createElement('td');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'danger';
+    button.textContent = 'Remove';
+    button.addEventListener('click', () => removeCommonPlace(index));
+    actionCell.appendChild(button);
+    tr.appendChild(actionCell);
+    body.appendChild(tr);
+  }
+}
+async function saveCommonPlaces(message) {
+  const rows = normalizePlaceRows(commonPlacesDraft);
+  await api('/pay/api/settings', { method: 'PUT', body: JSON.stringify({ common_places: rows }) });
+  setText('commonPlaceStatus', message || 'Saved');
+  await loadContext();
+}
+async function removeCommonPlace(index) {
+  commonPlacesDraft.splice(index, 1);
+  try {
+    await saveCommonPlaces('Removed');
+  } catch (err) {
+    setText('commonPlaceStatus', err.message);
+  }
+}
+function addCommonPlaceToLocations(value) {
+  if (!value) return;
+  if (activeAddressInput && activeAddressInput.closest('#locations') && !activeAddressInput.value.trim()) {
+    activeAddressInput.value = value;
+    return;
+  }
+  const inputs = Array.from(document.querySelectorAll('#locations .address-input'));
+  const empty = inputs.find(input => !input.value.trim());
+  if (empty) {
+    empty.value = value;
+    return;
+  }
+  addMileageLocationField(value);
 }
 function renderMileageForms() {
   const body = byId('mileageFormsBody');
@@ -1094,6 +1862,118 @@ function renderPayUsers() {
     body.appendChild(tr);
   }
 }
+function renderInternalRoles() {
+  const body = byId('internalRolesBody');
+  if (!body || !context) return;
+  body.innerHTML = '';
+  const rows = context.internal_roles || [];
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 5;
+    td.textContent = 'No internal role assignments saved.';
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  for (const row of rows) {
+    const tr = document.createElement('tr');
+    addCell(tr, row.principal_display_name);
+    addCell(tr, row.principal_email);
+    addCell(tr, row.role);
+    addCell(tr, row.status);
+    const actionCell = document.createElement('td');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'danger';
+    button.textContent = 'Remove';
+    button.addEventListener('click', () => removeInternalRole(row.assignment_id));
+    actionCell.appendChild(button);
+    tr.appendChild(actionCell);
+    body.appendChild(tr);
+  }
+}
+function fillPayProfileForm(row) {
+  const form = byId('payProfileForm');
+  if (!form || !row) return;
+  form.principal_id.value = row.principal_id || '';
+  form.principal_email.value = row.principal_email || row.email || row.user_principal_name || '';
+  form.principal_display_name.value = row.principal_display_name || row.display_name || '';
+  form.pay_basis.value = row.pay_basis || 'expense_only';
+  form.base_wage_input_type.value = row.base_wage_input_type || 'hourly';
+  form.base_wage_amount.value = row.base_wage_amount || '';
+  form.weekly_basis_hours.value = row.weekly_basis_hours || '40';
+  form.commission_month_1_amount.value = row.commission_month_1_amount || '';
+  form.commission_month_2_amount.value = row.commission_month_2_amount || '';
+  form.commission_month_3_amount.value = row.commission_month_3_amount || '';
+  form.status.value = row.status || 'active';
+  form.notes.value = row.notes || '';
+}
+function renderPayProfiles() {
+  const body = byId('payProfilesBody');
+  if (!body || !context) return;
+  body.innerHTML = '';
+  const rows = context.pay_profiles || [];
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 7;
+    td.textContent = 'No pay profiles saved.';
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  for (const row of rows) {
+    const tr = document.createElement('tr');
+    tr.addEventListener('click', () => fillPayProfileForm(row));
+    addCell(tr, row.principal_display_name);
+    addCell(tr, row.principal_email);
+    addCell(tr, row.pay_basis);
+    addCell(tr, `${row.base_wage_input_type} ${money(row.base_wage_amount)}`);
+    addCell(tr, money(row.commission_hourly_rate));
+    addCell(tr, money(row.calculated_hourly_rate));
+    addCell(tr, row.status);
+    body.appendChild(tr);
+  }
+}
+function renderInternalRoleSearch(rows) {
+  const body = byId('internalRoleSearchBody');
+  if (!body) return;
+  internalRoleSearchRows = Array.isArray(rows) ? rows : [];
+  body.innerHTML = '';
+  if (!internalRoleSearchRows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 4;
+    td.textContent = 'No matching internal users found.';
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  internalRoleSearchRows.forEach((row, index) => {
+    const tr = document.createElement('tr');
+    addCell(tr, row.display_name);
+    addCell(tr, row.email || row.user_principal_name);
+    addCell(tr, row.match_source);
+    const actionCell = document.createElement('td');
+    const useButton = document.createElement('button');
+    useButton.type = 'button';
+    useButton.className = 'secondary';
+    useButton.textContent = 'Use';
+    useButton.addEventListener('click', () => fillPayProfileForm(row));
+    actionCell.appendChild(useButton);
+    for (const role of ['president', 'treasurer']) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'secondary';
+      button.textContent = role === 'president' ? 'Set President' : 'Set Treasurer';
+      button.addEventListener('click', () => assignInternalRole(index, role));
+      actionCell.appendChild(button);
+    }
+    tr.appendChild(actionCell);
+    body.appendChild(tr);
+  });
+}
 function renderIrsCandidates() {
   const body = byId('irsCandidatesBody');
   if (!body || !context) return;
@@ -1135,26 +2015,43 @@ function renderIrsCandidates() {
 }
 function fillSettings() {
   const form = byId('settingsForm');
-  if (!form || !context) return;
-  form.president_email.value = context.settings.president_email || '';
-  form.treasurer_emails.value = Array.isArray(context.settings.treasurer_emails) ? context.settings.treasurer_emails.join(', ') : '';
+  if (form && context) {
+    form.president_email.value = context.settings.president_email || '';
+    form.treasurer_emails.value = Array.isArray(context.settings.treasurer_emails) ? context.settings.treasurer_emails.join(', ') : '';
+  }
+  const demoForm = byId('demoSettingsForm');
+  if (demoForm && context) {
+    const demoSettings = context.demo_settings || context.settings || {};
+    demoForm.demo_mode_enabled.value = demoModeEnabled() ? 'true' : 'false';
+    demoForm.demo_cycle_title.value = demoSettings.demo_cycle_title || 'Training Demo Cycle';
+    demoForm.demo_cycle_notes.value = demoSettings.demo_cycle_notes || '';
+  }
 }
 async function loadContext() {
-  context = await api('/pay/api/context');
+  context = await api(PAY_VIEW === 'demo' ? '/pay/api/demo/context' : '/pay/api/context');
   renderSummary();
   renderEntries();
+  renderDailyTally();
   renderMileageEntrySelect();
   renderCommonPlaces();
   renderMileageForms();
   renderStubs();
   renderPayUsers();
+  renderPayProfiles();
+  renderInternalRoles();
+  renderAdminCommonPlaces();
+  renderDemoCycle();
+  renderDemoFiles();
+  renderDemoFeedback();
   renderIrsCandidates();
   fillSettings();
+  syncMileageRateFromDate();
 }
 bind('entryForm', 'submit', async event => {
   event.preventDefault();
   const data = Object.fromEntries(new FormData(event.target).entries());
   data.period_id = context.period.id;
+  data.display_name = data.display_name || (context.actor && (context.actor.display_name || context.actor.email)) || '';
   for (const key of ['hourly_rate','lost_wage_amount','hours','mileage_miles','mileage_rate','mileage_amount','rentals_amount','meals_amount','hotel_amount','miscellaneous_amount','president_diff_hours','weekly_basis_hours']) data[key] = Number(data[key] || 0);
   try { await api('/pay/api/entries', { method: 'POST', body: JSON.stringify(data) }); setText('entryStatus', 'Saved'); await loadContext(); }
   catch (err) { setText('entryStatus', err.message); }
@@ -1195,37 +2092,33 @@ bind('mileageEntrySelect', 'change', event => {
   syncMileageFormFromEntry();
 });
 bind('date', 'change', syncMileageRateFromDate);
+bind('date', 'input', syncMileageRateFromDate);
 bind('addCommonPlaceBtn', 'click', () => {
   const select = byId('commonPlaceSelect');
   const value = select && select.value;
-  if (!value) return;
-  if (activeAddressInput && activeAddressInput.closest('#locations') && !activeAddressInput.value.trim()) {
-    activeAddressInput.value = value;
-    return;
-  }
-  const inputs = Array.from(document.querySelectorAll('#locations .address-input'));
-  const empty = inputs.find(input => !input.value.trim());
-  if (empty) {
-    empty.value = value;
-    return;
-  }
-  addMileageLocationField(value);
+  addCommonPlaceToLocations(value);
+});
+bind('commonPlaceSelect', 'change', event => {
+  addCommonPlaceToLocations(event.target.value);
+  event.target.value = '';
 });
 bind('mileageForm', 'submit', async event => {
   event.preventDefault();
   const form = event.target;
   const locations = Array.from(form.querySelectorAll('input[name="locations"]')).map(input => input.value.trim()).filter(Boolean);
   if (locations.length < 2) { setText('mileageStatus', 'Enter at least an origin and destination.'); return; }
-  let rate = String(form.irs_rate.value || '').trim();
-  if (!rate || rate.toLowerCase() === 'auto') rate = null;
+  const entry = selectedEntry();
+  const signedInName = (context.actor && (context.actor.display_name || context.actor.email)) || '';
+  const nameInput = form.elements.namedItem('name');
+  const mileageName = (nameInput && nameInput.value.trim()) || (entry && (entry.display_name || entry.user_email)) || signedInName;
   const body = {
     period_id: context.period.id,
-    name: form.name.value.trim(),
+    name: mileageName,
     local_number: form.local_number.value.trim() || '3106',
     date: form.date.value,
     description: form.description.value.trim(),
     locations,
-    rate,
+    rate: null,
   };
   try {
     let entryId = selectedEntryId;
@@ -1253,6 +2146,7 @@ bind('mileageForm', 'submit', async event => {
 });
 bind('mileageForm', 'reset', () => {
   setText('mileageStatus', '');
+  setTimeout(syncMileageRateFromDate, 0);
 });
 document.querySelectorAll('#locations .address-input').forEach(input => wireAddressInput(input));
 document.querySelectorAll('#locations .remove-location').forEach(button => button.addEventListener('click', () => button.parentElement.remove()));
@@ -1279,16 +2173,153 @@ bind('settingsForm', 'submit', async event => {
     await loadContext();
   } catch (err) { setText('settingsStatus', err.message); }
 });
+bind('demoSettingsForm', 'submit', async event => {
+  event.preventDefault();
+  const form = Object.fromEntries(new FormData(event.target).entries());
+  const settings = {
+    demo_mode_enabled: String(form.demo_mode_enabled || 'true') === 'true',
+    demo_cycle_title: String(form.demo_cycle_title || '').trim(),
+    demo_cycle_notes: String(form.demo_cycle_notes || '').trim(),
+  };
+  try {
+    await api('/pay/api/demo/settings', { method: 'PUT', body: JSON.stringify(settings) });
+    setText('demoSettingsStatus', 'Saved');
+    await loadContext();
+  } catch (err) { setText('demoSettingsStatus', err.message); }
+});
+async function generateDemoFiles() {
+  const demoSettings = (context && (context.demo_settings || context.settings)) || {};
+  try {
+    const started = await api('/pay/api/demo/artifacts', {
+      method: 'POST',
+      body: JSON.stringify({
+        demo_step: demoStepIndex,
+        demo_cycle_title: demoSettings.demo_cycle_title || 'Training Demo Cycle',
+      }),
+    });
+    let result = started;
+    const jobId = started.job_id;
+    if (jobId) {
+      for (let attempt = 0; attempt < 300; attempt++) {
+        const progress = result.progress || {};
+        const suffix = progress.total ? ` (${progress.current || 0}/${progress.total})` : '';
+        setText('demoFilesStatus', `${progress.message || result.message || result.status || 'Building demo packet'}${suffix}`);
+        if (result.status === 'completed' || result.status === 'failed') break;
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        result = await api(`/pay/api/demo/artifact-jobs/${encodeURIComponent(jobId)}`);
+      }
+    }
+    if (result.status === 'failed') throw new Error(result.error || result.message || 'Demo packet failed');
+    context.demo_artifacts = result.rows || [];
+    renderDemoFiles();
+    setText('demoFilesStatus', context.demo_artifacts.length ? 'Demo PDF packet ready' : 'No demo packet generated');
+  } catch (err) {
+    setText('demoFilesStatus', err.message);
+  }
+}
+document.querySelectorAll('[data-demo-step]').forEach(button => {
+  button.addEventListener('click', async () => {
+    setDemoStep(button.dataset.demoStep);
+    if (Number(button.dataset.demoStep) >= 4) await generateDemoFiles();
+  });
+});
+bind('resetDemoBtn', 'click', () => setDemoStep(0));
+bind('generateDemoFilesBtn', 'click', generateDemoFiles);
+bind('demoFeedbackForm', 'submit', async event => {
+  event.preventDefault();
+  const data = Object.fromEntries(new FormData(event.target).entries());
+  const demoSettings = (context && (context.demo_settings || context.settings)) || {};
+  data.demo_step = demoStepIndex;
+  data.demo_cycle_title = demoSettings.demo_cycle_title || 'Training Demo Cycle';
+  try {
+    await api('/pay/api/demo/feedback', { method: 'POST', body: JSON.stringify(data) });
+    setText('demoFeedbackStatus', 'Suggestion saved');
+    event.target.reset();
+    await loadContext();
+  } catch (err) {
+    setText('demoFeedbackStatus', err.message);
+  }
+});
 bind('payUserForm', 'submit', async event => {
   event.preventDefault();
   const data = Object.fromEntries(new FormData(event.target).entries());
   try { await api('/pay/api/users', { method: 'POST', body: JSON.stringify(data) }); setText('payUserStatus', 'Saved'); event.target.reset(); await loadContext(); }
   catch (err) { setText('payUserStatus', err.message); }
 });
+bind('payProfileForm', 'submit', async event => {
+  event.preventDefault();
+  const data = Object.fromEntries(new FormData(event.target).entries());
+  for (const key of ['base_wage_amount','weekly_basis_hours','commission_month_1_amount','commission_month_2_amount','commission_month_3_amount']) data[key] = Number(data[key] || 0);
+  try {
+    await api('/pay/api/profiles', { method: 'POST', body: JSON.stringify(data) });
+    setText('internalRoleStatus', 'Pay profile saved');
+    await loadContext();
+  } catch (err) {
+    setText('internalRoleStatus', err.message);
+  }
+});
+bind('commonPlaceForm', 'submit', async event => {
+  event.preventDefault();
+  const data = Object.fromEntries(new FormData(event.target).entries());
+  commonPlacesDraft.push({
+    label: String(data.label || '').trim(),
+    address: String(data.address || '').trim(),
+  });
+  try {
+    await saveCommonPlaces('Location saved');
+    event.target.reset();
+  } catch (err) {
+    setText('commonPlaceStatus', err.message);
+  }
+});
+bind('internalRoleSearchForm', 'submit', async event => {
+  event.preventDefault();
+  const form = Object.fromEntries(new FormData(event.target).entries());
+  try {
+    const result = await api(`/pay/api/directory/users?search=${encodeURIComponent(form.search || '')}&limit=10`);
+    setText('internalRoleStatus', result.warning || `${result.count} match${result.count === 1 ? '' : 'es'}`);
+    renderInternalRoleSearch(result.rows || []);
+  } catch (err) {
+    setText('internalRoleStatus', err.message);
+  }
+});
 bind('irsSyncBtn', 'click', async () => {
   try { const result = await api('/pay/api/irs-rates/sync', { method: 'POST', body: JSON.stringify({}) }); setText('irsStatus', result.detected.length ? `${result.detected.length} rate staged` : 'No new IRS rates'); await loadContext(); }
   catch (err) { setText('irsStatus', err.message); }
 });
+async function assignInternalRole(index, role) {
+  const row = internalRoleSearchRows[index];
+  if (!row) return;
+  const email = row.email || row.user_principal_name;
+  if (!email) {
+    setText('internalRoleStatus', 'Selected user has no email or UPN.');
+    return;
+  }
+  const payload = {
+    principal_id: row.principal_id || null,
+    principal_email: email,
+    principal_display_name: row.display_name || email,
+    role,
+    status: 'active'
+  };
+  try {
+    await api('/pay/api/internal-roles', { method: 'POST', body: JSON.stringify(payload) });
+    setText('internalRoleStatus', 'Saved');
+    await loadContext();
+  } catch (err) {
+    setText('internalRoleStatus', err.message);
+  }
+}
+async function removeInternalRole(assignmentId) {
+  if (!assignmentId) return;
+  try {
+    await api(`/pay/api/internal-roles/${encodeURIComponent(assignmentId)}`, { method: 'DELETE' });
+    setText('internalRoleStatus', 'Removed');
+    await loadContext();
+  } catch (err) {
+    setText('internalRoleStatus', err.message);
+  }
+}
 async function approveIrsRate(candidateId) {
   try { const result = await api(`/pay/api/irs-rates/${candidateId}/approve`, { method: 'POST', body: JSON.stringify({}) }); setText('irsStatus', `Approved ${result.rate_year}: ${result.active_rate}`); await loadContext(); }
   catch (err) { setText('irsStatus', err.message); }
@@ -1571,7 +2602,8 @@ async def pay_context(request: Request):
     entries = await list_entries(db, period_id=str(period["id"]), actor=actor)
     attachments = await list_attachments(db, period_id=str(period["id"]), actor=actor)
     compensation_stubs = await list_compensation_stubs(db, actor=actor)
-    settings = await pay_settings(db, pay_cfg=request.app.state.cfg.pay_portal)
+    settings = await _pay_settings_for_request(request)
+    current_profile = await pay_profile_by_email(db, email=actor.email, active_only=True)
     return {
         "actor": {
             "email": actor.email,
@@ -1587,10 +2619,79 @@ async def pay_context(request: Request):
         "attachments": attachments,
         "compensation_stubs": compensation_stubs,
         "settings": settings,
+        "demo_settings": await pay_demo_settings(db),
+        "pay_profile": current_profile,
         "pay_users": await list_pay_users(db) if actor.can_lock else [],
+        "pay_profiles": await list_pay_profiles(db) if actor.can_lock else [],
+        "internal_roles": await list_internal_role_assignments(db) if actor.can_lock else [],
         "wage_scales": await list_wage_scales(db) if actor.can_lock else [],
         "irs_rate_candidates": await list_irs_rate_candidates(db) if actor.can_lock else [],
+        "demo_feedback": await list_pay_demo_feedback(db) if actor.can_lock else [],
     }
+
+
+@router.get("/pay/api/demo/context")
+async def pay_demo_context(request: Request):
+    actor = await _require_pay_actor(request)
+    db: Db = request.app.state.db
+    start, end = current_period_bounds()
+    settings = await pay_settings(db, pay_cfg=request.app.state.cfg.pay_portal)
+    demo_settings = await pay_demo_settings(db)
+    return {
+        "actor": {
+            "email": actor.email,
+            "display_name": actor.display_name,
+            "role": actor.role,
+            "can_view_all": actor.can_view_all,
+            "can_edit_all": actor.can_edit_all,
+            "can_lock": actor.can_lock,
+            "is_guest": actor.is_guest,
+        },
+        "period": {
+            "id": "demo",
+            "period_start": start.isoformat(),
+            "period_end": end.isoformat(),
+            "status": "demo",
+            "revision": 0,
+        },
+        "entries": [],
+        "attachments": [],
+        "compensation_stubs": [],
+        "settings": settings,
+        "demo_settings": demo_settings,
+        "pay_profile": None,
+        "pay_users": [],
+        "pay_profiles": [],
+        "internal_roles": [],
+        "wage_scales": [],
+        "irs_rate_candidates": [],
+        "demo_feedback": await list_pay_demo_feedback(db) if actor.can_lock else [],
+        "demo_artifacts": _demo_artifact_rows_for_response(request, actor),
+    }
+
+
+@router.get("/pay/api/directory/users", response_model=DirectoryUserSearchResponse)
+async def pay_directory_users(request: Request, search: str = "", limit: int = 10):
+    await _require_treasurer(request)
+    return await search_directory_users_for_request(request, search=search, limit=limit)
+
+
+@router.get("/pay/api/profiles")
+async def pay_profiles(request: Request):
+    await _require_treasurer(request)
+    return {"rows": await list_pay_profiles(request.app.state.db)}
+
+
+@router.get("/pay/api/profiles/{email}")
+async def pay_profile(email: str, request: Request):
+    actor = await _require_pay_actor(request)
+    normalized_email = normalize_email(email)
+    if not actor.can_lock and normalized_email != actor.email:
+        raise _forbidden("treasurer access required")
+    profile = await pay_profile_by_email(request.app.state.db, email=normalized_email)
+    if not profile:
+        raise HTTPException(status_code=404, detail="pay profile not found")
+    return profile
 
 
 @router.post("/pay/api/entries")
@@ -1675,13 +2776,14 @@ async def upload_pay_attachment(entry_id: str, body: PayAttachmentUploadRequest,
 async def create_pay_mileage(entry_id: str, body: PayMileageRequest, request: Request):
     actor = await _require_pay_actor(request)
     try:
+        mileage_name = str(body.name or "").strip() or str(actor.display_name or actor.email or "Pay User").strip()
         return await create_mileage_attachment(
             db=request.app.state.db,
             cfg=request.app.state.cfg,
             period_id=body.period_id,
             entry_id=entry_id,
             actor=actor,
-            name=body.name,
+            name=mileage_name,
             local_number=body.local_number or "3106",
             date_str=body.date,
             description=body.description,
@@ -1714,6 +2816,110 @@ async def update_pay_settings(body: PaySettingsUpdateRequest, request: Request):
         updated_by=actor.email,
         pay_cfg=request.app.state.cfg.pay_portal,
     )
+
+
+@router.put("/pay/api/demo/settings")
+async def update_pay_demo_settings(body: PayDemoSettingsUpdateRequest, request: Request):
+    actor = await _require_treasurer(request)
+    payload: dict[str, object] = {}
+    if body.demo_mode_enabled is not None:
+        payload["demo_mode_enabled"] = bool(body.demo_mode_enabled)
+    if body.demo_cycle_title is not None:
+        payload["demo_cycle_title"] = body.demo_cycle_title
+    if body.demo_cycle_notes is not None:
+        payload["demo_cycle_notes"] = body.demo_cycle_notes
+    return await save_pay_demo_settings(request.app.state.db, setting=payload, updated_by=actor.email)
+
+
+@router.post("/pay/api/demo/artifacts")
+async def generate_pay_demo_output_files(body: PayDemoArtifactRequest, request: Request):
+    actor = await _require_pay_actor(request)
+    settings = await pay_demo_settings(request.app.state.db)
+    demo_enabled = settings.get("demo_mode_enabled")
+    if demo_enabled is False or str(demo_enabled).lower() == "false":
+        raise HTTPException(status_code=400, detail="demo mode is disabled")
+    start, end = current_period_bounds()
+    job_id = uuid4().hex
+    now = time.time()
+    with _DEMO_JOBS_LOCK:
+        _DEMO_JOBS[job_id] = {
+            "job_id": job_id,
+            "actor_email": actor.email,
+            "status": "queued",
+            "message": "Queued demo packet",
+            "progress": {"stage": "queued", "current": 0, "total": 1, "message": "Queued demo packet"},
+            "rows": [],
+            "error": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+    _DEMO_JOB_EXECUTOR.submit(
+        _run_demo_artifact_job,
+        job_id=job_id,
+        cfg=request.app.state.cfg,
+        graph=getattr(request.app.state, "graph", None),
+        actor=actor,
+        pay_settings_payload=await pay_settings(request.app.state.db, pay_cfg=request.app.state.cfg.pay_portal),
+        demo_step=body.demo_step or 0,
+        demo_cycle_title=body.demo_cycle_title or str(settings.get("demo_cycle_title") or "Training Demo Cycle"),
+        period_start=start.isoformat(),
+        period_end=end.isoformat(),
+    )
+    return _demo_job_snapshot(job_id, actor=actor, request=request)
+
+
+@router.get("/pay/api/demo/artifact-jobs/{job_id}")
+async def pay_demo_artifact_job(job_id: str, request: Request):
+    actor = await _require_pay_actor(request)
+    return _demo_job_snapshot(job_id, actor=actor, request=request)
+
+
+@router.get("/pay/api/demo/artifacts/{filename}")
+async def download_pay_demo_output_file(filename: str, request: Request):
+    actor = await _require_pay_actor(request)
+    try:
+        path = pay_demo_artifact_path(
+            data_root=request.app.state.cfg.data_root,
+            actor=actor,
+            filename=filename,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path, filename=path.name)
+
+
+@router.post("/pay/api/demo/feedback")
+async def submit_pay_demo_feedback(body: PayDemoFeedbackRequest, request: Request):
+    actor = await _require_pay_actor(request)
+    settings = await pay_demo_settings(request.app.state.db)
+    demo_enabled = settings.get("demo_mode_enabled")
+    if demo_enabled is False or str(demo_enabled).lower() == "false":
+        raise HTTPException(status_code=400, detail="demo mode is disabled")
+    try:
+        return await create_pay_demo_feedback(
+            request.app.state.db,
+            actor=actor,
+            screen=body.screen,
+            category=body.category,
+            demo_step=body.demo_step,
+            demo_cycle_title=body.demo_cycle_title or str(settings.get("demo_cycle_title") or "Training Demo Cycle"),
+            comment=body.comment,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/pay/api/demo/feedback/{feedback_id}")
+async def update_pay_demo_feedback(feedback_id: int, body: PayDemoFeedbackStatusRequest, request: Request):
+    await _require_treasurer(request)
+    try:
+        return await update_pay_demo_feedback_status(
+            request.app.state.db,
+            feedback_id=feedback_id,
+            status=body.status,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/pay/api/irs-rates/sync")
@@ -1754,6 +2960,94 @@ async def save_pay_user(body: PayUserUpsertRequest, request: Request):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/pay/api/internal-roles")
+async def save_pay_internal_role(body: InternalRoleAssignmentRequest, request: Request):
+    actor = await _require_treasurer(request)
+    try:
+        role = normalize_internal_role(body.role)
+        saved = await upsert_internal_role_assignment(
+            request.app.state.db,
+            principal_id=body.principal_id,
+            principal_email=body.principal_email,
+            principal_display_name=body.principal_display_name,
+            role=role,
+            status=body.status,
+            assigned_by=actor.email,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if saved["role"] == "president" and saved["status"] == "active":
+        await save_pay_settings(
+            request.app.state.db,
+            setting={"president_email": saved["principal_email"]},
+            updated_by=actor.email,
+            pay_cfg=request.app.state.cfg.pay_portal,
+        )
+    return saved
+
+
+@router.delete("/pay/api/internal-roles/{assignment_id}")
+async def remove_pay_internal_role(assignment_id: int, request: Request):
+    actor = await _require_treasurer(request)
+    existing = await internal_role_assignment_by_id(request.app.state.db, assignment_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="assignment_id not found")
+    try:
+        deleted = await delete_internal_role_assignment(request.app.state.db, assignment_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if deleted["role"] == "president":
+        settings = await pay_settings(request.app.state.db, pay_cfg=request.app.state.cfg.pay_portal)
+        if normalize_email(settings.get("president_email")) == normalize_email(deleted.get("principal_email")):
+            await save_pay_settings(
+                request.app.state.db,
+                setting={"president_email": ""},
+                updated_by=actor.email,
+                pay_cfg=request.app.state.cfg.pay_portal,
+            )
+    return deleted
+
+
+async def _save_pay_profile_request(
+    body: PayProfileUpsertRequest,
+    request: Request,
+    *,
+    email_override: str | None = None,
+):
+    actor = await _require_treasurer(request)
+    try:
+        return await upsert_pay_profile(
+            request.app.state.db,
+            principal_id=body.principal_id,
+            principal_email=email_override or body.principal_email,
+            principal_display_name=body.principal_display_name,
+            pay_basis=body.pay_basis,
+            base_wage_input_type=body.base_wage_input_type,
+            base_wage_amount=body.base_wage_amount,
+            weekly_basis_hours=body.weekly_basis_hours,
+            commission_month_1_amount=body.commission_month_1_amount,
+            commission_month_2_amount=body.commission_month_2_amount,
+            commission_month_3_amount=body.commission_month_3_amount,
+            status=body.status,
+            notes=body.notes,
+            updated_by=actor.email,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/pay/api/profiles")
+async def create_pay_profile(body: PayProfileUpsertRequest, request: Request):
+    return await _save_pay_profile_request(body, request)
+
+
+@router.put("/pay/api/profiles/{email}")
+async def update_pay_profile(email: str, body: PayProfileUpsertRequest, request: Request):
+    return await _save_pay_profile_request(body, request, email_override=email)
 
 
 @router.post("/pay/api/wage-scales")

@@ -256,6 +256,27 @@ ON officer_profiles(principal_email);
 CREATE INDEX IF NOT EXISTS idx_officer_profiles_principal_id
 ON officer_profiles(principal_id);
 
+CREATE TABLE IF NOT EXISTS internal_role_assignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  principal_id TEXT,
+  principal_email TEXT NOT NULL,
+  principal_display_name TEXT,
+  role TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL,
+  assigned_by TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_internal_role_assignments_email_role
+ON internal_role_assignments(principal_email, role);
+
+CREATE INDEX IF NOT EXISTS idx_internal_role_assignments_principal_id
+ON internal_role_assignments(principal_id);
+
+CREATE INDEX IF NOT EXISTS idx_internal_role_assignments_status
+ON internal_role_assignments(status);
+
 CREATE TABLE IF NOT EXISTS external_steward_users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   email TEXT NOT NULL,
@@ -627,6 +648,37 @@ ON pay_users(email);
 CREATE INDEX IF NOT EXISTS idx_pay_users_status
 ON pay_users(status);
 
+CREATE TABLE IF NOT EXISTS pay_profiles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  principal_id TEXT,
+  principal_email TEXT NOT NULL,
+  principal_display_name TEXT,
+  pay_basis TEXT NOT NULL DEFAULT 'expense_only',
+  base_wage_input_type TEXT NOT NULL DEFAULT 'hourly',
+  base_wage_amount REAL NOT NULL DEFAULT 0,
+  weekly_basis_hours REAL NOT NULL DEFAULT 40,
+  commission_month_1_amount REAL NOT NULL DEFAULT 0,
+  commission_month_2_amount REAL NOT NULL DEFAULT 0,
+  commission_month_3_amount REAL NOT NULL DEFAULT 0,
+  commission_average_monthly REAL NOT NULL DEFAULT 0,
+  commission_hourly_rate REAL NOT NULL DEFAULT 0,
+  calculated_hourly_rate REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active',
+  notes TEXT,
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL,
+  updated_by TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_profiles_email
+ON pay_profiles(principal_email);
+
+CREATE INDEX IF NOT EXISTS idx_pay_profiles_principal_id
+ON pay_profiles(principal_id);
+
+CREATE INDEX IF NOT EXISTS idx_pay_profiles_status
+ON pay_profiles(status);
+
 CREATE TABLE IF NOT EXISTS pay_periods (
   id TEXT PRIMARY KEY,
   period_start TEXT NOT NULL,
@@ -841,3 +893,23 @@ ON pay_events(period_id, ts_utc);
 
 CREATE INDEX IF NOT EXISTS idx_pay_events_packet
 ON pay_events(packet_id, ts_utc);
+
+CREATE TABLE IF NOT EXISTS pay_demo_feedback (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at_utc TEXT NOT NULL,
+  actor_email TEXT NOT NULL,
+  actor_display_name TEXT,
+  actor_role TEXT NOT NULL,
+  demo_step INTEGER NOT NULL DEFAULT 0,
+  demo_cycle_title TEXT,
+  screen TEXT NOT NULL DEFAULT 'demo',
+  category TEXT NOT NULL DEFAULT 'suggestion',
+  comment TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open'
+);
+
+CREATE INDEX IF NOT EXISTS idx_pay_demo_feedback_status_created
+ON pay_demo_feedback(status, created_at_utc);
+
+CREATE INDEX IF NOT EXISTS idx_pay_demo_feedback_actor
+ON pay_demo_feedback(actor_email, created_at_utc);

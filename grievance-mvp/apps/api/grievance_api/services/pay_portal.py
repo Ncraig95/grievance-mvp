@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import csv
 import hashlib
 import html
 import io
 import json
 import os
+import random
 import re
 import socket
 import subprocess
+import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -35,15 +39,65 @@ _METERS_PER_MILE = Decimal("1609.344")
 _COMMISSION_HOUR_DIVISOR = Decimal("160")
 _PAY_FORM_KEY = "pay_portal_packet"
 _IRS_RATE_QUANT = Decimal("0.001")
+_GOOGLE_LEG_CACHE_LOCK = threading.Lock()
+_GOOGLE_LEG_CACHE: dict[tuple[str, str], dict[str, object]] = {}
+_GOOGLE_LEG_PREFETCH_WORKERS = 3
 _DEFAULT_IRS_RATE_SOURCE_URLS = (
     "https://www.irs.gov/tax-professionals/standard-mileage-rates",
     "https://www.irs.gov/newsroom/irs-sets-2026-business-standard-mileage-rate-at-725-cents-per-mile-up-25-cents",
 )
+_COMMON_PLACE_CONFIG_EXTENSIONS = {".json", ".yaml", ".yml", ".csv", ".txt"}
 _RECEIPT_CONTENT_TYPES = {
     "application/pdf": ".pdf",
     "image/jpeg": ".jpg",
     "image/png": ".png",
 }
+_PAY_PROFILE_BASIS_VALUES = {"hourly", "weekly", "commission", "president", "expense_only"}
+_PAY_PROFILE_STATUS_VALUES = {"active", "disabled"}
+_DEFAULT_COMMON_PLACES: tuple[dict[str, str], ...] = (
+    {"label": "Union Hall", "address": "4076 Union Hall Pl, Jacksonville, FL 32205, USA"},
+    {"label": "Cumberland Industrial", "address": "350 Cumberland Industrial Ct, St. Augustine, FL 32095, USA"},
+    {"label": "Phillips Hwy", "address": "11700 Phillips Hwy, Jacksonville, FL 32256, USA"},
+    {"label": "Penman Rd", "address": "98 Penman Rd S, Jacksonville Beach, FL 32250, USA"},
+    {"label": "Ed Ball", "address": "214 N Hogan St, Jacksonville, FL 32202, USA"},
+    {"label": "City Hall COJ", "address": "117 W Duval St, Jacksonville, FL 32202, USA"},
+    {"label": "207", "address": "660 FL-207, St. Augustine, FL 32084, USA"},
+    {"label": "S 8th St", "address": "1910 S 8Th St, Fernandina Beach, FL 32034, USA"},
+    {"label": "3rd St N", "address": "1824 3rd St N, Jacksonville Beach, FL 32250, USA"},
+    {"label": "Atlantic Blvd 7553", "address": "7553 Atlantic Blvd, Jacksonville, FL 32211, USA"},
+    {"label": "Beach Blvd 11317", "address": "11317 Beach Blvd, Jacksonville, FL 32246, USA"},
+    {"label": "N Pearl St", "address": "424 N Pearl St, Jacksonville, FL 32202, USA"},
+    {"label": "Ft Caroline Rd", "address": "6654 Ft Caroline Rd, Jacksonville, FL 32277, USA"},
+    {"label": "Haydon Rd Workcenter", "address": "9209 Haydon Rd, Jacksonville, FL 32218, USA"},
+    {"label": "Cassat Ave", "address": "1844 Cassat Ave, Jacksonville, FL 32210, USA"},
+    {"label": "Edgewood Ave W", "address": "1441 Edgewood Ave W, Jacksonville, FL 32208, USA"},
+    {"label": "Old Middleburg Rd N", "address": "2200 Old Middleburg Rd N, Jacksonville, FL 32210, USA"},
+    {"label": "Normandy Blvd", "address": "6602 Normandy Blvd, Jacksonville, FL 32205, USA"},
+    {"label": "N Main St", "address": "11741 N Main St, Jacksonville, FL 32218, USA"},
+    {"label": "Talbot Ave", "address": "1710 Talbot Ave, Jacksonville, FL 32205, USA"},
+    {"label": "St Augustine Rd", "address": "6234 St Augustine Rd, Jacksonville, FL 32217, USA"},
+    {"label": "Hendricks Ave", "address": "2048 Hendricks Ave, Jacksonville, FL 32207, USA"},
+    {"label": "St Johns Bluff Rd N", "address": "1001 St Johns Bluff Rd N, Jacksonville, FL 32225, USA"},
+    {"label": "Historic Kings Rd S", "address": "9400 Historic Kings Rd S, Jacksonville, FL 32257, USA"},
+    {"label": "Jammes Rd", "address": "5532 Jammes Rd, Jacksonville, FL 32244, USA"},
+    {"label": "Southside Blvd", "address": "9039 Southside Blvd, Jacksonville, FL 32256, USA"},
+    {"label": "Dennis St", "address": "2096 Dennis St, Jacksonville, FL 32204, USA"},
+    {"label": "River City Dr", "address": "4663 River City Dr, Jacksonville, FL 32246, USA"},
+    {"label": "N Main St SOC", "address": "11741 N Main St, Jacksonville, FL 32218, USA"},
+    {"label": "Crosshill Blvd", "address": "9508 Crosshill Blvd, Jacksonville, FL 32222, USA"},
+    {"label": "Nautica Dr", "address": "725 Nautica Dr, Jacksonville, FL 32218, USA"},
+    {"label": "San Jose Blvd", "address": "11113-102 San Jose Blvd, Jacksonville, FL 32223, USA"},
+    {"label": "Atlantic Blvd 9498", "address": "9498 Atlantic Blvd, Jacksonville, FL 32225, USA"},
+    {"label": "Old Saint Augustine Rd", "address": "11498 Old Saint Augustine Rd, Jacksonville, FL 32258, USA"},
+    {"label": "College Dr Workcenter", "address": "74 College Dr, Orange Park, FL 32065, USA"},
+    {"label": "Town Center Blvd", "address": "2000 Town Center Blvd, Orange Park, FL 32003, USA"},
+    {"label": "Reed St", "address": "1929 Reed St, Orange Park, FL 32073, USA"},
+    {"label": "Main St Palatka", "address": "319 Main St, Palatka, FL 32177, USA"},
+    {"label": "A1A N", "address": "637 A1A N, Ponte Vedra Beach, FL 32082, USA"},
+    {"label": "State Rd 312", "address": "256 State Rd 312, St. Augustine, FL 32086, USA"},
+    {"label": "Cordova St", "address": "69 Cordova St, St. Augustine, FL 32084, USA"},
+    {"label": "State Road 16", "address": "4875 State Road 16, St. Augustine, FL 32092, USA"},
+)
 
 
 @dataclass(frozen=True)
@@ -176,9 +230,134 @@ def calculate_commission_compensation(
     )
 
 
+def normalize_pay_basis(value: object) -> str:
+    basis = str(value or "expense_only").strip().lower()
+    if basis not in _PAY_PROFILE_BASIS_VALUES:
+        raise ValueError("pay_basis must be hourly, weekly, commission, president, or expense_only")
+    return basis
+
+
+def normalize_pay_profile_status(value: object) -> str:
+    status = str(value or "active").strip().lower()
+    if status not in _PAY_PROFILE_STATUS_VALUES:
+        raise ValueError("status must be active or disabled")
+    return status
+
+
+def calculate_pay_profile_snapshot(
+    *,
+    pay_basis: object,
+    base_wage_input_type: object,
+    base_wage_amount: object,
+    weekly_basis_hours: object,
+    commission_month_1_amount: object = 0,
+    commission_month_2_amount: object = 0,
+    commission_month_3_amount: object = 0,
+) -> dict[str, Decimal | str]:
+    basis = normalize_pay_basis(pay_basis)
+    weekly_basis = _quantity(weekly_basis_hours)
+    if weekly_basis <= 0:
+        weekly_basis = Decimal("40")
+
+    if basis == "expense_only":
+        return {
+            "pay_basis": basis,
+            "base_wage_input_type": "hourly",
+            "base_wage_amount": Decimal("0.00"),
+            "weekly_basis_hours": weekly_basis,
+            "commission_month_1_amount": Decimal("0.00"),
+            "commission_month_2_amount": Decimal("0.00"),
+            "commission_month_3_amount": Decimal("0.00"),
+            "commission_average_monthly": Decimal("0.00"),
+            "commission_hourly_rate": Decimal("0.00"),
+            "calculated_hourly_rate": Decimal("0.00"),
+        }
+
+    if basis == "hourly":
+        wage_type, wage_amount, hourly_rate = normalize_wage_input(
+            input_type="hourly",
+            amount=base_wage_amount,
+            weekly_basis_hours=weekly_basis,
+        )
+        commission = CommissionCompensationResult(
+            base_wage_input_type=wage_type,
+            base_wage_amount=wage_amount,
+            base_hourly_rate=hourly_rate,
+            commission_month_1_amount=Decimal("0.00"),
+            commission_month_2_amount=Decimal("0.00"),
+            commission_month_3_amount=Decimal("0.00"),
+            commission_average_monthly=Decimal("0.00"),
+            commission_hourly_rate=Decimal("0.00"),
+            calculated_hourly_rate=hourly_rate,
+        )
+    elif basis == "weekly":
+        wage_type, wage_amount, hourly_rate = normalize_wage_input(
+            input_type="weekly",
+            amount=base_wage_amount,
+            weekly_basis_hours=weekly_basis,
+        )
+        commission = CommissionCompensationResult(
+            base_wage_input_type=wage_type,
+            base_wage_amount=wage_amount,
+            base_hourly_rate=hourly_rate,
+            commission_month_1_amount=Decimal("0.00"),
+            commission_month_2_amount=Decimal("0.00"),
+            commission_month_3_amount=Decimal("0.00"),
+            commission_average_monthly=Decimal("0.00"),
+            commission_hourly_rate=Decimal("0.00"),
+            calculated_hourly_rate=hourly_rate,
+        )
+    elif basis == "president":
+        commission = calculate_commission_compensation(
+            base_wage_input_type=base_wage_input_type,
+            base_wage_amount=base_wage_amount,
+            weekly_basis_hours=weekly_basis,
+            commission_month_1_amount=0,
+            commission_month_2_amount=0,
+            commission_month_3_amount=0,
+        )
+        commission = CommissionCompensationResult(
+            base_wage_input_type=commission.base_wage_input_type,
+            base_wage_amount=commission.base_wage_amount,
+            base_hourly_rate=commission.base_hourly_rate,
+            commission_month_1_amount=Decimal("0.00"),
+            commission_month_2_amount=Decimal("0.00"),
+            commission_month_3_amount=Decimal("0.00"),
+            commission_average_monthly=Decimal("0.00"),
+            commission_hourly_rate=Decimal("0.00"),
+            calculated_hourly_rate=commission.base_hourly_rate,
+        )
+    else:
+        commission = calculate_commission_compensation(
+            base_wage_input_type=base_wage_input_type,
+            base_wage_amount=base_wage_amount,
+            weekly_basis_hours=weekly_basis,
+            commission_month_1_amount=commission_month_1_amount,
+            commission_month_2_amount=commission_month_2_amount,
+            commission_month_3_amount=commission_month_3_amount,
+        )
+
+    return {
+        "pay_basis": basis,
+        "base_wage_input_type": commission.base_wage_input_type,
+        "base_wage_amount": commission.base_wage_amount,
+        "weekly_basis_hours": weekly_basis,
+        "commission_month_1_amount": commission.commission_month_1_amount,
+        "commission_month_2_amount": commission.commission_month_2_amount,
+        "commission_month_3_amount": commission.commission_month_3_amount,
+        "commission_average_monthly": commission.commission_average_monthly,
+        "commission_hourly_rate": commission.commission_hourly_rate,
+        "calculated_hourly_rate": commission.calculated_hourly_rate,
+    }
+
+
 def _currency_text(value: object) -> str:
     amount = _money(value)
     return "" if amount == 0 else f"{amount:.2f}"
+
+
+def _currency_total_text(value: object) -> str:
+    return f"$ {_money(value):.2f}"
 
 
 def _decimal_text(value: object, *, places: int = 2) -> str:
@@ -367,12 +546,279 @@ async def get_pay_period(db: Db, period_id: str) -> dict[str, object] | None:
     }
 
 
+def _clean_place_text(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def _normalize_common_place_rows(value: object) -> list[dict[str, str]]:
+    if isinstance(value, dict):
+        for key in ("common_places", "places", "addresses", "locations"):
+            nested = value.get(key)
+            if nested is not None:
+                return _normalize_common_place_rows(nested)
+        value = [{"label": key, "address": address} for key, address in value.items()]
+
+    if not isinstance(value, list | tuple):
+        return []
+
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in value:
+        label = ""
+        address = ""
+        if isinstance(item, dict):
+            lowered = {str(key or "").strip().lower(): raw_value for key, raw_value in item.items()}
+            label = _clean_place_text(
+                lowered.get("label")
+                or lowered.get("name")
+                or lowered.get("place")
+                or lowered.get("title")
+                or lowered.get("site")
+            )
+            address = _clean_place_text(
+                lowered.get("address")
+                or lowered.get("full_address")
+                or lowered.get("location")
+                or lowered.get("value")
+            )
+        else:
+            address = _clean_place_text(item)
+            label = address
+        if address and not label:
+            label = address
+        if not label or not address:
+            continue
+        key = (label.lower(), address.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({"label": label, "address": address})
+    return rows
+
+
+def _parse_common_places_csv(text: str) -> list[dict[str, str]]:
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return []
+
+    first_cells = [cell.strip().lower() for cell in next(csv.reader([lines[0]]))]
+    has_header = any(cell in {"label", "name", "place", "title", "address", "location"} for cell in first_cells)
+    rows: list[dict[str, str]] = []
+    if has_header:
+        reader = csv.DictReader(io.StringIO(text))
+        for row in reader:
+            rows.append(dict(row))
+        return _normalize_common_place_rows(rows)
+
+    for row in csv.reader(io.StringIO(text)):
+        cleaned = [_clean_place_text(cell) for cell in row if _clean_place_text(cell)]
+        if not cleaned:
+            continue
+        if len(cleaned) == 1:
+            rows.append({"label": cleaned[0], "address": cleaned[0]})
+        else:
+            rows.append({"label": cleaned[0], "address": ", ".join(cleaned[1:])})
+    return _normalize_common_place_rows(rows)
+
+
+def _parse_common_places_text(text: str) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for raw_line in text.splitlines():
+        line = _clean_place_text(raw_line)
+        if not line or line.startswith("#"):
+            continue
+        label = ""
+        address = line
+        for sep in ("\t", "|", "="):
+            if sep in line:
+                label, address = [_clean_place_text(part) for part in line.split(sep, 1)]
+                break
+        if not label:
+            label = address.split(",", 1)[0].strip() or address
+        rows.append({"label": label, "address": address})
+    return _normalize_common_place_rows(rows)
+
+
+def parse_common_places_config(*, content: bytes | str, filename: str = "") -> list[dict[str, str]]:
+    if isinstance(content, bytes):
+        text = content.decode("utf-8-sig", errors="replace")
+    else:
+        text = str(content or "").lstrip("\ufeff")
+    if not text.strip():
+        return []
+
+    suffix = Path(filename or "").suffix.lower()
+    try:
+        if suffix == ".json":
+            return _normalize_common_place_rows(json.loads(text))
+        if suffix in {".yaml", ".yml"}:
+            import yaml
+
+            return _normalize_common_place_rows(yaml.safe_load(text))
+        if suffix == ".csv":
+            return _parse_common_places_csv(text)
+        if suffix == ".txt":
+            return _parse_common_places_text(text)
+    except Exception:
+        return []
+
+    for parser in (
+        lambda value: _normalize_common_place_rows(json.loads(value)),
+        lambda value: _parse_common_places_csv(value),
+        _parse_common_places_text,
+    ):
+        try:
+            rows = parser(text)
+        except Exception:
+            rows = []
+        if rows:
+            return rows
+    return []
+
+
+def merge_common_places(*sources: object) -> list[dict[str, str]]:
+    merged: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for source in sources:
+        for place in _normalize_common_place_rows(source):
+            key = (place["label"].lower(), place["address"].lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(place)
+    return merged
+
+
+def common_places_cache_path(*, data_root: str) -> Path:
+    return Path(data_root) / "pay" / "common_places.json"
+
+
+def load_common_places_cache(*, data_root: str) -> list[dict[str, str]]:
+    path = common_places_cache_path(data_root=data_root)
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(payload, dict):
+        return _normalize_common_place_rows(payload.get("common_places"))
+    return _normalize_common_place_rows(payload)
+
+
+def write_common_places_cache(*, data_root: str, places: object, source: str = "sharepoint") -> Path:
+    normalized = merge_common_places(places)
+    path = common_places_cache_path(data_root=data_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "source": source,
+        "updated_at_utc": utcnow(),
+        "common_places": normalized,
+    }
+    tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(path)
+    return path
+
+
+def _sharepoint_place_config_targets(*, graph_cfg: Any, pay_cfg: Any) -> list[tuple[str, str]]:
+    raw_folder_path = str(getattr(pay_cfg, "common_places_sharepoint_folder", "") or "").strip()
+    if not raw_folder_path:
+        return []
+
+    default_library = str(getattr(graph_cfg, "document_library", "Documents") or "Documents").strip()
+    configured_library = str(getattr(pay_cfg, "common_places_sharepoint_library", "") or "").strip()
+    path_parts = [part.strip() for part in raw_folder_path.replace("\\", "/").split("/") if part.strip()]
+
+    inferred_library = ""
+    inferred_folder = ""
+    for index, part in enumerate(path_parts):
+        lowered = part.lower()
+        if lowered == "documents" or lowered.endswith(" - documents"):
+            inferred_library = part
+            inferred_folder = "/".join(path_parts[index + 1 :])
+            break
+
+    if not inferred_folder:
+        inferred_folder = "/".join(path_parts)
+
+    libraries = [
+        configured_library,
+        inferred_library,
+        default_library,
+        "Officer Eboard committee - Documents",
+    ]
+    targets: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for library in libraries:
+        clean_library = library.strip()
+        clean_folder = inferred_folder.strip("/")
+        if not clean_library or not clean_folder:
+            continue
+        key = (clean_library.lower(), clean_folder.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append((clean_library, clean_folder))
+    return targets
+
+
+def load_sharepoint_common_places(
+    *,
+    graph: Any,
+    graph_cfg: Any,
+    pay_cfg: Any,
+) -> list[dict[str, str]]:
+    targets = _sharepoint_place_config_targets(graph_cfg=graph_cfg, pay_cfg=pay_cfg)
+    if not targets or graph is None:
+        return []
+    list_files = getattr(graph, "list_files_in_folder_path", None)
+    download = getattr(graph, "download_item_bytes", None)
+    if not callable(list_files) or not callable(download):
+        return []
+
+    rows: list[dict[str, str]] = []
+    last_error: Exception | None = None
+    for library, folder_path in targets:
+        try:
+            files = list_files(
+                site_hostname=str(getattr(graph_cfg, "site_hostname", "") or ""),
+                site_path=str(getattr(graph_cfg, "site_path", "") or ""),
+                library=library,
+                folder_path=folder_path,
+                recursive=True,
+            )
+        except Exception as exc:
+            last_error = exc
+            continue
+        for item in files:
+            name = str(getattr(item, "name", "") or "").strip()
+            if Path(name).suffix.lower() not in _COMMON_PLACE_CONFIG_EXTENSIONS:
+                continue
+            data = download(
+                drive_id=str(getattr(item, "drive_id", "") or ""),
+                item_id=str(getattr(item, "item_id", "") or ""),
+            )
+            rows.extend(parse_common_places_config(content=data, filename=name))
+        merged = merge_common_places(rows)
+        if merged:
+            return merged
+    if last_error is not None:
+        raise last_error
+    return []
+
+
 async def pay_settings(db: Db, *, pay_cfg: Any | None = None) -> dict[str, object]:
+    default_common_places = merge_common_places(
+        getattr(pay_cfg, "common_places", ()) or (),
+        _DEFAULT_COMMON_PLACES,
+    )
     defaults: dict[str, object] = {
         "treasurer_emails": list(getattr(pay_cfg, "treasurer_emails", ()) or ()),
         "president_email": str(getattr(pay_cfg, "president_email", "") or ""),
         "irs_rates": dict(getattr(pay_cfg, "irs_rates", {}) or {}),
-        "common_places": list(getattr(pay_cfg, "common_places", ()) or ()),
+        "common_places": default_common_places,
+        "common_places_managed": False,
     }
     row = await db.app_setting("pay_portal")
     if not row:
@@ -385,7 +831,13 @@ async def pay_settings(db: Db, *, pay_cfg: Any | None = None) -> dict[str, objec
         return defaults
     merged = dict(defaults)
     for key, value in parsed.items():
-        if key in {"irs_rates", "common_places"} and not value:
+        if key == "irs_rates" and not value:
+            continue
+        if key == "common_places":
+            if parsed.get("common_places_managed"):
+                merged["common_places"] = merge_common_places(value)
+            else:
+                merged["common_places"] = merge_common_places(value, default_common_places)
             continue
         merged[key] = value
     return merged
@@ -399,9 +851,519 @@ async def save_pay_settings(
     pay_cfg: Any | None = None,
 ) -> dict[str, object]:
     normalized = dict(await pay_settings(db, pay_cfg=pay_cfg))
+    if "common_places" in setting:
+        setting = {
+            **setting,
+            "common_places": merge_common_places(setting.get("common_places")),
+            "common_places_managed": True,
+        }
     normalized.update(setting)
     await db.upsert_app_setting(setting_key="pay_portal", setting=normalized, updated_by=updated_by)
     return normalized
+
+
+def _default_pay_demo_settings() -> dict[str, object]:
+    return {
+        "demo_mode_enabled": True,
+        "demo_cycle_title": "Training Demo Cycle",
+        "demo_cycle_notes": "",
+    }
+
+
+async def pay_demo_settings(db: Db) -> dict[str, object]:
+    defaults = _default_pay_demo_settings()
+    row = await db.app_setting("pay_demo")
+    if not row:
+        return defaults
+    try:
+        parsed = json.loads(row[0])
+    except Exception:
+        parsed = {}
+    if not isinstance(parsed, dict):
+        return defaults
+    merged = dict(defaults)
+    if "demo_mode_enabled" in parsed:
+        value = parsed.get("demo_mode_enabled")
+        merged["demo_mode_enabled"] = not (value is False or str(value).lower() == "false")
+    if "demo_cycle_title" in parsed:
+        merged["demo_cycle_title"] = str(parsed.get("demo_cycle_title") or "").strip() or "Training Demo Cycle"
+    if "demo_cycle_notes" in parsed:
+        merged["demo_cycle_notes"] = str(parsed.get("demo_cycle_notes") or "").strip()
+    return merged
+
+
+async def save_pay_demo_settings(
+    db: Db,
+    *,
+    setting: dict[str, object],
+    updated_by: str | None,
+) -> dict[str, object]:
+    normalized = dict(await pay_demo_settings(db))
+    if "demo_mode_enabled" in setting:
+        value = setting.get("demo_mode_enabled")
+        normalized["demo_mode_enabled"] = not (value is False or str(value).lower() == "false")
+    if "demo_cycle_title" in setting:
+        normalized["demo_cycle_title"] = str(setting.get("demo_cycle_title") or "").strip() or "Training Demo Cycle"
+    if "demo_cycle_notes" in setting:
+        normalized["demo_cycle_notes"] = str(setting.get("demo_cycle_notes") or "").strip()
+    await db.upsert_app_setting(setting_key="pay_demo", setting=normalized, updated_by=updated_by)
+    return normalized
+
+
+def pay_demo_artifact_dir(*, data_root: str, actor: PayActor) -> Path:
+    label = safe_filename(actor.email or actor.display_name, fallback="demo-user")
+    return Path(data_root) / "pay" / "demo" / label
+
+
+def _demo_artifact_metadata(path: Path) -> dict[str, object]:
+    stat = path.stat()
+    return {
+        "filename": path.name,
+        "size_bytes": int(stat.st_size),
+        "updated_at_utc": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+    }
+
+
+def list_pay_demo_artifacts(*, data_root: str, actor: PayActor) -> list[dict[str, object]]:
+    root = pay_demo_artifact_dir(data_root=data_root, actor=actor)
+    if not root.exists():
+        return []
+    rows = [
+        _demo_artifact_metadata(path)
+        for path in root.iterdir()
+        if path.is_file() and path.suffix.lower() == ".pdf"
+    ]
+    rows.sort(key=lambda row: str(row["filename"]))
+    return rows
+
+
+def pay_demo_artifact_path(*, data_root: str, actor: PayActor, filename: str) -> Path:
+    safe_name = safe_filename(filename, fallback="")
+    if not safe_name or safe_name != filename:
+        raise ValueError("invalid demo artifact filename")
+    root = pay_demo_artifact_dir(data_root=data_root, actor=actor)
+    path = root / safe_name
+    if path.suffix.lower() != ".pdf" or not path.exists() or not path.is_file() or path.parent != root:
+        raise ValueError("demo artifact not found")
+    return path
+
+
+_DEMO_PACKET_PEOPLE: tuple[dict[str, str], ...] = (
+    {
+        "display_name": "Demo President",
+        "email": "demo.president@cwa3106.local",
+        "address": "117 W Duval St, Jacksonville, FL 32202, USA",
+        "role": "president",
+    },
+    {
+        "display_name": "Demo Treasurer",
+        "email": "demo.treasurer@cwa3106.local",
+        "address": "4076 Union Hall Pl, Jacksonville, FL 32205, USA",
+        "role": "treasurer",
+    },
+    {
+        "display_name": "Demo Steward",
+        "email": "demo.steward@cwa3106.local",
+        "address": "11700 Phillips Hwy, Jacksonville, FL 32256, USA",
+        "role": "steward",
+    },
+    {
+        "display_name": "Demo Area Rep",
+        "email": "demo.area.rep@cwa3106.local",
+        "address": "98 Penman Rd S, Jacksonville Beach, FL 32250, USA",
+        "role": "officer",
+    },
+    {
+        "display_name": "Demo Chief Steward",
+        "email": "demo.chief.steward@cwa3106.local",
+        "address": "214 N Hogan St, Jacksonville, FL 32202, USA",
+        "role": "steward",
+    },
+    {
+        "display_name": "Demo Mobilization Lead",
+        "email": "demo.mobilization@cwa3106.local",
+        "address": "9209 Haydon Rd, Jacksonville, FL 32218, USA",
+        "role": "officer",
+    },
+    {
+        "display_name": "Demo Unit Steward",
+        "email": "demo.unit.steward@cwa3106.local",
+        "address": "6234 St Augustine Rd, Jacksonville, FL 32217, USA",
+        "role": "steward",
+    },
+    {
+        "display_name": "Demo Executive Board",
+        "email": "demo.eboard@cwa3106.local",
+        "address": "2048 Hendricks Ave, Jacksonville, FL 32207, USA",
+        "role": "officer",
+    },
+    {
+        "display_name": "Demo Safety Rep",
+        "email": "demo.safety@cwa3106.local",
+        "address": "1001 St Johns Bluff Rd N, Jacksonville, FL 32225, USA",
+        "role": "steward",
+    },
+)
+_DEMO_NARRATIVE_PHRASES: tuple[str, ...] = (
+    "met with member about payroll correction and documented next steps",
+    "reviewed route mileage, receipts, and pay profile rate for officer practice",
+    "prepared grievance packet notes for treasurer review",
+    "confirmed president differential example and approval path",
+    "reconciled mileage attachment with daily expense voucher totals",
+    "recorded officer training feedback for the demo cycle",
+    "checked supporting documents before the demo lock step",
+)
+_DEMO_MILEAGE_ROUTES: tuple[tuple[str, ...], ...] = (
+    (
+        "4076 Union Hall Pl, Jacksonville, FL 32205, USA",
+        "11700 Phillips Hwy, Jacksonville, FL 32256, USA",
+        "4076 Union Hall Pl, Jacksonville, FL 32205, USA",
+    ),
+    (
+        "4076 Union Hall Pl, Jacksonville, FL 32205, USA",
+        "214 N Hogan St, Jacksonville, FL 32202, USA",
+        "4076 Union Hall Pl, Jacksonville, FL 32205, USA",
+    ),
+    (
+        "4076 Union Hall Pl, Jacksonville, FL 32205, USA",
+        "98 Penman Rd S, Jacksonville Beach, FL 32250, USA",
+        "4076 Union Hall Pl, Jacksonville, FL 32205, USA",
+    ),
+    (
+        "4076 Union Hall Pl, Jacksonville, FL 32205, USA",
+        "9209 Haydon Rd, Jacksonville, FL 32218, USA",
+        "4076 Union Hall Pl, Jacksonville, FL 32205, USA",
+    ),
+    (
+        "4076 Union Hall Pl, Jacksonville, FL 32205, USA",
+        "6234 St Augustine Rd, Jacksonville, FL 32217, USA",
+        "4076 Union Hall Pl, Jacksonville, FL 32205, USA",
+    ),
+    (
+        "4076 Union Hall Pl, Jacksonville, FL 32205, USA",
+        "1001 St Johns Bluff Rd N, Jacksonville, FL 32225, USA",
+        "4076 Union Hall Pl, Jacksonville, FL 32205, USA",
+    ),
+)
+
+
+def _demo_people_for_packet(actor: PayActor) -> list[dict[str, str]]:
+    actor_name = str(actor.display_name or actor.email or "").strip() or "Demo Officer"
+    actor_email = normalize_email(actor.email) or "demo.officer@cwa3106.local"
+    people = [
+        {
+            "display_name": actor_name,
+            "email": actor_email,
+            "address": "4076 Union Hall Pl, Jacksonville, FL 32205, USA",
+            "role": "officer",
+        }
+    ]
+    people.extend(dict(row) for row in _DEMO_PACKET_PEOPLE)
+    return people
+
+
+def _demo_day_offsets(rng: random.Random, *, demo_step: int, person_index: int) -> list[int]:
+    if demo_step < 1:
+        return []
+    week_one = list(range(1, 6))
+    week_two = list(range(8, 13))
+    if person_index < 3:
+        return sorted(rng.sample(week_one, 4) + rng.sample(week_two, 4))
+    return sorted([rng.choice(week_one), rng.choice(week_two)])
+
+
+def _demo_hourly_rate(rng: random.Random, *, person_index: int) -> Decimal:
+    base_cents = rng.randrange(3200, 5900, 25)
+    if person_index == 1:
+        base_cents = max(base_cents, 5000)
+    return (Decimal(base_cents) / Decimal("100")).quantize(_CURRENCY, rounding=ROUND_HALF_UP)
+
+
+def _demo_entries_for_packet(
+    *,
+    period_start: str,
+    demo_step: int,
+    person: dict[str, str],
+    day_offsets: list[int],
+    hourly_rate: Decimal,
+    mileage_miles: Decimal,
+    mileage_rate: Decimal,
+    mileage_amount: Decimal,
+    rng: random.Random,
+) -> list[dict[str, object]]:
+    try:
+        start = date.fromisoformat(str(period_start))
+    except Exception:
+        start = date.today()
+    if demo_step < 1:
+        return []
+    rows: list[dict[str, object]] = []
+    base_miles = _money(mileage_miles)
+    if base_miles <= 0:
+        base_miles = Decimal("24.00")
+    for entry_index, day_offset in enumerate(day_offsets, start=1):
+        has_receipt = demo_step >= 3 and entry_index == len(day_offsets)
+        hours = Decimal(str(rng.choice(["2.00", "2.50", "3.00", "4.00", "6.00", "8.00"])))
+        misc_amount = Decimal(str(rng.choice(["12.50", "18.75", "24.00", "31.25"]))) if has_receipt else Decimal("0")
+        meals_amount = Decimal(str(rng.choice(["15.00", "22.50", "28.00"]))) if has_receipt and entry_index % 2 == 0 else Decimal("0")
+        president_diff = Decimal("35.00") if person.get("role") == "president" and demo_step >= 3 else Decimal("0")
+        note = rng.choice(_DEMO_NARRATIVE_PHRASES)
+        if entry_index == 1:
+            note = "reviewed route mileage, receipts, and pay profile rate for officer practice"
+        miles_multiplier = Decimal(str(rng.choice(["0.70", "0.85", "1.00", "1.15", "1.30"])))
+        entry_miles = (base_miles * miles_multiplier).quantize(_MILES, rounding=ROUND_HALF_UP)
+        entry_mileage_amount = (entry_miles * mileage_rate).quantize(_CURRENCY, rounding=ROUND_HALF_UP)
+        rows.append(
+            {
+                "id": f"demo-entry-{safe_filename(person.get('email'), fallback='person')}-{entry_index}",
+                "user_email": person.get("email") or "demo.officer@cwa3106.local",
+                "entry_date": (start + timedelta(days=day_offset)).isoformat(),
+                "display_name": person.get("display_name") or "Demo Officer",
+                "address": person.get("address") or "4076 Union Hall Pl, Jacksonville, FL 32205, USA",
+                "local_number": "3106",
+                "hours": float(hours),
+                "hourly_rate": float(hourly_rate),
+                "lost_wage_hourly_rate": float(hourly_rate),
+                "mileage_miles": float(entry_miles),
+                "mileage_rate": float(mileage_rate),
+                "mileage_amount": float(entry_mileage_amount),
+                "rentals_amount": 0,
+                "meals_amount": float(meals_amount),
+                "hotel_amount": 0,
+                "miscellaneous_amount": float(misc_amount),
+                "president_diff_amount": float(president_diff),
+                "notes": f"DEMO TRAINING - {note}.",
+            }
+        )
+    return rows
+
+
+def watermark_pdf(input_path: str, output_path: str | None = None, *, text: str = "DEMO") -> None:
+    try:
+        from pypdf import PdfReader, PdfWriter  # type: ignore
+        from reportlab.pdfgen import canvas  # type: ignore
+    except ImportError as exc:  # pragma: no cover - runtime packaging guard
+        raise RuntimeError("pypdf and reportlab are required for PDF watermarking") from exc
+
+    source = Path(input_path)
+    target = Path(output_path or input_path)
+    tmp_target = target.with_name(f"{target.stem}.watermarking{target.suffix}")
+    reader = PdfReader(str(source))
+    writer = PdfWriter()
+    for page in reader.pages:
+        width = float(page.mediabox.width)
+        height = float(page.mediabox.height)
+        overlay = io.BytesIO()
+        c = canvas.Canvas(overlay, pagesize=(width, height))
+        c.saveState()
+        try:
+            c.setFillAlpha(0.16)
+        except Exception:
+            pass
+        c.setFillColorRGB(0.72, 0.72, 0.72)
+        c.translate(width / 2, height / 2)
+        c.rotate(35)
+        c.setFont("Helvetica-Bold", max(72, min(width, height) / 4))
+        c.drawCentredString(0, 0, text)
+        c.restoreState()
+        c.saveState()
+        try:
+            c.setFillAlpha(0.45)
+        except Exception:
+            pass
+        c.setFillColorRGB(0.5, 0.5, 0.5)
+        c.setFont("Helvetica-Bold", 10)
+        c.drawCentredString(width / 2, 24, "DEMO TRAINING PACKET - NOT FOR PAYROLL")
+        c.restoreState()
+        c.save()
+        overlay.seek(0)
+        watermark_page = PdfReader(overlay).pages[0]
+        page.merge_page(watermark_page)
+        writer.add_page(page)
+    with open(tmp_target, "wb") as out:
+        writer.write(out)
+    tmp_target.replace(target)
+
+
+def _demo_mileage_locations(person_index: int, rng: random.Random) -> list[str]:
+    route_index = (person_index + rng.randrange(len(_DEMO_MILEAGE_ROUTES))) % len(_DEMO_MILEAGE_ROUTES)
+    return list(_DEMO_MILEAGE_ROUTES[route_index])
+
+
+def _emit_progress(progress_callback: Any, **payload: object) -> None:
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(dict(payload))
+    except Exception:
+        return
+
+
+def generate_pay_demo_artifacts(
+    *,
+    cfg: Any,
+    settings: dict[str, object],
+    actor: PayActor,
+    demo_step: int,
+    demo_cycle_title: str,
+    period_start: str,
+    period_end: str,
+    docx_to_pdf_func: Any,
+    graph: Any = None,
+    progress_callback: Any = None,
+) -> list[dict[str, object]]:
+    try:
+        step = max(0, min(int(demo_step), 20))
+    except Exception:
+        step = 0
+    title = str(demo_cycle_title or "").strip() or "Training Demo Cycle"
+    root = pay_demo_artifact_dir(data_root=cfg.data_root, actor=actor)
+    root.mkdir(parents=True, exist_ok=True)
+    for old_path in root.glob("demo-*"):
+        if old_path.is_file() and old_path.suffix.lower() in {".html", ".txt", ".pdf", ".docx"}:
+            old_path.unlink()
+    work_dir = root / "work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    for old_path in work_dir.glob("demo-*"):
+        if old_path.is_file():
+            old_path.unlink()
+
+    template_path = Path(str(cfg.pay_portal.voucher_template_path or ""))
+    if not template_path.exists():
+        raise RuntimeError("pay voucher template is not configured or does not exist")
+
+    try:
+        period_start_date = date.fromisoformat(str(period_start))
+    except Exception:
+        period_start_date = date.today()
+    packet_step = max(step, 4)
+    seed = f"{title}|{period_start}|{period_end}|{actor.email}|{packet_step}"
+    people = _demo_people_for_packet(actor)
+    packet_pdf_paths: list[str] = []
+    plans: list[dict[str, object]] = []
+    for person_index, person in enumerate(people, start=1):
+        person_rng = random.Random(f"{seed}|{person_index}|{person.get('email', '')}")
+        day_offsets = _demo_day_offsets(person_rng, demo_step=packet_step, person_index=person_index - 1)
+        hourly_rate = _demo_hourly_rate(person_rng, person_index=person_index - 1)
+        mileage_day_offset = day_offsets[0] if day_offsets else 1
+        demo_day = (period_start_date + timedelta(days=mileage_day_offset)).isoformat()
+        rate, rate_display = mileage_rate_from_settings(settings, int(demo_day[:4]))
+        locations = _demo_mileage_locations(person_index - 1, person_rng)
+        plans.append(
+            {
+                "person_index": person_index,
+                "person": person,
+                "rng": person_rng,
+                "day_offsets": day_offsets,
+                "hourly_rate": hourly_rate,
+                "demo_day": demo_day,
+                "rate": rate,
+                "rate_display": rate_display,
+                "locations": locations,
+            }
+        )
+
+    _emit_progress(
+        progress_callback,
+        stage="mileage",
+        current=0,
+        total=len(plans),
+        message=f"Prefetching mileage routes for {len(plans)} people",
+    )
+    _prefetch_google_legs(
+        api_key=cfg.pay_portal.google_maps_api_key,
+        routes=[list(plan["locations"]) for plan in plans],
+        progress_callback=progress_callback,
+    )
+
+    for plan in plans:
+        person_index = int(plan["person_index"])
+        person = plan["person"]  # type: ignore[assignment]
+        person_rng = plan["rng"]  # type: ignore[assignment]
+        day_offsets = plan["day_offsets"]  # type: ignore[assignment]
+        hourly_rate = plan["hourly_rate"]  # type: ignore[assignment]
+        demo_day = str(plan["demo_day"])
+        rate = plan["rate"]  # type: ignore[assignment]
+        rate_display = str(plan["rate_display"])
+        locations = plan["locations"]  # type: ignore[assignment]
+        _emit_progress(
+            progress_callback,
+            stage="mileage",
+            current=person_index,
+            total=len(plans),
+            message=f"Building mileage PDF {person_index}/{len(plans)}",
+        )
+        mileage_pdf_bytes, reimbursement, total_miles = build_mileage_pdf(
+            name=person.get("display_name") or "Demo Officer",
+            local_number="3106",
+            date_str=demo_day,
+            description=f"DEMO TRAINING - {title} mileage route for {person.get('display_name') or 'Demo Officer'}",
+            rate=rate,
+            rate_display=rate_display,
+            locations=locations,
+            google_maps_api_key=cfg.pay_portal.google_maps_api_key,
+        )
+        label = safe_filename(person.get("display_name") or person.get("email"), fallback=f"person-{person_index}")
+        mileage_pdf_path = work_dir / f"demo-mileage-{person_index:02d}-{label}.pdf"
+        mileage_pdf_path.write_bytes(mileage_pdf_bytes)
+
+        entries = _demo_entries_for_packet(
+            period_start=period_start,
+            demo_step=packet_step,
+            person=person,
+            day_offsets=day_offsets,
+            hourly_rate=hourly_rate,
+            mileage_miles=total_miles,
+            mileage_rate=rate,
+            mileage_amount=reimbursement,
+            rng=person_rng,
+        )
+
+        voucher_docx_path = work_dir / f"demo-voucher-{person_index:02d}-{label}.docx"
+        _emit_progress(
+            progress_callback,
+            stage="voucher",
+            current=person_index,
+            total=len(plans),
+            message=f"Filling voucher {person_index}/{len(plans)}",
+        )
+        fill_pay_voucher_docx(
+            template_path=str(template_path),
+            output_path=str(voucher_docx_path),
+            period_start=period_start,
+            period_end=period_end,
+            entries=entries,
+            include_signature_placeholders=False,
+        )
+        _emit_progress(
+            progress_callback,
+            stage="convert",
+            current=person_index,
+            total=len(plans),
+            message=f"Converting voucher {person_index}/{len(plans)} to PDF",
+        )
+        voucher_pdf_path = Path(
+            docx_to_pdf_func(
+                str(voucher_docx_path),
+                str(work_dir),
+                int(getattr(cfg, "libreoffice_timeout_seconds", 45) or 45),
+                engine=getattr(cfg, "docx_pdf_engine", "libreoffice"),
+                graph_uploader=graph,
+                graph_site_hostname=getattr(cfg.graph, "site_hostname", ""),
+                graph_site_path=getattr(cfg.graph, "site_path", ""),
+                graph_library=getattr(cfg.graph, "document_library", ""),
+                graph_temp_folder_path=getattr(cfg, "docx_pdf_graph_temp_folder", ""),
+            )
+        )
+        packet_pdf_paths.extend([str(voucher_pdf_path), str(mileage_pdf_path)])
+
+    packet_path = root / "demo-payroll-packet.pdf"
+    _emit_progress(progress_callback, stage="merge", current=0, total=1, message="Merging demo packet")
+    merge_pdfs(packet_pdf_paths, str(packet_path))
+    _emit_progress(progress_callback, stage="watermark", current=0, total=1, message="Watermarking demo packet")
+    watermark_pdf(str(packet_path), text="DEMO")
+    _emit_progress(progress_callback, stage="complete", current=1, total=1, message="Demo packet ready")
+    return list_pay_demo_artifacts(data_root=cfg.data_root, actor=actor)
 
 
 def _active_irs_rate_matches(settings: dict[str, object], *, year: str, rate_per_mile: Decimal) -> bool:
@@ -634,6 +1596,14 @@ async def treasurer_recipients(db: Db, *, fallback: tuple[str, ...], pay_cfg: An
         recipients.extend(v.strip() for v in configured.split(",") if v.strip())
     rows = await db.fetchall("SELECT email FROM pay_users WHERE status='active' AND role='treasurer'")
     recipients.extend(str(row[0] or "").strip() for row in rows if str(row[0] or "").strip())
+    internal_rows = await db.fetchall(
+        """
+        SELECT principal_email
+        FROM internal_role_assignments
+        WHERE status='active' AND role='treasurer'
+        """
+    )
+    recipients.extend(str(row[0] or "").strip() for row in internal_rows if str(row[0] or "").strip())
     if not recipients:
         recipients.extend(fallback)
     out: list[str] = []
@@ -716,6 +1686,275 @@ async def list_pay_users(db: Db) -> list[dict[str, object]]:
         }
         for row in rows
     ]
+
+
+_DEMO_FEEDBACK_CATEGORIES = {"suggestion", "confusing", "missing", "bug", "training"}
+
+
+def normalize_demo_feedback_category(value: object) -> str:
+    category = str(value or "suggestion").strip().lower()
+    return category if category in _DEMO_FEEDBACK_CATEGORIES else "suggestion"
+
+
+def _demo_feedback_from_row(row: Any) -> dict[str, object]:
+    return {
+        "id": int(row[0]),
+        "created_at_utc": row[1],
+        "actor_email": row[2],
+        "actor_display_name": row[3],
+        "actor_role": row[4],
+        "demo_step": int(row[5] or 0),
+        "demo_cycle_title": row[6],
+        "screen": row[7],
+        "category": row[8],
+        "comment": row[9],
+        "status": row[10],
+    }
+
+
+async def list_pay_demo_feedback(
+    db: Db,
+    *,
+    status: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, object]]:
+    bounded_limit = max(1, min(int(limit or 100), 500))
+    params: list[object] = []
+    where = ""
+    clean_status = str(status or "").strip().lower()
+    if clean_status:
+        where = "WHERE status=?"
+        params.append(clean_status)
+    params.append(bounded_limit)
+    rows = await db.fetchall(
+        f"""SELECT id, created_at_utc, actor_email, actor_display_name, actor_role,
+                  demo_step, demo_cycle_title, screen, category, comment, status
+            FROM pay_demo_feedback
+            {where}
+            ORDER BY id DESC
+            LIMIT ?""",
+        tuple(params),
+    )
+    return [_demo_feedback_from_row(row) for row in rows]
+
+
+async def create_pay_demo_feedback(
+    db: Db,
+    *,
+    actor: PayActor,
+    screen: str | None,
+    category: str | None,
+    comment: str | None,
+    demo_step: int | None = None,
+    demo_cycle_title: str | None = None,
+) -> dict[str, object]:
+    text = str(comment or "").strip()
+    if not text:
+        raise ValueError("suggestion is required")
+    if len(text) > 4000:
+        raise ValueError("suggestion must be 4000 characters or less")
+    clean_screen = re.sub(r"[^a-z0-9_-]+", "_", str(screen or "demo").strip().lower()).strip("_") or "demo"
+    clean_screen = clean_screen[:80]
+    clean_category = normalize_demo_feedback_category(category)
+    try:
+        clean_demo_step = max(0, min(int(demo_step or 0), 20))
+    except Exception:
+        clean_demo_step = 0
+    clean_cycle_title = str(demo_cycle_title or "").strip()[:200] or "Training Demo Cycle"
+    created_at = utcnow()
+    feedback_id = await db.insert(
+        """INSERT INTO pay_demo_feedback(
+             created_at_utc, actor_email, actor_display_name, actor_role,
+             demo_step, demo_cycle_title, screen, category, comment, status
+           )
+           VALUES(?,?,?,?,?,?,?,?,?,'open')""",
+        (
+            created_at,
+            actor.email,
+            actor.display_name,
+            actor.role,
+            clean_demo_step,
+            clean_cycle_title,
+            clean_screen,
+            clean_category,
+            text,
+        ),
+    )
+    row = await db.fetchone(
+        """SELECT id, created_at_utc, actor_email, actor_display_name, actor_role,
+                  demo_step, demo_cycle_title, screen, category, comment, status
+           FROM pay_demo_feedback
+           WHERE id=?""",
+        (feedback_id,),
+    )
+    return _demo_feedback_from_row(row)
+
+
+async def update_pay_demo_feedback_status(
+    db: Db,
+    *,
+    feedback_id: int,
+    status: str,
+) -> dict[str, object]:
+    clean_status = str(status or "").strip().lower()
+    if clean_status not in {"open", "closed"}:
+        raise ValueError("status must be open or closed")
+    await db.exec("UPDATE pay_demo_feedback SET status=? WHERE id=?", (clean_status, int(feedback_id)))
+    row = await db.fetchone(
+        """SELECT id, created_at_utc, actor_email, actor_display_name, actor_role,
+                  demo_step, demo_cycle_title, screen, category, comment, status
+           FROM pay_demo_feedback
+           WHERE id=?""",
+        (int(feedback_id),),
+    )
+    if not row:
+        raise ValueError("demo feedback not found")
+    return _demo_feedback_from_row(row)
+
+
+def _pay_profile_from_row(row: Any) -> dict[str, object]:
+    return {
+        "id": int(row[0]),
+        "principal_id": row[1],
+        "principal_email": row[2],
+        "principal_display_name": row[3],
+        "pay_basis": row[4],
+        "base_wage_input_type": row[5],
+        "base_wage_amount": float(row[6] or 0),
+        "weekly_basis_hours": float(row[7] or 40),
+        "commission_month_1_amount": float(row[8] or 0),
+        "commission_month_2_amount": float(row[9] or 0),
+        "commission_month_3_amount": float(row[10] or 0),
+        "commission_average_monthly": float(row[11] or 0),
+        "commission_hourly_rate": float(row[12] or 0),
+        "calculated_hourly_rate": float(row[13] or 0),
+        "status": row[14],
+        "notes": row[15],
+        "created_at_utc": row[16],
+        "updated_at_utc": row[17],
+        "updated_by": row[18],
+    }
+
+
+_PAY_PROFILE_SELECT = """
+    SELECT id, principal_id, principal_email, principal_display_name, pay_basis,
+           base_wage_input_type, base_wage_amount, weekly_basis_hours,
+           commission_month_1_amount, commission_month_2_amount, commission_month_3_amount,
+           commission_average_monthly, commission_hourly_rate, calculated_hourly_rate,
+           status, notes, created_at_utc, updated_at_utc, updated_by
+    FROM pay_profiles
+"""
+
+
+async def list_pay_profiles(db: Db) -> list[dict[str, object]]:
+    rows = await db.fetchall(
+        f"{_PAY_PROFILE_SELECT} ORDER BY lower(principal_display_name), lower(principal_email)"
+    )
+    return [_pay_profile_from_row(row) for row in rows]
+
+
+async def pay_profile_by_email(
+    db: Db,
+    *,
+    email: str,
+    active_only: bool = False,
+) -> dict[str, object] | None:
+    normalized_email = normalize_email(email)
+    if not normalized_email:
+        return None
+    where = "WHERE principal_email=?"
+    params: tuple[object, ...] = (normalized_email,)
+    if active_only:
+        where += " AND status='active'"
+    row = await db.fetchone(f"{_PAY_PROFILE_SELECT} {where} LIMIT 1", params)
+    return _pay_profile_from_row(row) if row else None
+
+
+async def upsert_pay_profile(
+    db: Db,
+    *,
+    principal_id: str | None,
+    principal_email: str,
+    principal_display_name: str | None,
+    pay_basis: str,
+    base_wage_input_type: str,
+    base_wage_amount: float,
+    weekly_basis_hours: float,
+    commission_month_1_amount: float,
+    commission_month_2_amount: float,
+    commission_month_3_amount: float,
+    status: str,
+    notes: str | None,
+    updated_by: str,
+) -> dict[str, object]:
+    normalized_email = normalize_email(principal_email)
+    if not normalized_email:
+        raise ValueError("principal_email is required")
+    normalized_status = normalize_pay_profile_status(status)
+    snapshot = calculate_pay_profile_snapshot(
+        pay_basis=pay_basis,
+        base_wage_input_type=base_wage_input_type,
+        base_wage_amount=base_wage_amount,
+        weekly_basis_hours=weekly_basis_hours,
+        commission_month_1_amount=commission_month_1_amount,
+        commission_month_2_amount=commission_month_2_amount,
+        commission_month_3_amount=commission_month_3_amount,
+    )
+    if snapshot["pay_basis"] != "expense_only" and Decimal(str(snapshot["calculated_hourly_rate"])) <= 0:
+        raise ValueError("base wage amount is required for this pay profile")
+    now = utcnow()
+    await db.exec(
+        """
+        INSERT INTO pay_profiles(
+          principal_id, principal_email, principal_display_name, pay_basis,
+          base_wage_input_type, base_wage_amount, weekly_basis_hours,
+          commission_month_1_amount, commission_month_2_amount, commission_month_3_amount,
+          commission_average_monthly, commission_hourly_rate, calculated_hourly_rate,
+          status, notes, created_at_utc, updated_at_utc, updated_by
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(principal_email) DO UPDATE SET
+          principal_id=excluded.principal_id,
+          principal_display_name=excluded.principal_display_name,
+          pay_basis=excluded.pay_basis,
+          base_wage_input_type=excluded.base_wage_input_type,
+          base_wage_amount=excluded.base_wage_amount,
+          weekly_basis_hours=excluded.weekly_basis_hours,
+          commission_month_1_amount=excluded.commission_month_1_amount,
+          commission_month_2_amount=excluded.commission_month_2_amount,
+          commission_month_3_amount=excluded.commission_month_3_amount,
+          commission_average_monthly=excluded.commission_average_monthly,
+          commission_hourly_rate=excluded.commission_hourly_rate,
+          calculated_hourly_rate=excluded.calculated_hourly_rate,
+          status=excluded.status,
+          notes=excluded.notes,
+          updated_at_utc=excluded.updated_at_utc,
+          updated_by=excluded.updated_by
+        """,
+        (
+            str(principal_id or "").strip() or None,
+            normalized_email,
+            str(principal_display_name or "").strip() or None,
+            snapshot["pay_basis"],
+            snapshot["base_wage_input_type"],
+            float(snapshot["base_wage_amount"]),
+            float(snapshot["weekly_basis_hours"]),
+            float(snapshot["commission_month_1_amount"]),
+            float(snapshot["commission_month_2_amount"]),
+            float(snapshot["commission_month_3_amount"]),
+            float(snapshot["commission_average_monthly"]),
+            float(snapshot["commission_hourly_rate"]),
+            float(snapshot["calculated_hourly_rate"]),
+            normalized_status,
+            str(notes or "").strip() or None,
+            now,
+            now,
+            updated_by,
+        ),
+    )
+    saved = await pay_profile_by_email(db, email=normalized_email)
+    if not saved:
+        raise RuntimeError("failed to save pay profile")
+    return saved
 
 
 async def list_wage_scales(db: Db) -> list[dict[str, object]]:
@@ -1016,42 +2255,60 @@ async def upsert_entry(
     if not target_email:
         raise ValueError("user_email is required")
 
-    weekly_basis_hours = float(data.get("weekly_basis_hours") or 40.0)
-    explicit_hourly_rate = _money(data.get("hourly_rate"))
-    lost_wage_input_type = str(
-        data.get("lost_wage_input_type") or data.get("employee_wage_input_type") or "hourly"
-    ).strip().lower()
-    lost_wage_amount_input = data.get("lost_wage_amount", data.get("employee_wage_amount"))
+    hours = _quantity(data.get("hours"))
+    requested_president_diff_hours = _quantity(data.get("president_diff_hours"))
+    profile = await pay_profile_by_email(db, email=target_email, active_only=True)
     compensation_stub_id: str | None = None
-    if lost_wage_input_type in {"profile", "saved_profile", "commission_profile"}:
-        stub = await latest_compensation_stub(db, user_email=target_email)
-        if not stub:
-            raise ValueError("no saved lost wage profile is available for this member")
-        compensation_stub_id = str(stub["id"])
-        lost_wage_input_type = "profile"
-        lost_wage_amount_input = stub["calculated_hourly_rate"]
-    elif _money(lost_wage_amount_input) <= 0 and explicit_hourly_rate > 0:
-        lost_wage_input_type = "hourly"
-        lost_wage_amount_input = explicit_hourly_rate
-    diff_wage_type = "hourly" if lost_wage_input_type == "profile" else lost_wage_input_type
-    normalized_wage_type, lost_wage_amount, lost_wage_hourly_rate = normalize_wage_input(
-        input_type=lost_wage_input_type,
-        amount=lost_wage_amount_input,
-        weekly_basis_hours=weekly_basis_hours,
+    weekly_basis_hours = 40.0
+    normalized_wage_type = "expense_only"
+    lost_wage_amount = Decimal("0.00")
+    lost_wage_hourly_rate = Decimal("0.00")
+    hourly_rate = Decimal("0.00")
+    president_diff_hours = Decimal("0.0000")
+    diff = DifferentialResult(
+        wage_scale_id=None,
+        diff_rate=Decimal("0.00"),
+        diff_amount=Decimal("0.00"),
+        lost_wage_hourly_rate=Decimal("0.00"),
     )
-    if lost_wage_input_type == "profile":
-        normalized_wage_type = "profile"
-    diff = await calculate_president_differential(
-        db,
-        entry_date=entry_date,
-        weekly_basis_hours=weekly_basis_hours,
-        president_diff_hours=data.get("president_diff_hours"),
-        target_scale=pay_cfg.president_target_scale,
-        target_multiplier=pay_cfg.president_target_multiplier,
-        lost_wage_input_type=diff_wage_type,
-        lost_wage_amount=lost_wage_amount,
-    )
-    hourly_rate = explicit_hourly_rate if explicit_hourly_rate > 0 else lost_wage_hourly_rate
+
+    if not profile:
+        if hours > 0 or requested_president_diff_hours > 0:
+            raise ValueError("pay profile required before submitting lost-wage hours")
+    else:
+        pay_basis = str(profile["pay_basis"] or "expense_only")
+        weekly_basis_hours = float(profile["weekly_basis_hours"] or 40.0)
+        profile_hourly = _money(profile.get("calculated_hourly_rate"))
+        if pay_basis == "expense_only":
+            if hours > 0 or requested_president_diff_hours > 0:
+                raise ValueError("pay profile is expense-only; lost-wage hours are not allowed")
+        elif profile_hourly <= 0:
+            raise ValueError("pay profile must have a positive wage rate before submitting lost-wage hours")
+        else:
+            normalized_wage_type = pay_basis
+            hourly_rate = profile_hourly
+            lost_wage_hourly_rate = profile_hourly
+            if pay_basis == "commission":
+                lost_wage_amount = profile_hourly
+            else:
+                lost_wage_amount = _money(profile.get("base_wage_amount"))
+            if pay_basis == "president":
+                president_diff_hours = (
+                    requested_president_diff_hours
+                    if (actor.can_edit_all or actor.can_lock) and requested_president_diff_hours > 0
+                    else hours
+                )
+                diff = await calculate_president_differential(
+                    db,
+                    entry_date=entry_date,
+                    weekly_basis_hours=weekly_basis_hours,
+                    president_diff_hours=president_diff_hours,
+                    target_scale=pay_cfg.president_target_scale,
+                    target_multiplier=pay_cfg.president_target_multiplier,
+                    lost_wage_input_type=profile.get("base_wage_input_type"),
+                    lost_wage_amount=profile.get("base_wage_amount"),
+                )
+                lost_wage_hourly_rate = diff.lost_wage_hourly_rate
 
     row = await db.fetchone(
         "SELECT id, locked_at_utc FROM pay_entries WHERE period_id=? AND user_email=? AND entry_date=?",
@@ -1061,16 +2318,22 @@ async def upsert_entry(
         raise ValueError("entry is locked")
     entry_id = str(row[0]) if row else f"pay-entry-{uuid4().hex}"
     now = utcnow()
+    submitted_display_name = str(data.get("display_name") or "").strip() if actor.can_edit_all else ""
     values = {
-        "display_name": str(data.get("display_name") or actor.display_name or target_email).strip(),
+        "display_name": str(
+            submitted_display_name
+            or (profile or {}).get("principal_display_name")
+            or actor.display_name
+            or target_email
+        ).strip(),
         "local_number": str(data.get("local_number") or "").strip(),
         "address": str(data.get("address") or "").strip(),
         "hourly_rate": float(hourly_rate),
         "lost_wage_input_type": normalized_wage_type,
         "lost_wage_amount": float(lost_wage_amount),
-        "lost_wage_hourly_rate": float(diff.lost_wage_hourly_rate),
+        "lost_wage_hourly_rate": float(lost_wage_hourly_rate),
         "compensation_stub_id": compensation_stub_id,
-        "hours": float(_quantity(data.get("hours"))),
+        "hours": float(hours),
         "mileage_miles": float(_quantity(data.get("mileage_miles"))),
         "mileage_rate": float(_money(data.get("mileage_rate"))),
         "mileage_amount": float(_money(data.get("mileage_amount"))),
@@ -1078,7 +2341,7 @@ async def upsert_entry(
         "meals_amount": float(_money(data.get("meals_amount"))),
         "hotel_amount": float(_money(data.get("hotel_amount"))),
         "miscellaneous_amount": float(_money(data.get("miscellaneous_amount"))),
-        "president_diff_hours": float(_quantity(data.get("president_diff_hours"))),
+        "president_diff_hours": float(president_diff_hours),
         "president_diff_rate": float(diff.diff_rate),
         "president_diff_amount": float(diff.diff_amount),
         "wage_scale_id": diff.wage_scale_id,
@@ -1467,6 +2730,22 @@ def _cell_set_text(cell: Any, text: object) -> None:
     cell.text = str(text or "")
 
 
+def _cell_set_paragraphs(cell: Any, lines: list[str]) -> None:
+    cell.text = ""
+    if not lines:
+        return
+    if cell.paragraphs:
+        cell.paragraphs[0].text = lines[0]
+    else:
+        cell.add_paragraph(lines[0])
+    for line in lines[1:]:
+        cell.add_paragraph(line)
+
+
+def _cell_text(cell: Any) -> str:
+    return re.sub(r"\s+", " ", str(getattr(cell, "text", "") or "")).strip()
+
+
 def _set_paragraph_if_prefix(doc: Document, prefix: str, value: str) -> None:
     for paragraph in doc.paragraphs:
         if paragraph.text.strip().startswith(prefix):
@@ -1475,7 +2754,8 @@ def _set_paragraph_if_prefix(doc: Document, prefix: str, value: str) -> None:
 
 
 def _entry_amounts(row: dict[str, object]) -> dict[str, Decimal]:
-    hours_amount = _money(row.get("hours")) * _money(row.get("hourly_rate"))
+    hourly_rate = _money(row.get("lost_wage_hourly_rate") or row.get("hourly_rate"))
+    hours_amount = _money(row.get("hours")) * hourly_rate
     return {
         "hours": hours_amount.quantize(_CURRENCY, rounding=ROUND_HALF_UP),
         "mileage": _money(row.get("mileage_amount")),
@@ -1485,6 +2765,87 @@ def _entry_amounts(row: dict[str, object]) -> dict[str, Decimal]:
         "misc": _money(row.get("miscellaneous_amount")),
         "president_diff": _money(row.get("president_diff_amount")),
     }
+
+
+def pay_entry_daily_narrative_lines(entries: list[dict[str, object]]) -> list[str]:
+    notes_by_day: dict[date, list[str]] = {}
+    seen_by_day: dict[date, set[str]] = {}
+    for entry in entries:
+        try:
+            entry_day = date.fromisoformat(str(entry.get("entry_date")))
+        except Exception:
+            continue
+        note = re.sub(r"\s+", " ", str(entry.get("notes") or "").strip())
+        if not note:
+            continue
+        seen = seen_by_day.setdefault(entry_day, set())
+        dedupe_key = note.lower()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        notes_by_day.setdefault(entry_day, []).append(note)
+
+    lines: list[str] = []
+    for entry_day in sorted(notes_by_day):
+        day_label = entry_day.strftime("%a %m/%d/%Y")
+        lines.append(f"{day_label}: {'; '.join(notes_by_day[entry_day])}")
+    return lines
+
+
+def _split_narrative_line(line: str) -> tuple[str, str]:
+    if ": " not in line:
+        return "", line
+    label, narrative = line.split(": ", 1)
+    return label.strip(), narrative.strip()
+
+
+def _remove_front_receipt_explanation_rows(doc: Document) -> None:
+    for table in doc.tables[:2]:
+        for row in list(table.rows):
+            row_text = " ".join(_cell_text(cell) for cell in row.cells).lower()
+            if "attach necessary receipts" not in row_text:
+                continue
+            try:
+                table._tbl.remove(row._tr)  # noqa: SLF001
+            except Exception:
+                for cell in row.cells:
+                    _cell_set_text(cell, "")
+
+
+def _find_totals_row(doc: Document) -> Any | None:
+    for table in doc.tables:
+        for row in table.rows:
+            cells = list(row.cells)
+            if cells and _cell_text(cells[0]).upper() == "TOTALS":
+                return row
+    return None
+
+
+def _write_daily_narrative(
+    doc: Document,
+    *,
+    period_start: str,
+    period_end: str,
+    narrative_lines: list[str],
+) -> None:
+    if not narrative_lines:
+        return
+    doc.add_page_break()
+    doc.add_paragraph("Daily Narrative by Date")
+    doc.add_paragraph(f"Pay period {period_start} to {period_end}")
+    table = doc.add_table(rows=1, cols=2)
+    try:
+        table.style = "Table Grid"
+    except Exception:
+        pass
+    header = table.rows[0].cells
+    _cell_set_text(header[0], "Date")
+    _cell_set_text(header[1], "Narrative")
+    for line in narrative_lines:
+        label, narrative = _split_narrative_line(line)
+        cells = table.add_row().cells
+        _cell_set_text(cells[0], label)
+        _cell_set_text(cells[1], narrative)
 
 
 def fill_pay_voucher_docx(
@@ -1522,7 +2883,7 @@ def fill_pay_voucher_docx(
         "president_diff": 7,
     }
     totals_by_category = {key: Decimal("0.00") for key in row_names}
-    explanation_lines: list[str] = []
+    narrative_lines = pay_entry_daily_narrative_lines(entries)
 
     for table_index, day_offset in table_pairs:
         if table_index >= len(doc.tables):
@@ -1547,9 +2908,6 @@ def fill_pay_voucher_docx(
                 totals_by_category[key] += value
                 day_totals[index] += value
                 _cell_set_text(table.rows[row_no].cells[col], _currency_text(value))
-            notes = str(entry.get("notes") or "").strip()
-            if notes:
-                explanation_lines.append(f"{entry_day.isoformat()}: {notes}")
         for key, row_no in row_names.items():
             row_total = Decimal("0.00")
             for col in range(1, 8):
@@ -1559,29 +2917,22 @@ def fill_pay_voucher_docx(
             _cell_set_text(table.rows[8].cells[index + 1], _currency_text(day_total))
         _cell_set_text(table.rows[8].cells[8], _currency_text(sum(day_totals, Decimal("0.00"))))
 
-    if len(doc.tables) >= 3 and explanation_lines:
-        _cell_set_text(
-            doc.tables[2].rows[0].cells[0],
-            "Attach necessary receipts - Explain reason for expense: "
-            + " | ".join(explanation_lines)[:900],
-        )
+    _remove_front_receipt_explanation_rows(doc)
 
-    if len(doc.tables) >= 4:
-        totals_table = doc.tables[3]
-        if len(totals_table.rows) >= 2:
-            row = totals_table.rows[1]
-            values = [
-                totals_by_category["hours"],
-                totals_by_category["mileage"],
-                totals_by_category["rentals"],
-                totals_by_category["meals"],
-                totals_by_category["hotel"],
-                totals_by_category["misc"],
-                sum(totals_by_category.values(), Decimal("0.00")),
-            ]
-            for idx, value in enumerate(values, start=1):
-                if idx < len(row.cells):
-                    _cell_set_text(row.cells[idx], f"$ {_currency_text(value)}")
+    totals_row = _find_totals_row(doc)
+    if totals_row is not None:
+        values = [
+            totals_by_category["hours"],
+            totals_by_category["mileage"],
+            totals_by_category["rentals"],
+            totals_by_category["meals"],
+            totals_by_category["hotel"],
+            totals_by_category["misc"],
+            sum(totals_by_category.values(), Decimal("0.00")),
+        ]
+        for idx, value in enumerate(values, start=1):
+            if idx < len(totals_row.cells):
+                _cell_set_text(totals_row.cells[idx], _currency_total_text(value))
 
     if include_signature_placeholders:
         filer_index = max(1, int(filer_signer_index or 1))
@@ -1595,6 +2946,13 @@ def fill_pay_voucher_docx(
                     f"{{{{Dte_es_:signer{paid_by_index}:signer{paid_by_index}_date}}}}"
                 )
                 break
+
+    _write_daily_narrative(
+        doc,
+        period_start=period_start,
+        period_end=period_end,
+        narrative_lines=narrative_lines,
+    )
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
@@ -2171,7 +3529,19 @@ def mileage_rate_from_settings(settings: dict[str, object], year: int) -> tuple[
     return parse_rate_user_input(raw)
 
 
+def _google_leg_cache_key(*, api_key: str, origin: str, destination: str) -> tuple[str, str]:
+    key_hash = hashlib.sha256(str(api_key or "").encode("utf-8")).hexdigest()[:12]
+    route_key = json.dumps([str(origin or "").strip(), str(destination or "").strip()], sort_keys=True)
+    return key_hash, route_key
+
+
 def _google_leg(*, api_key: str, origin: str, destination: str) -> dict[str, object]:
+    cache_key = _google_leg_cache_key(api_key=api_key, origin=origin, destination=destination)
+    with _GOOGLE_LEG_CACHE_LOCK:
+        cached = _GOOGLE_LEG_CACHE.get(cache_key)
+    if cached is not None:
+        return dict(cached)
+
     directions_url = "https://maps.googleapis.com/maps/api/directions/json"
     resp = requests.get(
         directions_url,
@@ -2207,7 +3577,7 @@ def _google_leg(*, api_key: str, origin: str, destination: str) -> dict[str, obj
                 map_bytes = map_resp.content
         except requests.RequestException:
             map_bytes = None
-    return {
+    result = {
         "origin": leg.get("start_address", origin),
         "destination": leg.get("end_address", destination),
         "distance_text": (leg.get("distance") or {}).get("text") or "",
@@ -2215,6 +3585,62 @@ def _google_leg(*, api_key: str, origin: str, destination: str) -> dict[str, obj
         "turn_by_turn": steps,
         "map_bytes": map_bytes,
     }
+    with _GOOGLE_LEG_CACHE_LOCK:
+        _GOOGLE_LEG_CACHE[cache_key] = dict(result)
+    return result
+
+
+def _prefetch_google_legs(
+    *,
+    api_key: str,
+    routes: list[list[str]],
+    progress_callback: Any = None,
+    max_workers: int = _GOOGLE_LEG_PREFETCH_WORKERS,
+) -> None:
+    if not api_key:
+        return
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for locations in routes:
+        for idx in range(len(locations) - 1):
+            pair = (locations[idx], locations[idx + 1])
+            if pair in seen:
+                continue
+            seen.add(pair)
+            pairs.append(pair)
+    missing: list[tuple[str, str]] = []
+    with _GOOGLE_LEG_CACHE_LOCK:
+        for origin, destination in pairs:
+            key = _google_leg_cache_key(api_key=api_key, origin=origin, destination=destination)
+            if key not in _GOOGLE_LEG_CACHE:
+                missing.append((origin, destination))
+    if not missing:
+        _emit_progress(
+            progress_callback,
+            stage="mileage",
+            current=len(pairs),
+            total=len(pairs),
+            message="Mileage route cache ready",
+        )
+        return
+
+    completed = 0
+    worker_count = max(1, min(int(max_workers or 1), len(missing)))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(_google_leg, api_key=api_key, origin=origin, destination=destination): (origin, destination)
+            for origin, destination in missing
+        }
+        for future in as_completed(futures):
+            future.result()
+            completed += 1
+            _emit_progress(
+                progress_callback,
+                stage="mileage",
+                current=completed,
+                total=len(missing),
+                message=f"Fetched mileage route {completed}/{len(missing)}",
+            )
 
 
 def build_mileage_pdf(
@@ -2337,6 +3763,7 @@ async def create_mileage_attachment(
     rate_text: str | None,
 ) -> dict[str, object]:
     settings = await pay_settings(db, pay_cfg=cfg.pay_portal)
+    name = str(name or "").strip() or str(actor.display_name or actor.email or "Pay User").strip()
     year = datetime.strptime(date_str, "%Y-%m-%d").year
     rate, rate_display = parse_rate_user_input(rate_text) if rate_text else mileage_rate_from_settings(settings, year)
     pdf_bytes, reimbursement, total_miles = build_mileage_pdf(
