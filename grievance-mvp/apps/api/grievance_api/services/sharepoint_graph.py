@@ -10,6 +10,16 @@ import requests
 
 _SIMPLE_UPLOAD_MAX_BYTES = 250 * 1024 * 1024
 _UPLOAD_SESSION_CHUNK_BYTES = 10 * 1024 * 1024
+_NONPAID_LICENSE_SKU_MARKERS = ("FREE", "TRIAL", "EXPLORATORY", "DEVELOPER", "VIRAL")
+_NONPAID_LICENSE_SKU_PART_NUMBERS = {
+    "FLOW_FREE",
+    "POWER_BI_STANDARD",
+    "POWERAPPS_VIRAL",
+    "RIGHTSMANAGEMENT_ADHOC",
+    "TEAMS_EXPLORATORY",
+    "TEAMS_FREE",
+    "WINDOWS_STORE",
+}
 
 
 @dataclass(frozen=True)
@@ -204,6 +214,92 @@ class GraphUploader:
             },
         )
         return self._directory_user_refs(payload, limit=capped_limit)
+
+    @staticmethod
+    def _is_paid_sku(sku: dict) -> bool:
+        sku_id = str(sku.get("skuId") or "").strip()
+        if not sku_id:
+            return False
+        part_number = str(sku.get("skuPartNumber") or "").strip().upper()
+        if not part_number:
+            return False
+        if part_number in _NONPAID_LICENSE_SKU_PART_NUMBERS:
+            return False
+        if any(marker in part_number for marker in _NONPAID_LICENSE_SKU_MARKERS):
+            return False
+        if str(sku.get("capabilityStatus") or "Enabled").strip().lower() not in {"enabled", "warning"}:
+            return False
+        prepaid_units = sku.get("prepaidUnits") if isinstance(sku.get("prepaidUnits"), dict) else {}
+        try:
+            enabled_units = int(prepaid_units.get("enabled") or 0)
+        except (TypeError, ValueError):
+            enabled_units = 0
+        return enabled_units > 0
+
+    def _paid_subscribed_sku_ids(self) -> set[str]:
+        paid_ids: set[str] = set()
+        endpoint = "/subscribedSkus"
+        params: dict[str, object] | None = {
+            "$select": "skuId,skuPartNumber,capabilityStatus,prepaidUnits",
+        }
+        while endpoint:
+            payload = self._request("GET", endpoint, params=params)
+            for item in payload.get("value", []):
+                if isinstance(item, dict) and self._is_paid_sku(item):
+                    paid_ids.add(str(item.get("skuId") or "").strip().lower())
+            endpoint = str(payload.get("@odata.nextLink") or "").strip()
+            params = None
+        return paid_ids
+
+    def list_licensed_directory_users(self, *, limit: int = 999) -> list[DirectoryUserRef]:
+        if self.dry_run:
+            return []
+
+        paid_sku_ids = self._paid_subscribed_sku_ids()
+        if not paid_sku_ids:
+            return []
+
+        capped_limit = max(1, min(int(limit or 999), 999))
+        rows: list[DirectoryUserRef] = []
+        seen_ids: set[str] = set()
+        endpoint = "/users"
+        params: dict[str, object] | None = {
+            "$select": "id,displayName,mail,userPrincipalName,accountEnabled,assignedLicenses",
+            "$top": "999",
+        }
+
+        while endpoint and len(rows) < capped_limit:
+            payload = self._request("GET", endpoint, params=params)
+            for item in payload.get("value", []):
+                if not isinstance(item, dict):
+                    continue
+                if item.get("accountEnabled") is False:
+                    continue
+                assigned_sku_ids = {
+                    str(license_row.get("skuId") or "").strip().lower()
+                    for license_row in item.get("assignedLicenses", [])
+                    if isinstance(license_row, dict)
+                }
+                if not assigned_sku_ids.intersection(paid_sku_ids):
+                    continue
+                item_id = str(item.get("id") or "").strip()
+                if not item_id or item_id in seen_ids:
+                    continue
+                seen_ids.add(item_id)
+                rows.append(
+                    DirectoryUserRef(
+                        id=item_id,
+                        display_name=str(item.get("displayName") or "").strip() or None,
+                        email=str(item.get("mail") or "").strip() or None,
+                        user_principal_name=str(item.get("userPrincipalName") or "").strip() or None,
+                    )
+                )
+                if len(rows) >= capped_limit:
+                    break
+            endpoint = str(payload.get("@odata.nextLink") or "").strip()
+            params = None
+
+        return rows
 
     def _upload_with_session(self, *, upload_url: str, local_path: str) -> dict:
         size = os.path.getsize(local_path)

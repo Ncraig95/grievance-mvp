@@ -336,11 +336,70 @@ def migrate(db_path: str) -> None:
         _ensure_column(con, "pay_profiles", "commission_average_monthly", "REAL NOT NULL DEFAULT 0")
         _ensure_column(con, "pay_profiles", "commission_hourly_rate", "REAL NOT NULL DEFAULT 0")
         _ensure_column(con, "pay_profiles", "calculated_hourly_rate", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(con, "pay_profiles", "default_address", "TEXT")
         _ensure_column(con, "pay_profiles", "status", "TEXT NOT NULL DEFAULT 'active'")
         _ensure_column(con, "pay_profiles", "notes", "TEXT")
         _ensure_column(con, "pay_profiles", "created_at_utc", "TEXT")
         _ensure_column(con, "pay_profiles", "updated_at_utc", "TEXT")
         _ensure_column(con, "pay_profiles", "updated_by", "TEXT")
+
+        _ensure_column(con, "pay_entries", "review_status", "TEXT NOT NULL DEFAULT 'pending'")
+        _ensure_column(con, "pay_entries", "review_note", "TEXT")
+        _ensure_column(con, "pay_entries", "reviewed_by", "TEXT")
+        _ensure_column(con, "pay_entries", "reviewed_at_utc", "TEXT")
+        _ensure_column(con, "pay_entries", "submitter_certified_at_utc", "TEXT")
+        _ensure_column(con, "pay_entries", "submitter_certified_by", "TEXT")
+        _ensure_column(con, "pay_entries", "submitter_certification_text", "TEXT")
+
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pay_entry_corrections (
+              id TEXT PRIMARY KEY,
+              period_id TEXT NOT NULL,
+              entry_id TEXT NOT NULL,
+              target_user_email TEXT NOT NULL,
+              display_name TEXT,
+              entry_date TEXT NOT NULL,
+              hours REAL NOT NULL DEFAULT 0,
+              mileage_miles REAL NOT NULL DEFAULT 0,
+              mileage_rate REAL NOT NULL DEFAULT 0,
+              mileage_amount REAL NOT NULL DEFAULT 0,
+              rentals_amount REAL NOT NULL DEFAULT 0,
+              meals_amount REAL NOT NULL DEFAULT 0,
+              hotel_amount REAL NOT NULL DEFAULT 0,
+              miscellaneous_amount REAL NOT NULL DEFAULT 0,
+              notes TEXT,
+              created_by TEXT NOT NULL,
+              created_at_utc TEXT NOT NULL,
+              FOREIGN KEY (period_id) REFERENCES pay_periods (id),
+              FOREIGN KEY (entry_id) REFERENCES pay_entries (id)
+            )
+            """
+        )
+
+        _ensure_column(con, "pay_attachments", "mileage_miles", "REAL")
+        _ensure_column(con, "pay_attachments", "mileage_rate", "REAL")
+        _ensure_column(con, "pay_attachments", "mileage_amount", "REAL")
+        _ensure_column(con, "pay_attachments", "removed_at_utc", "TEXT")
+        _ensure_column(con, "pay_attachments", "removed_by", "TEXT")
+        _ensure_column(con, "pay_attachments", "removed_reason", "TEXT")
+
+        _ensure_column(con, "pay_compensation_stubs", "payroll_month", "TEXT NOT NULL DEFAULT ''")
+        con.execute(
+            """
+            UPDATE pay_compensation_stubs
+            SET payroll_month = COALESCE(
+              strftime(
+                '%Y-%m',
+                COALESCE(NULLIF(created_at_utc, ''), 'now'),
+                'start of month',
+                '-1 month'
+              ),
+              strftime('%Y-%m', 'now', 'start of month', '-1 month')
+            )
+            WHERE COALESCE(payroll_month, '') = ''
+            """
+        )
 
         _ensure_column(con, "documents", "template_key", "TEXT")
         _ensure_column(con, "documents", "signed_pdf_path", "TEXT")
@@ -585,11 +644,22 @@ def migrate(db_path: str) -> None:
             "CREATE INDEX IF NOT EXISTS idx_pay_entries_period ON pay_entries(period_id)",
             "CREATE INDEX IF NOT EXISTS idx_pay_entries_user_date ON pay_entries(user_email, entry_date)",
             "CREATE INDEX IF NOT EXISTS idx_pay_entries_compensation_stub ON pay_entries(compensation_stub_id)",
+            "CREATE INDEX IF NOT EXISTS idx_pay_entries_review_status ON pay_entries(period_id, review_status)",
+            "CREATE INDEX IF NOT EXISTS idx_pay_entry_corrections_period ON pay_entry_corrections(period_id, entry_date)",
+            "CREATE INDEX IF NOT EXISTS idx_pay_entry_corrections_entry ON pay_entry_corrections(entry_id)",
             "CREATE INDEX IF NOT EXISTS idx_pay_attachments_entry ON pay_attachments(entry_id)",
             "CREATE INDEX IF NOT EXISTS idx_pay_attachments_period ON pay_attachments(period_id)",
             (
+                "CREATE INDEX IF NOT EXISTS idx_pay_attachments_period_removed "
+                "ON pay_attachments(period_id, removed_at_utc)"
+            ),
+            (
                 "CREATE INDEX IF NOT EXISTS idx_pay_compensation_stubs_user_date "
                 "ON pay_compensation_stubs(user_email, created_at_utc)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_pay_compensation_stubs_user_month "
+                "ON pay_compensation_stubs(user_email, payroll_month)"
             ),
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_packets_period_revision ON pay_packets(period_id, revision)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_packets_docuseal_submission ON pay_packets(docuseal_submission_id)",

@@ -556,6 +556,13 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["template_data"]["grievant_name"], "Jordan Lee")
         self.assertEqual(payload["template_data"]["today_date"], date.today().isoformat())
 
+    def test_data_request_letterhead_main_request_field_is_auto_expanding(self) -> None:
+        definition = get_hosted_form_definition("data_request_letterhead")
+        assert definition is not None
+        fields = {field.name: field for field in definition.fields}
+
+        self.assertEqual(fields["data_requested"].type, "textarea")
+
     def test_data_request_letterhead_accepts_blank_grievant_email(self) -> None:
         definition = get_hosted_form_definition("data_request_letterhead")
         assert definition is not None

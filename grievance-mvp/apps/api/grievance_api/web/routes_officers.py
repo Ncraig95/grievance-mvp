@@ -17,7 +17,7 @@ from ..services.case_folder_naming import build_case_folder_member_name
 from ..services.contract_timeline import parse_incident_date
 from ..services.doc_render import render_docx
 from ..services.grievance_id_allocator import GrievanceIdAllocationError, GrievanceIdAllocator
-from ..services.grievance_summary import build_grievance_summary
+from ..services.grievance_summary import build_grievance_summary, is_low_priority_grievance_text
 from ..services.motion_sheet import load_motion_sheet_officers, save_motion_sheet_officers
 from ..services.notification_service import NotificationService
 from ..services.pdf_convert import docx_to_pdf
@@ -271,15 +271,13 @@ def _build_officer_case_row(cfg, row: tuple[object, ...]) -> OfficerCaseRow:  # 
         )
     )
     manual_issue_summary = _normalize_optional_text(row[19])
-    issue_summary = manual_issue_summary or _payload_pick(
+    manual_issue_is_low_priority = is_low_priority_grievance_text(payload, manual_issue_summary)
+    narrative = build_grievance_summary(
         payload,
-        "issue_summary",
-        "issue_text",
-        "issue_contract_section",
-        "q3_union_statement",
-        "narrative",
+        manual_text=None if manual_issue_is_low_priority else manual_issue_summary,
+        include_low_priority=False,
     )
-    narrative = build_grievance_summary(payload, manual_text=manual_issue_summary)
+    issue_summary = (None if manual_issue_is_low_priority else manual_issue_summary) or narrative.summary
     first_level_request_sent_date = _normalize_optional_text(row[20]) or _normalize_date_text(
         _payload_pick(payload, "first_level_request_sent_date", "date_sent_first_level_request")
     )

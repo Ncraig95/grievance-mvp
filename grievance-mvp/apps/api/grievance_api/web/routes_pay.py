@@ -17,6 +17,10 @@ from ..services.pay_portal import (
     PayActor,
     approve_irs_rate_candidate,
     create_pay_demo_feedback,
+    attachment_for_actor,
+    create_pay_entry_correction,
+    delete_pay_entry,
+    delete_pay_profile,
     create_mileage_attachment,
     create_revision,
     current_period_bounds,
@@ -41,12 +45,15 @@ from ..services.pay_portal import (
     pay_demo_artifact_path,
     pay_profile_by_email,
     pay_settings,
+    remove_mileage_attachment,
+    review_pay_entry,
     save_pay_demo_settings,
     save_pay_settings,
     store_attachment,
     store_compensation_stub,
     sync_irs_mileage_rate_candidates,
     treasurer_recipients,
+    validate_mileage_locations,
     update_pay_demo_feedback_status,
     upsert_entry,
     upsert_pay_profile,
@@ -97,6 +104,8 @@ class PayEntryUpsertRequest(BaseModel):
     hotel_amount: float = 0
     miscellaneous_amount: float = 0
     president_diff_hours: float = 0
+    submitter_certified: bool = False
+    submitter_certification_text: str | None = None
     notes: str | None = None
 
 
@@ -116,6 +125,7 @@ class PayCompensationStubRequest(BaseModel):
     commission_month_1_amount: float = 0
     commission_month_2_amount: float = 0
     commission_month_3_amount: float = 0
+    payroll_month: str | None = None
     filename: str
     content_type: str | None = None
     content_base64: str
@@ -130,6 +140,10 @@ class PayMileageRequest(BaseModel):
     description: str
     locations: list[str] = Field(default_factory=list)
     rate: str | None = None
+
+
+class PayMileageAddressCheckRequest(BaseModel):
+    locations: list[str] = Field(default_factory=list)
 
 
 class PaySettingsUpdateRequest(BaseModel):
@@ -169,12 +183,39 @@ class PayUserUpsertRequest(BaseModel):
     status: str = "active"
 
 
+class PayEntryReviewRequest(BaseModel):
+    review_status: str
+    review_note: str | None = None
+
+
+class PayEntryCorrectionRequest(BaseModel):
+    period_id: str
+    user_email: str
+    display_name: str | None = None
+    entry_date: str
+    local_number: str | None = "3106"
+    address: str | None = None
+    hours: float = 0
+    mileage_miles: float = 0
+    mileage_rate: float = 0
+    mileage_amount: float = 0
+    rentals_amount: float = 0
+    meals_amount: float = 0
+    hotel_amount: float = 0
+    miscellaneous_amount: float = 0
+    notes: str | None = None
+
+
 class InternalRoleAssignmentRequest(BaseModel):
     principal_id: str | None = None
     principal_email: str
     principal_display_name: str | None = None
     role: str
     status: str = "active"
+
+
+class PayInternalUserImportRequest(BaseModel):
+    limit: int = Field(default=999, ge=1, le=999)
 
 
 class PayProfileUpsertRequest(BaseModel):
@@ -190,6 +231,7 @@ class PayProfileUpsertRequest(BaseModel):
     commission_month_3_amount: float = 0
     status: str = "active"
     notes: str | None = None
+    default_address: str | None = None
 
 
 class PayWageScaleUpsertRequest(BaseModel):
@@ -287,13 +329,14 @@ def _actor_from_officer(
     user: Any,
     *,
     treasurer: bool,
+    president: bool = False,
     internal_roles: tuple[str, ...] = (),
 ) -> PayActor:
     role = str(getattr(user, "role", "") or "").lower()
     is_admin = role == "admin"
     role_set = {str(value or "").strip().lower() for value in internal_roles}
     is_treasurer = bool(treasurer or is_admin or "treasurer" in role_set)
-    is_president = "president" in role_set
+    is_president = bool(president or "president" in role_set)
     actor_role = "admin" if is_admin else "treasurer" if is_treasurer else "president" if is_president else "officer"
     return PayActor(
         email=normalize_email(getattr(user, "email", "")),
@@ -303,6 +346,7 @@ def _actor_from_officer(
         can_edit_all=is_treasurer,
         can_lock=is_treasurer,
         is_guest=False,
+        is_president=is_president,
     )
 
 
@@ -324,6 +368,7 @@ async def _current_pay_actor(request: Request) -> PayActor | None:
     officer = await current_officer_user(request)
     if officer:
         officer_email = normalize_email(officer.email)
+        president_address = normalize_email(settings.get("president_email"))
         internal_roles = await active_internal_roles_for_user(
             db,
             user_id=getattr(officer, "user_id", None),
@@ -332,6 +377,7 @@ async def _current_pay_actor(request: Request) -> PayActor | None:
         return _actor_from_officer(
             officer,
             treasurer=officer_email in treasurer_emails,
+            president=bool(president_address and officer_email == president_address),
             internal_roles=internal_roles,
         )
 
@@ -364,6 +410,7 @@ async def _current_pay_actor(request: Request) -> PayActor | None:
             can_edit_all=is_treasurer,
             can_lock=is_treasurer,
             is_guest=True,
+            is_president=False,
         )
 
     return None
@@ -478,10 +525,10 @@ def _render_pay_page() -> str:
           <label>Date<input id="entryDate" name="entry_date" type="date" required></label>
           <input id="displayName" name="display_name" type="hidden">
           <label>Hours<input name="hours" type="number" step="0.25"></label>
-          <label>Rentals<input name="rentals_amount" type="number" step="0.01"></label>
-          <label>Meals<input name="meals_amount" type="number" step="0.01"></label>
-          <label>Hotel<input name="hotel_amount" type="number" step="0.01"></label>
-          <label>Miscellaneous<input name="miscellaneous_amount" type="number" step="0.01"></label>
+          <label>Rentals ($)<input name="rentals_amount" type="number" step="0.01"></label>
+          <label>Meals ($)<input name="meals_amount" type="number" step="0.01"></label>
+          <label>Hotel ($)<input name="hotel_amount" type="number" step="0.01"></label>
+          <label>Miscellaneous ($)<input name="miscellaneous_amount" type="number" step="0.01"></label>
           <label>Local<input name="local_number" value="3106"></label>
         </div>
         <label>Address<input name="address"></label>
@@ -495,11 +542,11 @@ def _render_pay_page() -> str:
         <div class="grid">
           <label>Member Email<input name="user_email"></label>
           <label>Base Wage Type<select name="base_wage_input_type"><option value="hourly">Hourly</option><option value="weekly">Weekly</option></select></label>
-          <label>Base Wage Amount<input name="base_wage_amount" type="number" step="0.01"></label>
+          <label>Base Wage Amount ($)<input name="base_wage_amount" type="number" step="0.01"></label>
           <label>Weekly Basis<select name="weekly_basis_hours"><option value="40">40</option><option value="37.5">37.5</option></select></label>
-          <label>Commission Month 1<input name="commission_month_1_amount" type="number" step="0.01"></label>
-          <label>Commission Month 2<input name="commission_month_2_amount" type="number" step="0.01"></label>
-          <label>Commission Month 3<input name="commission_month_3_amount" type="number" step="0.01"></label>
+          <label>Commission Month 1 ($)<input name="commission_month_1_amount" type="number" step="0.01"></label>
+          <label>Commission Month 2 ($)<input name="commission_month_2_amount" type="number" step="0.01"></label>
+          <label>Commission Month 3 ($)<input name="commission_month_3_amount" type="number" step="0.01"></label>
           <label>Work Pay Stub<input id="stubFile" type="file" accept=".pdf,image/png,image/jpeg"></label>
         </div>
         <label>Notes<textarea name="notes"></textarea></label>
@@ -513,7 +560,7 @@ def _render_pay_page() -> str:
         <input id="receiptFile" type="file" accept=".pdf,image/png,image/jpeg">
         <button id="uploadReceiptBtn" type="button" class="secondary">Attach Receipt To Selected</button>
       </div>
-      <table><thead><tr><th></th><th>Date</th><th>Name</th><th>Hours</th><th>Mileage</th><th>Other</th><th>President Diff</th><th>Notes</th></tr></thead><tbody id="entriesBody"></tbody></table>
+      <table><thead><tr><th></th><th>Date</th><th>Name</th><th>Hours</th><th>Mileage</th><th>Other</th><th>President Diff</th><th>Sign-Off</th><th>Notes</th></tr></thead><tbody id="entriesBody"></tbody></table>
     </section>
     <section id="treasurerPanel" class="hidden">
       <h2>Treasurer</h2>
@@ -531,7 +578,7 @@ def _render_pay_page() -> str:
           <label>Treasurer Emails<input name="treasurer_emails"></label>
           <label>Effective Date<input name="effective_date" type="date"></label>
           <label>Weekly Basis<select name="weekly_basis_hours"><option value="40">40</option><option value="37.5">37.5</option></select></label>
-          <label>Scale 36 Weekly Base<input name="target_weekly_amount" type="number" step="0.01"></label>
+          <label>Scale 36 Weekly Base ($)<input name="target_weekly_amount" type="number" step="0.01"></label>
           <label>President Target<input value="Scale 36 + 20%" disabled></label>
         </div>
         <div class="toolbar"><button type="submit" class="secondary">Save Settings</button><span id="settingsStatus" class="muted"></span></div>
@@ -550,6 +597,8 @@ def _render_pay_page() -> str:
 let context = null;
 let selectedEntryId = null;
 function money(value) { return Number(value || 0).toFixed(2); }
+function currency(value) { return `$${money(value)}`; }
+function rateCurrency(value, digits = 3) { return `$${Number(value || 0).toFixed(digits)}`; }
 function addCell(row, value) { const cell = document.createElement('td'); cell.textContent = value || ''; row.appendChild(cell); }
 async function api(path, options = {}) {
   const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...options });
@@ -566,7 +615,7 @@ async function loadContext() {
   for (const row of context.entries) {
     const tr = document.createElement('tr');
     const other = Number(row.rentals_amount || 0) + Number(row.meals_amount || 0) + Number(row.hotel_amount || 0) + Number(row.miscellaneous_amount || 0);
-    tr.innerHTML = `<td><input type="radio" name="entryPick" value="${row.id}"></td><td>${row.entry_date}</td><td>${row.display_name || row.user_email}</td><td>${money(row.hours)}</td><td>${money(row.mileage_amount)}</td><td>${money(other)}</td><td>${money(row.president_diff_amount)}</td><td></td>`;
+    tr.innerHTML = `<td><input type="radio" name="entryPick" value="${row.id}"></td><td>${row.entry_date}</td><td>${row.display_name || row.user_email}</td><td>${money(row.hours)}</td><td>${currency(row.mileage_amount)}</td><td>${currency(other)}</td><td>${currency(row.president_diff_amount)}</td><td></td>`;
     tr.lastChild.textContent = row.notes || '';
     body.appendChild(tr);
   }
@@ -576,10 +625,11 @@ async function loadContext() {
   for (const row of context.compensation_stubs || []) {
     const tr = document.createElement('tr');
     addCell(tr, row.user_email);
-    addCell(tr, `${row.base_wage_input_type} ${money(row.base_wage_amount)}`);
-    addCell(tr, money(row.commission_average_monthly));
-    addCell(tr, money(row.commission_hourly_rate));
-    addCell(tr, money(row.calculated_hourly_rate));
+    addCell(tr, row.payroll_month);
+    addCell(tr, `${row.base_wage_input_type} ${currency(row.base_wage_amount)}`);
+    addCell(tr, currency(row.commission_average_monthly));
+    addCell(tr, currency(row.commission_hourly_rate));
+    addCell(tr, currency(row.calculated_hourly_rate));
     addCell(tr, row.filename);
     stubsBody.appendChild(tr);
   }
@@ -592,7 +642,7 @@ function renderIrsCandidates(rows) {
   if (!rows.length) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 7;
+    td.colSpan = 8;
     td.textContent = 'No staged IRS rates.';
     tr.appendChild(td);
     body.appendChild(tr);
@@ -601,7 +651,7 @@ function renderIrsCandidates(rows) {
   for (const row of rows) {
     const tr = document.createElement('tr');
     addCell(tr, row.rate_year);
-    addCell(tr, row.rate_per_mile);
+    addCell(tr, rateCurrency(row.rate_per_mile, 3));
     const sourceCell = document.createElement('td');
     const link = document.createElement('a');
     link.href = row.source_url;
@@ -626,7 +676,7 @@ function renderIrsCandidates(rows) {
 async function approveIrsRate(candidateId) {
   try {
     const result = await api(`/pay/api/irs-rates/${candidateId}/approve`, { method: 'POST', body: JSON.stringify({}) });
-    document.getElementById('irsStatus').textContent = `Approved ${result.rate_year}: ${result.active_rate}`;
+    document.getElementById('irsStatus').textContent = `Approved ${result.rate_year}: ${rateCurrency(result.active_rate, 3)}`;
     await loadContext();
   } catch (err) {
     document.getElementById('irsStatus').textContent = err.message;
@@ -711,7 +761,6 @@ _PAY_VIEW_TITLES = {
     "entry": "Submit",
     "mileage": "Mileage",
     "demo": "Demo",
-    "president": "President",
     "treasurer": "Treasurer",
     "admin": "Admin",
 }
@@ -719,8 +768,6 @@ _PAY_VIEW_TITLES = {
 
 def _pay_nav_html(*, view: str, actor: PayActor) -> str:
     links = [("entry", "Submit"), ("mileage", "Mileage"), ("demo", "Demo")]
-    if not actor.is_guest:
-        links.append(("president", "President"))
     if actor.can_view_all:
         links.append(("treasurer", "Treasurer"))
     if actor.can_lock:
@@ -732,7 +779,7 @@ def _pay_nav_html(*, view: str, actor: PayActor) -> str:
     return "".join(rendered)
 
 
-def _entry_form_html(*, president: bool = False, advanced: bool = False) -> str:
+def _entry_form_html(*, president: bool = False, advanced: bool = False, president_enabled: bool = False) -> str:
     if president:
         differential_hours_html = (
             '<label>Differential Hours<input name="president_diff_hours" type="number" step="0.25" placeholder="defaults to union hours"></label>'
@@ -750,48 +797,100 @@ def _entry_form_html(*, president: bool = False, advanced: bool = False) -> str:
           <div class="toolbar"><button type="submit">Save President Entry</button><span id="entryStatus" class="muted"></span></div>
         </form>
         """.replace("__DIFFERENTIAL_HOURS__", differential_hours_html)
+    president_panel_class = "" if president_enabled else " disabled-panel"
+    president_disabled = "" if president_enabled else " disabled"
+    president_help = (
+        "Scale 36 + 20% differential will calculate from your saved president profile."
+        if president_enabled
+        else "Only the configured president can enter president differential hours."
+    )
     return """
         <form id="entryForm" class="form-stack">
           <div class="field-grid">
             <label>Date<input name="entry_date" type="date" required></label>
             <label>Hours<input name="hours" type="number" step="0.25"></label>
-            <label>Meals<input name="meals_amount" type="number" step="0.01"></label>
-            <label>Hotel<input name="hotel_amount" type="number" step="0.01"></label>
-            <label>Rental<input name="rentals_amount" type="number" step="0.01"></label>
-            <label>Miscellaneous<input name="miscellaneous_amount" type="number" step="0.01"></label>
+            <label>Meals ($)<input name="meals_amount" type="number" step="0.01"></label>
+            <label>Hotel ($)<input name="hotel_amount" type="number" step="0.01"></label>
+            <label>Rental ($)<input name="rentals_amount" type="number" step="0.01"></label>
+            <label>Miscellaneous ($)<input name="miscellaneous_amount" type="number" step="0.01"></label>
             <label>Local<input name="local_number" value="3106"></label>
           </div>
           <label>Address<input name="address"></label>
+          <section class="subpanel__PRESIDENT_PANEL_CLASS__" id="presidentDifferentialPanel">
+            <div class="section-head"><div><p class="eyebrow">President Differential</p><h2>Scale 36 + 20%</h2></div></div>
+            <div class="field-grid">
+              <label>Differential Hours<input name="president_diff_hours" type="number" step="0.25" placeholder="defaults to hours"__PRESIDENT_DISABLED__></label>
+            </div>
+            <div class="muted">__PRESIDENT_HELP__</div>
+          </section>
           <label>Notes<textarea name="notes"></textarea></label>
-          <div class="toolbar"><button type="submit">Save Entry</button><span id="entryStatus" class="muted"></span></div>
+          <label class="certify-line"><input name="submitter_certified" type="checkbox" required> I certify this daily lost-wage and expense entry is accurate and I am signing off on it.</label>
+          <input type="hidden" name="submitter_certification_text" value="I certify this daily lost-wage and expense entry is accurate and I am signing off on it.">
+          <div class="toolbar"><button type="submit">Sign Off and Save Entry</button><span id="entryStatus" class="muted"></span></div>
         </form>
-    """
+    """.replace("__PRESIDENT_PANEL_CLASS__", president_panel_class).replace(
+        "__PRESIDENT_DISABLED__", president_disabled
+    ).replace("__PRESIDENT_HELP__", president_help)
 
 
-def _stub_form_html(*, title: str = "Pay Stub Proof") -> str:
+def _stub_form_html(*, title: str = "Commission Pay Proof") -> str:
     return f"""
-    <section class="panel" id="wageProfilePanel">
+    <section class="panel hidden" id="commissionProofPanel">
       <div class="section-head">
-        <div><p class="eyebrow">{escape(title)}</p><h2>Historical Proof</h2></div>
-        <div class="muted">Attachment record only</div>
+        <div><p class="eyebrow">{escape(title)}</p><h2>Last Month Payroll</h2></div>
+        <div class="muted" id="commissionProofHelp"></div>
       </div>
       <form id="stubForm" class="form-stack">
         <div class="field-grid">
-          <label>Member Email<input name="user_email"></label>
+          <label>Member Email<input name="user_email" placeholder="leave blank for yourself"></label>
+          <label>Payroll Month<input name="payroll_month" type="month"></label>
           <label>Base Wage Type<select name="base_wage_input_type"><option value="hourly">Hourly</option><option value="weekly">Weekly</option></select></label>
-          <label>Base Wage Amount<input name="base_wage_amount" type="number" step="0.01"></label>
+          <label>Base Wage Amount ($)<input name="base_wage_amount" type="number" step="0.01"></label>
           <label>Weekly Basis<select name="weekly_basis_hours"><option value="40">40</option><option value="37.5">37.5</option></select></label>
-          <label>Commission Month 1<input name="commission_month_1_amount" type="number" step="0.01"></label>
-          <label>Commission Month 2<input name="commission_month_2_amount" type="number" step="0.01"></label>
-          <label>Commission Month 3<input name="commission_month_3_amount" type="number" step="0.01"></label>
+          <label>Commission Month 1 ($)<input name="commission_month_1_amount" type="number" step="0.01"></label>
+          <label>Commission Month 2 ($)<input name="commission_month_2_amount" type="number" step="0.01"></label>
+          <label>Commission Month 3 ($)<input name="commission_month_3_amount" type="number" step="0.01"></label>
           <label>Pay Stub<input id="stubFile" type="file" accept=".pdf,image/png,image/jpeg"></label>
         </div>
         <label>Notes<textarea name="notes"></textarea></label>
         <div class="toolbar"><button type="submit" class="secondary">Save Pay Proof</button><span id="stubStatus" class="muted"></span></div>
       </form>
       <div class="table-wrap compact-table">
-        <table><thead><tr><th>Member</th><th>Base</th><th>Commission Avg</th><th>Commission Hr</th><th>Total Hr</th><th>File</th></tr></thead><tbody id="stubsBody"></tbody></table>
+        <table><thead><tr><th>Member</th><th>Payroll Month</th><th>Base</th><th>Commission Avg</th><th>Commission Hr</th><th>Total Hr</th><th>File</th></tr></thead><tbody id="stubsBody"></tbody></table>
       </div>
+    </section>
+    """
+
+
+def _my_pay_profile_html() -> str:
+    return """
+    <section class="panel" id="myPayProfilePanel">
+      <div class="section-head">
+        <div><p class="eyebrow">My Pay Profile</p><h2>Lost Wage Rate</h2></div>
+        <span id="myPayProfileStatus" class="muted"></span>
+      </div>
+      <form id="myPayProfileForm" class="form-stack">
+        <div class="field-grid">
+          <label>Email<input name="principal_email" readonly></label>
+          <label>Name<input name="principal_display_name" readonly></label>
+          <label>Pay Basis<select name="pay_basis">
+            <option value="hourly">Hourly</option>
+            <option value="weekly">Weekly / Salary</option>
+            <option value="commission">Commission</option>
+            <option value="president">President</option>
+            <option value="expense_only">Expense Only</option>
+          </select></label>
+          <label data-basis-field="wage">Base Wage Type<select name="base_wage_input_type"><option value="hourly">Hourly</option><option value="weekly">Weekly</option></select></label>
+          <label data-basis-field="wage">Base Wage Amount ($)<input name="base_wage_amount" type="number" step="0.01"></label>
+          <label data-basis-field="wage">Weekly Basis<select name="weekly_basis_hours"><option value="40">40</option><option value="37.5">37.5</option></select></label>
+          <label data-basis-field="commission">Commission Month 1 ($)<input name="commission_month_1_amount" type="number" step="0.01"></label>
+          <label data-basis-field="commission">Commission Month 2 ($)<input name="commission_month_2_amount" type="number" step="0.01"></label>
+          <label data-basis-field="commission">Commission Month 3 ($)<input name="commission_month_3_amount" type="number" step="0.01"></label>
+        </div>
+        <label>Default Voucher Address<input name="default_address"></label>
+        <label>Notes<textarea name="notes"></textarea></label>
+        <div class="toolbar"><button type="submit" class="secondary">Save My Pay Profile</button><span id="myPayProfileSummary" class="muted"></span></div>
+      </form>
     </section>
     """
 
@@ -859,6 +958,8 @@ def _mileage_tracker_form_html() -> str:
               </div>
             </div>
             <button type="button" class="btn btn-secondary add-location w-100 mt-2">Add Location</button>
+            <button type="button" class="btn btn-outline-secondary w-100 mt-2" id="checkMileageAddressesBtn">Check Addresses</button>
+            <div class="form-text" id="addressCheckStatus">Use common places or check typed addresses before generating the mileage sheet.</div>
           </div>
 
           <div class="toolbar">
@@ -871,7 +972,7 @@ def _mileage_tracker_form_html() -> str:
     <section class="panel">
       <div class="section-head"><div><p class="eyebrow">Mileage Forms</p><h2>Generated This Period</h2></div></div>
       <div class="table-wrap compact-table">
-        <table><thead><tr><th>Date</th><th>Name</th><th>File</th><th>Scan</th></tr></thead><tbody id="mileageFormsBody"></tbody></table>
+        <table><thead><tr><th></th><th>Date</th><th>Name</th><th>File</th><th>Scan</th><th>Miles</th><th>Rate</th><th>Reimbursement</th><th>Actions</th></tr></thead><tbody id="mileageFormsBody"></tbody></table>
       </div>
     </section>
     """
@@ -885,19 +986,20 @@ def _daily_tally_html() -> str:
         <div id="dailyTallyStats" class="muted"></div>
       </div>
       <div class="table-wrap compact-table">
-        <table><thead><tr><th>Date</th><th>Hours</th><th>Lost Wages</th><th>Mileage</th><th>Expenses</th><th>Total</th></tr></thead><tbody id="dailyTallyBody"></tbody></table>
+        <table><thead><tr><th>Date</th><th>Hours</th><th>Lost Wages</th><th>Mileage</th><th>Expenses</th><th>President Diff</th><th>Total</th></tr></thead><tbody id="dailyTallyBody"></tbody></table>
       </div>
     </section>
     """
 
 
-def _entries_table_html(*, attach: bool) -> str:
+def _entries_table_html(*, attach: bool, review: bool = False) -> str:
     attach_html = """
       <div class="toolbar">
         <input id="receiptFile" type="file" accept=".pdf,image/png,image/jpeg">
         <button id="uploadReceiptBtn" type="button" class="secondary">Attach Receipt To Selected</button>
       </div>
     """ if attach else ""
+    review_header = "<th>Review</th>" if review else ""
     return f"""
     <section class="panel">
       <div class="section-head">
@@ -906,7 +1008,7 @@ def _entries_table_html(*, attach: bool) -> str:
       </div>
       {attach_html}
       <div class="table-wrap">
-        <table><thead><tr><th></th><th>Date</th><th>Name</th><th>Hours</th><th>Lost Wages</th><th>Mileage</th><th>Other</th><th>President Diff</th><th>Notes</th></tr></thead><tbody id="entriesBody"></tbody></table>
+        <table data-review="{str(review).lower()}"><thead><tr><th></th><th>Date</th><th>Name</th><th>Hours</th><th>Lost Wages</th><th>Mileage</th><th>Other</th><th>President Diff</th>{review_header}<th>Sign-Off</th><th>Notes</th><th>Actions</th></tr></thead><tbody id="entriesBody"></tbody></table>
       </div>
     </section>
     """
@@ -971,10 +1073,11 @@ def _pay_view_content(view: str, *, actor: PayActor) -> str:
             <div><span id="demoEntryCount"></span><strong>Entries</strong></div>
             <div><span id="demoLostWages"></span><strong>Lost Wages</strong></div>
             <div><span id="demoMileageTotal"></span><strong>Mileage</strong></div>
+            <div><span id="demoPresidentDiffTotal"></span><strong>President Diff</strong></div>
             <div><span id="demoPacketStatus"></span><strong>Packet</strong></div>
           </div>
           <div class="table-wrap">
-            <table><thead><tr><th>Date</th><th>Name</th><th>Hours</th><th>Lost Wages</th><th>Mileage</th><th>Other</th><th>Notes</th></tr></thead><tbody id="demoEntriesBody"></tbody></table>
+            <table><thead><tr><th>Date</th><th>Name</th><th>Hours</th><th>Lost Wages</th><th>Mileage</th><th>Other</th><th>President Diff</th><th>Sign-Off</th><th>Notes</th></tr></thead><tbody id="demoEntriesBody"></tbody></table>
           </div>
         </section>
         <section class="panel" id="demoFilesPanel">
@@ -1032,6 +1135,33 @@ def _pay_view_content(view: str, *, actor: PayActor) -> str:
             if actor.can_lock
             else '<div class="muted">Read-only review access.</div>'
         )
+        correction_panel = """
+        <section class="panel hidden" id="correctionPanel">
+          <div class="section-head">
+            <div><p class="eyebrow">Treasurer Correction</p><h2 id="correctionTitle">Edit Voucher Additions</h2></div>
+            <span id="correctionStatus" class="muted">Choose Edit Voucher on a row below.</span>
+          </div>
+          <form id="correctionForm" class="form-stack">
+            <div class="field-grid">
+              <label>Member Email<input name="user_email" required></label>
+              <label>Name<input name="display_name"></label>
+              <label>Date<input name="entry_date" type="date" required></label>
+              <label>Local<input name="local_number" value="3106"></label>
+              <label>Hours<input name="hours" type="number" step="0.25" min="0"></label>
+              <label>Miles<input name="mileage_miles" type="number" step="0.01" min="0"></label>
+              <label>Mileage Rate ($/mi)<input name="mileage_rate" type="number" step="0.001" min="0"></label>
+              <label>Mileage Amount ($)<input name="mileage_amount" type="number" step="0.01" min="0"></label>
+              <label>Meals ($)<input name="meals_amount" type="number" step="0.01" min="0"></label>
+              <label>Hotel ($)<input name="hotel_amount" type="number" step="0.01" min="0"></label>
+              <label>Rentals ($)<input name="rentals_amount" type="number" step="0.01" min="0"></label>
+              <label>Misc. ($)<input name="miscellaneous_amount" type="number" step="0.01" min="0"></label>
+            </div>
+            <label>Address<input name="address"></label>
+            <label>Correction Note<textarea name="notes" required></textarea></label>
+            <div class="toolbar"><button type="submit" class="secondary">Add Correction</button><button type="button" id="cancelCorrectionBtn" class="secondary">Close</button></div>
+          </form>
+        </section>
+        """ if actor.can_lock else ""
         return f"""
         <section class="panel lead-panel">
           <div><p class="eyebrow">Treasurer</p><h2>Review, Lock, and Send</h2></div>
@@ -1041,7 +1171,8 @@ def _pay_view_content(view: str, *, actor: PayActor) -> str:
           <div class="section-head"><div><p class="eyebrow">Packet Control</p><h2>Voucher Packet</h2></div><span id="treasurerStatus" class="muted"></span></div>
           {packet_controls}
         </section>
-        {_entries_table_html(attach=False)}
+        {correction_panel}
+        {_entries_table_html(attach=False, review=True)}
         """
     if view == "admin":
         return """
@@ -1057,7 +1188,7 @@ def _pay_view_content(view: str, *, actor: PayActor) -> str:
               <label>Treasurer Emails<input name="treasurer_emails"></label>
               <label>Scale Effective Date<input name="effective_date" type="date"></label>
               <label>Weekly Basis<select name="weekly_basis_hours"><option value="40">40</option><option value="37.5">37.5</option></select></label>
-              <label>Scale 36 Weekly Base<input name="target_weekly_amount" type="number" step="0.01"></label>
+              <label>Scale 36 Weekly Base ($)<input name="target_weekly_amount" type="number" step="0.01"></label>
               <label>President Target<input value="Scale 36 + 20%" disabled></label>
             </div>
             <div class="toolbar"><button type="submit" class="secondary">Save Settings</button></div>
@@ -1076,12 +1207,22 @@ def _pay_view_content(view: str, *, actor: PayActor) -> str:
           <div class="table-wrap compact-table"><table><thead><tr><th>Date</th><th>Officer</th><th>Area</th><th>Type</th><th>Suggestion</th><th>Status</th><th></th></tr></thead><tbody id="demoFeedbackBody"></tbody></table></div>
         </section>
         <section class="panel">
-          <div class="section-head"><div><p class="eyebrow">Internal Access</p><h2>Microsoft Role Assignments</h2></div><span id="internalRoleStatus" class="muted"></span></div>
+          <div class="section-head"><div><p class="eyebrow">Internal Access</p><h2>Microsoft People</h2></div><span id="internalRoleStatus" class="muted"></span></div>
+          <div class="subpanel form-stack">
+            <div>
+              <h3>Automatic Internal Roster</h3>
+              <p class="muted">Import every active Microsoft account with an assigned paid license as an expense-only pay profile. Existing wage profiles are left unchanged.</p>
+            </div>
+            <div class="toolbar"><button id="importLicensedUsersBtn" type="button" class="secondary">Import Microsoft Paid Users</button></div>
+          </div>
           <form id="internalRoleSearchForm" class="inline-form">
-            <input name="search" placeholder="Name or email" required>
-            <button type="submit" class="secondary">Search</button>
+            <input name="search" placeholder="Find president or treasurer by name or email" required>
+            <button type="submit" class="secondary">Search For Role</button>
           </form>
           <div class="table-wrap compact-table"><table><thead><tr><th>Name</th><th>Email</th><th>Source</th><th></th></tr></thead><tbody id="internalRoleSearchBody"></tbody></table></div>
+        </section>
+        <section class="panel">
+          <div class="section-head"><div><p class="eyebrow">People</p><h2>People and Pay Profiles</h2></div><span id="payProfileStatus" class="muted"></span></div>
           <form id="payProfileForm" class="form-stack">
             <input name="principal_id" type="hidden">
             <div class="field-grid">
@@ -1095,17 +1236,18 @@ def _pay_view_content(view: str, *, actor: PayActor) -> str:
                 <option value="expense_only">Expense Only</option>
               </select></label>
               <label>Base Wage Type<select name="base_wage_input_type"><option value="hourly">Hourly</option><option value="weekly">Weekly</option></select></label>
-              <label>Base Wage Amount<input name="base_wage_amount" type="number" step="0.01"></label>
+              <label>Base Wage Amount ($)<input name="base_wage_amount" type="number" step="0.01"></label>
               <label>Weekly Basis<select name="weekly_basis_hours"><option value="40">40</option><option value="37.5">37.5</option></select></label>
-              <label>Commission Month 1<input name="commission_month_1_amount" type="number" step="0.01"></label>
-              <label>Commission Month 2<input name="commission_month_2_amount" type="number" step="0.01"></label>
-              <label>Commission Month 3<input name="commission_month_3_amount" type="number" step="0.01"></label>
+              <label>Commission Month 1 ($)<input name="commission_month_1_amount" type="number" step="0.01"></label>
+              <label>Commission Month 2 ($)<input name="commission_month_2_amount" type="number" step="0.01"></label>
+              <label>Commission Month 3 ($)<input name="commission_month_3_amount" type="number" step="0.01"></label>
               <label>Status<select name="status"><option value="active">Active</option><option value="disabled">Disabled</option></select></label>
             </div>
+            <label>Default Voucher Address<input name="default_address"></label>
             <label>Notes<textarea name="notes"></textarea></label>
             <div class="toolbar"><button type="submit" class="secondary">Save Pay Profile</button></div>
           </form>
-          <div class="table-wrap compact-table"><table><thead><tr><th>Name</th><th>Email</th><th>Pay Basis</th><th>Base</th><th>Commission Hr</th><th>Total Hr</th><th>Status</th></tr></thead><tbody id="payProfilesBody"></tbody></table></div>
+          <div class="table-wrap compact-table"><table><thead><tr><th>Source</th><th>Name</th><th>Email</th><th>Pay Basis</th><th>Base</th><th>Commission Hr</th><th>Total Hr</th><th>Status</th><th></th></tr></thead><tbody id="payProfilesBody"></tbody></table></div>
           <div class="table-wrap compact-table"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th></th></tr></thead><tbody id="internalRolesBody"></tbody></table></div>
         </section>
         <section class="panel">
@@ -1141,8 +1283,10 @@ def _pay_view_content(view: str, *, actor: PayActor) -> str:
     </section>
     <section class="panel">
       <div class="section-head"><div><p class="eyebrow">Daily Input</p><h2>Lost Time and Expenses</h2></div><span id="entryStatus" class="muted"></span></div>
-      {_entry_form_html()}
+      {_entry_form_html(president_enabled=actor.is_president)}
     </section>
+    {_my_pay_profile_html()}
+    {_stub_form_html()}
     {_entries_table_html(attach=True)}
     {_daily_tally_html()}
     """
@@ -1179,6 +1323,7 @@ def _render_pay_workspace_page(*, view: str, actor: PayActor) -> str:
     .side-footer { margin-top:auto; display:grid; gap:4px; color:var(--muted); font-size:13px; padding:10px 4px 0; border-top:1px solid var(--line); }
     .main { min-width:0; display:grid; gap:14px; padding:18px; align-content:start; }
     .topbar { display:flex; justify-content:space-between; gap:12px; align-items:center; background:#fff; border:1px solid var(--line); border-radius:6px; padding:14px 16px; }
+    .period-picker { min-width:260px; max-width:360px; }
     h1, h2 { margin:0; letter-spacing:0; }
     h1 { font-size:24px; }
     h2 { font-size:18px; }
@@ -1187,6 +1332,9 @@ def _render_pay_workspace_page(*, view: str, actor: PayActor) -> str:
     .muted { color:var(--muted); font-size:13px; }
     .hidden { display:none !important; }
     .panel { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:16px; min-width:0; }
+    .subpanel { border:1px solid var(--line); border-radius:4px; padding:12px; background:#f8fafb; }
+    .disabled-panel { opacity:.58; background:#f3f5f7; }
+    .disabled-panel input, .disabled-panel select, .disabled-panel textarea { background:#eef2f5; color:#697586; }
     .lead-panel { display:flex; justify-content:space-between; align-items:center; gap:16px; background:var(--soft); }
     .metric-row { display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; }
     .metric-row div { min-width:150px; background:#fff; border:1px solid var(--line); border-radius:4px; padding:9px 10px; display:grid; gap:3px; }
@@ -1257,7 +1405,7 @@ def _render_pay_workspace_page(*, view: str, actor: PayActor) -> str:
       <div class="side-footer"><strong>__ACTOR_NAME__</strong><span>__ROLE_LABEL__</span><a href="/officers">Main tracker</a></div>
     </aside>
     <main class="main">
-      <header class="topbar"><div><p class="eyebrow">Pay Portal</p><h1>__PAGE_TITLE__</h1></div><div class="muted">Private workspace</div></header>
+      <header class="topbar"><div><p class="eyebrow">Pay Portal</p><h1>__PAGE_TITLE__</h1></div><label class="period-picker">Pay Period<select id="periodSelect"></select></label></header>
       __CONTENT__
     </main>
   </div>
@@ -1265,11 +1413,14 @@ def _render_pay_workspace_page(*, view: str, actor: PayActor) -> str:
 const PAY_VIEW = "__VIEW__";
 let context = null;
 let selectedEntryId = null;
+let selectedPeriodId = (() => { try { return localStorage.getItem('paySelectedPeriodId') || ''; } catch (_err) { return ''; } })();
 let internalRoleSearchRows = [];
 let commonPlaceLookup = new Map();
 let commonPlacesDraft = [];
 const byId = id => document.getElementById(id);
 function money(value) { return Number(value || 0).toFixed(2); }
+function currency(value) { return `$${money(value)}`; }
+function rateCurrency(value, digits = 3) { return `$${Number(value || 0).toFixed(digits)}`; }
 function addCell(row, value) { const cell = document.createElement('td'); cell.textContent = value == null ? '' : String(value); row.appendChild(cell); }
 function setText(id, value) { const node = byId(id); if (node) node.textContent = value || ''; }
 function bind(id, event, handler) { const node = byId(id); if (node) node.addEventListener(event, handler); }
@@ -1284,15 +1435,30 @@ function bytesToBase64(buffer) {
   for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(binary);
 }
+function renderPeriodSelect() {
+  const select = byId('periodSelect');
+  if (!select || !context) return;
+  const periods = context.periods || [];
+  select.innerHTML = '';
+  for (const period of periods) {
+    const option = document.createElement('option');
+    option.value = period.id;
+    option.textContent = `${period.period_start} to ${period.period_end} - ${period.status} (${period.entry_count || 0})`;
+    if (period.id === context.period.id) option.selected = true;
+    select.appendChild(option);
+  }
+  select.disabled = periods.length <= 1;
+}
 function renderSummary() {
   if (!context) return;
+  renderPeriodSelect();
   const entries = context.entries || [];
   const lost = entries.reduce((sum, row) => sum + Number(row.lost_wage_hourly_rate || row.hourly_rate || 0) * Number(row.hours || 0), 0);
   const mileage = entries.reduce((sum, row) => sum + Number(row.mileage_amount || 0), 0);
   const other = entries.reduce((sum, row) => sum + Number(row.rentals_amount || 0) + Number(row.meals_amount || 0) + Number(row.hotel_amount || 0) + Number(row.miscellaneous_amount || 0), 0);
   setText('periodLabel', `${context.period.period_start} to ${context.period.period_end} - ${context.period.status}`);
   setText('actorLabel', context.actor.display_name || context.actor.email || '');
-  setText('periodStats', `${entries.length} entries | $${money(lost + mileage + other)}`);
+  setText('periodStats', `${entries.length} entries | ${currency(lost + mileage + other)}`);
 }
 function readDemoStepIndex() {
   try {
@@ -1315,9 +1481,9 @@ const DEMO_STEPS = [
   },
   {
     label: 'Submit Entry',
-    status: 'Officer entry saved in demo',
-    checklist: ['Enter date and lost-time hours', 'Confirm pay profile drives the rate', 'Add daily notes for the voucher narrative'],
-    log: ['Demo officer entry validated', 'Lost wages calculated from the saved profile snapshot', 'Daily notes queued for the packet narrative'],
+    status: 'Daily entry signed off in demo',
+    checklist: ['Enter date and lost-time hours', 'Confirm pay profile drives the rate', 'Check the daily sign-off before saving'],
+    log: ['Demo officer entry validated', 'Lost wages calculated from the saved profile snapshot', 'Submitter signed off electronically in Pay Portal'],
   },
   {
     label: 'Add Mileage',
@@ -1334,8 +1500,8 @@ const DEMO_STEPS = [
   {
     label: 'Demo Lock',
     status: 'Demo packet locked without sending',
-    checklist: ['Confirm packet totals', 'Confirm signer order concept', 'Collect officer suggestions before production use'],
-    log: ['Demo packet marked locked', 'Email, DocuSeal, SharePoint, and real pay entries were not touched', 'Suggestions remain available for admin review'],
+    checklist: ['Confirm each person has one voucher', 'Confirm each person support support PDFs stay behind their voucher', 'Confirm only the president signs the packet'],
+    log: ['Demo packet grouped by person with supporting documents behind each voucher', 'Daily submitter sign-offs stay in Pay Portal audit fields', 'Email, DocuSeal, SharePoint, and real pay entries were not touched'],
   },
 ];
 function addDaysText(dateText, days) {
@@ -1350,22 +1516,27 @@ function demoRowsForStep() {
     {
       offset: 1,
       entry_date: addDaysText(start, 1),
-      display_name: context.actor.display_name || 'Demo Officer',
+      display_name: 'Nick Craig',
       hours: 4,
-      rate: 38.5,
+      rate: 250,
       mileage: 24.65,
       other: 0,
+      signed_off: true,
       notes: 'DEMO TRAINING - reviewed route mileage, receipts, and pay profile rate for officer practice.',
     },
     {
       offset: 3,
       entry_date: addDaysText(start, 3),
       display_name: 'Demo President',
-      hours: 2.5,
-      rate: 54.75,
+      hours: 4,
+      rate: 62,
+      normal_rate: 45,
       mileage: 0,
       other: 18.75,
-      notes: 'DEMO TRAINING - confirmed president differential example and approval path.',
+      president_diff_hours: 4,
+      president_diff_rate: 17,
+      signed_off: true,
+      notes: 'DEMO TRAINING - president normal wage is $45.00/hr, presidential wage is $62.00/hr, and employer-work differential is $17.00/hr.',
     },
     {
       offset: 6,
@@ -1375,6 +1546,7 @@ function demoRowsForStep() {
       rate: 46.25,
       mileage: 18.5,
       other: 24,
+      signed_off: true,
       notes: 'DEMO TRAINING - reconciled mileage attachment with daily expense voucher totals.',
     },
     {
@@ -1385,6 +1557,7 @@ function demoRowsForStep() {
       rate: 42.25,
       mileage: 31.75,
       other: 12.5,
+      signed_off: true,
       notes: 'DEMO TRAINING - met with member about payroll correction and documented next steps.',
     },
   ];
@@ -1394,6 +1567,10 @@ function demoRowsForStep() {
     lost_wages: row.hours * row.rate,
     mileage: demoStepIndex >= 2 ? row.mileage : 0,
     other: demoStepIndex >= 3 ? row.other : 0,
+    president_diff_hours: demoStepIndex >= 3 ? Number(row.president_diff_hours || 0) : 0,
+    president_diff_rate: demoStepIndex >= 3 ? Number(row.president_diff_rate || 0) : 0,
+    president_diff_amount: demoStepIndex >= 3 ? Number(row.president_diff_hours || 0) * Number(row.president_diff_rate || 0) : 0,
+    signed_off: demoStepIndex >= 1 && !!row.signed_off,
   }));
 }
 function demoModeEnabled() {
@@ -1427,7 +1604,7 @@ function renderDemoCycle() {
   const step = DEMO_STEPS[demoStepIndex];
   const demoSettings = context.demo_settings || context.settings || {};
   setText('demoTitle', demoSettings.demo_cycle_title || 'Training Demo Cycle');
-  setText('demoNotes', demoSettings.demo_cycle_notes || 'Practice data only. The demo lock does not send email, DocuSeal, or SharePoint packets.');
+  setText('demoNotes', demoSettings.demo_cycle_notes || 'Practice data only. The demo shows daily submitter sign-off and president-only packet signing without touching live services.');
   setText('demoCycleStatus', step.status);
   renderDemoList('demoChecklist', step.checklist);
   renderDemoList('demoActivityLog', step.log);
@@ -1439,8 +1616,9 @@ function renderDemoCycle() {
   });
   const rows = demoRowsForStep();
   setText('demoEntryCount', String(rows.length));
-  setText('demoLostWages', `$${money(rows.reduce((sum, row) => sum + row.lost_wages, 0))}`);
-  setText('demoMileageTotal', `$${money(rows.reduce((sum, row) => sum + row.mileage, 0))}`);
+  setText('demoLostWages', currency(rows.reduce((sum, row) => sum + row.lost_wages, 0)));
+  setText('demoMileageTotal', currency(rows.reduce((sum, row) => sum + row.mileage, 0)));
+  setText('demoPresidentDiffTotal', currency(rows.reduce((sum, row) => sum + row.president_diff_amount, 0)));
   setText('demoPacketStatus', demoStepIndex >= 4 ? 'Locked' : demoStepIndex >= 3 ? 'Review' : 'Open');
   const body = byId('demoEntriesBody');
   if (!body) return;
@@ -1448,7 +1626,7 @@ function renderDemoCycle() {
   if (!rows.length) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 7;
+    td.colSpan = 9;
     td.textContent = 'No demo entries yet.';
     tr.appendChild(td);
     body.appendChild(tr);
@@ -1459,9 +1637,11 @@ function renderDemoCycle() {
     addCell(tr, row.entry_date);
     addCell(tr, row.display_name);
     addCell(tr, money(row.hours));
-    addCell(tr, money(row.lost_wages));
-    addCell(tr, money(row.mileage));
-    addCell(tr, money(row.other));
+    addCell(tr, currency(row.lost_wages));
+    addCell(tr, currency(row.mileage));
+    addCell(tr, currency(row.other));
+    addCell(tr, row.president_diff_amount ? `${money(row.president_diff_hours)} hrs / ${currency(row.president_diff_amount)}` : '');
+    addCell(tr, row.signed_off ? 'Signed off in Pay Portal' : 'Not signed off');
     addCell(tr, row.notes);
     body.appendChild(tr);
   }
@@ -1480,7 +1660,7 @@ function renderDemoFeedback() {
   if (!rows.length) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 7;
+    td.colSpan = 9;
     td.textContent = 'No demo suggestions submitted yet.';
     tr.appendChild(td);
     body.appendChild(tr);
@@ -1551,6 +1731,8 @@ function renderEntries() {
   if (!body || !context) return;
   body.innerHTML = '';
   const entries = context.entries || [];
+  const table = body.closest('table');
+  const showReviewControls = table && table.dataset.review === 'true';
   if ((!selectedEntryId || !entries.some(row => row.id === selectedEntryId)) && entries.length) selectedEntryId = entries[0].id;
   for (const row of entries) {
     const tr = document.createElement('tr');
@@ -1566,11 +1748,46 @@ function renderEntries() {
     addCell(tr, row.entry_date);
     addCell(tr, row.display_name || row.user_email);
     addCell(tr, money(row.hours));
-    addCell(tr, money(Number(row.lost_wage_hourly_rate || row.hourly_rate || 0) * Number(row.hours || 0)));
-    addCell(tr, money(row.mileage_amount));
-    addCell(tr, money(Number(row.rentals_amount || 0) + Number(row.meals_amount || 0) + Number(row.hotel_amount || 0) + Number(row.miscellaneous_amount || 0)));
-    addCell(tr, money(row.president_diff_amount));
+    addCell(tr, currency(Number(row.lost_wage_hourly_rate || row.hourly_rate || 0) * Number(row.hours || 0)));
+    addCell(tr, currency(row.mileage_amount));
+    addCell(tr, currency(Number(row.rentals_amount || 0) + Number(row.meals_amount || 0) + Number(row.hotel_amount || 0) + Number(row.miscellaneous_amount || 0)));
+    addCell(tr, currency(row.president_diff_amount));
+    if (showReviewControls) addCell(tr, `${row.review_status || 'pending'}${row.review_note ? ': ' + row.review_note : ''}`);
+    addCell(tr, row.submitter_certified_at_utc ? 'Signed off' : 'Not signed off');
     addCell(tr, row.notes || '');
+    const actionCell = document.createElement('td');
+    const canEditEntryForm = !!byId('entryForm') && (PAY_VIEW === 'entry' || PAY_VIEW === 'president');
+    if (context.actor && (context.actor.can_lock || canEditEntryForm)) {
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.className = 'secondary';
+      editBtn.textContent = 'Edit Voucher';
+      editBtn.addEventListener('click', () => canEditEntryForm ? openEntryForEdit(row) : openCorrectionForEntry(row));
+      actionCell.appendChild(editBtn);
+      if (canEditEntryForm && !row.locked_at_utc) {
+        const deleteBtn = document.createElement('button');
+        deleteBtn.type = 'button';
+        deleteBtn.className = 'danger';
+        deleteBtn.textContent = 'Delete';
+        deleteBtn.addEventListener('click', () => deleteEntry(row));
+        actionCell.appendChild(deleteBtn);
+      }
+    }
+    if (showReviewControls && context.actor && context.actor.can_lock) {
+      const reviewInput = document.createElement('input');
+      reviewInput.placeholder = 'Review note';
+      reviewInput.value = row.review_note || '';
+      actionCell.appendChild(reviewInput);
+      for (const [status, label] of [['approved', 'Approve'], ['needs_fix', 'Needs Fix'], ['rejected', 'Reject / Exclude']]) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = status === 'rejected' ? 'danger' : 'secondary';
+        btn.textContent = label;
+        btn.addEventListener('click', () => reviewEntry(row.id, status, reviewInput.value));
+        actionCell.appendChild(btn);
+      }
+    }
+    tr.appendChild(actionCell);
     body.appendChild(tr);
   }
   syncMileageFormFromEntry();
@@ -1582,40 +1799,43 @@ function renderDailyTally() {
   for (const row of context.entries || []) {
     const date = row.entry_date || '';
     if (!date) continue;
-    if (!rowsByDate.has(date)) rowsByDate.set(date, { hours: 0, lost: 0, mileage: 0, expenses: 0 });
+    if (!rowsByDate.has(date)) rowsByDate.set(date, { hours: 0, lost: 0, mileage: 0, expenses: 0, president_diff: 0 });
     const tally = rowsByDate.get(date);
     tally.hours += Number(row.hours || 0);
     tally.lost += Number(row.lost_wage_hourly_rate || row.hourly_rate || 0) * Number(row.hours || 0);
     tally.mileage += Number(row.mileage_amount || 0);
     tally.expenses += Number(row.rentals_amount || 0) + Number(row.meals_amount || 0) + Number(row.hotel_amount || 0) + Number(row.miscellaneous_amount || 0);
+    tally.president_diff += Number(row.president_diff_amount || 0);
   }
   body.innerHTML = '';
   if (!rowsByDate.size) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 6;
+    td.colSpan = 7;
     td.textContent = 'No entries yet.';
     tr.appendChild(td);
     body.appendChild(tr);
     setText('dailyTallyStats', '$0.00');
     return;
   }
-  const totals = { hours: 0, lost: 0, mileage: 0, expenses: 0 };
+  const totals = { hours: 0, lost: 0, mileage: 0, expenses: 0, president_diff: 0 };
   for (const [date, tally] of Array.from(rowsByDate.entries()).sort((left, right) => left[0].localeCompare(right[0]))) {
     totals.hours += tally.hours;
     totals.lost += tally.lost;
     totals.mileage += tally.mileage;
     totals.expenses += tally.expenses;
+    totals.president_diff += tally.president_diff;
     const tr = document.createElement('tr');
     addCell(tr, date);
     addCell(tr, money(tally.hours));
-    addCell(tr, `$${money(tally.lost)}`);
-    addCell(tr, `$${money(tally.mileage)}`);
-    addCell(tr, `$${money(tally.expenses)}`);
-    addCell(tr, `$${money(tally.lost + tally.mileage + tally.expenses)}`);
+    addCell(tr, currency(tally.lost));
+    addCell(tr, currency(tally.mileage));
+    addCell(tr, currency(tally.expenses));
+    addCell(tr, currency(tally.president_diff));
+    addCell(tr, currency(tally.lost + tally.mileage + tally.expenses + tally.president_diff));
     body.appendChild(tr);
   }
-  setText('dailyTallyStats', `${money(totals.hours)} hrs | $${money(totals.lost + totals.mileage + totals.expenses)}`);
+  setText('dailyTallyStats', `${money(totals.hours)} hrs | ${currency(totals.lost + totals.mileage + totals.expenses + totals.president_diff)}`);
 }
 let activeAddressInput = null;
 function placeKey(value) {
@@ -1696,6 +1916,36 @@ function wireAddressInput(input) {
   input.addEventListener('focus', () => { activeAddressInput = input; });
   input.addEventListener('change', () => resolveCommonPlaceInput(input));
   input.addEventListener('blur', () => resolveCommonPlaceInput(input));
+}
+function mileageLocationInputs() {
+  return Array.from(document.querySelectorAll('#locations .address-input'));
+}
+function mileageLocationsFromInputs() {
+  return mileageLocationInputs().map(input => input.value.trim()).filter(Boolean);
+}
+function applyResolvedMileageLocations(locations) {
+  const inputs = mileageLocationInputs();
+  for (let index = 0; index < inputs.length && index < locations.length; index += 1) {
+    if (locations[index]) inputs[index].value = locations[index];
+  }
+}
+async function checkMileageAddresses({ quiet = false } = {}) {
+  const locations = mileageLocationsFromInputs();
+  if (locations.length < 2) {
+    const message = 'Enter at least an origin and destination.';
+    if (!quiet) setText('addressCheckStatus', message);
+    throw new Error(message);
+  }
+  if (!quiet) setText('addressCheckStatus', 'Checking route addresses...');
+  const result = await api('/pay/api/mileage/check-addresses', {
+    method: 'POST',
+    body: JSON.stringify({ locations }),
+  });
+  applyResolvedMileageLocations(result.locations || []);
+  const summary = `${money(result.total_miles)} miles checked. Addresses updated from Google route results.`;
+  setText('addressCheckStatus', summary);
+  if (!quiet) setText('mileageStatus', summary);
+  return result;
 }
 function addMileageLocationField(value, placeholder = 'Enter location') {
   const locationsDiv = byId('locations');
@@ -1819,7 +2069,7 @@ function renderMileageForms() {
   if (!forms.length) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 4;
+    td.colSpan = 9;
     td.textContent = 'No mileage forms generated yet.';
     tr.appendChild(td);
     body.appendChild(tr);
@@ -1827,13 +2077,57 @@ function renderMileageForms() {
   }
   for (const row of forms) {
     const tr = document.createElement('tr');
+    const toggleCell = document.createElement('td');
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'secondary';
+    toggle.textContent = 'Details';
+    toggleCell.appendChild(toggle);
+    tr.appendChild(toggleCell);
     addCell(tr, row.entry_date);
-    addCell(tr, row.user_email);
+    addCell(tr, row.display_name || row.user_email);
     addCell(tr, row.filename);
     addCell(tr, row.scan_status || 'generated');
+    addCell(tr, money(row.mileage_miles));
+    addCell(tr, row.mileage_rate ? rateCurrency(row.mileage_rate, 3) : '');
+    addCell(tr, row.mileage_amount ? currency(row.mileage_amount) : '');
+    const actionCell = document.createElement('td');
+    const download = document.createElement('a');
+    download.href = `/pay/api/attachments/${encodeURIComponent(row.id)}/download`;
+    download.textContent = 'Download PDF';
+    actionCell.appendChild(download);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'secondary';
+    remove.textContent = 'Remove Report';
+    remove.disabled = !row.can_remove;
+    remove.title = row.can_remove ? 'Remove this mileage report and subtract it from the entry.' : (row.remove_reason || 'Cannot remove this report.');
+    remove.addEventListener('click', () => removeMileageReport(row.id, row.filename));
+    actionCell.appendChild(remove);
+    tr.appendChild(actionCell);
+    const details = document.createElement('tr');
+    details.className = 'hidden';
+    const detailsCell = document.createElement('td');
+    detailsCell.colSpan = 9;
+    detailsCell.innerHTML = `<div class="subpanel"><strong>Mileage report breakdown</strong><div class="metric-row"><div><span>${row.display_name || row.user_email || ''}</span><strong>Name</strong></div><div><span>${row.local_number || ''}</span><strong>Local</strong></div><div><span>${row.entry_date || ''}</span><strong>Date</strong></div><div><span>${row.description || ''}</span><strong>Description</strong></div><div><span>${rateCurrency(row.mileage_rate, 3)} per mile</span><strong>IRS Standard Mileage Rate</strong></div><div><span>${money(row.mileage_miles)} miles</span><strong>Total Distance</strong></div><div><span>${currency(row.mileage_amount)}</span><strong>Total Reimbursement</strong></div><div><span>${row.filename || ''}</span><strong>PDF</strong></div><div><span>${row.scan_status || 'generated'}</span><strong>Status</strong></div></div></div>`;
+    details.appendChild(detailsCell);
+    toggle.addEventListener('click', () => details.classList.toggle('hidden'));
     body.appendChild(tr);
+    body.appendChild(details);
   }
 }
+async function removeMileageReport(attachmentId, filename) {
+  if (!attachmentId) return;
+  if (!confirm(`Remove ${filename || 'this mileage report'} and subtract it from the entry?`)) return;
+  try {
+    await api(`/pay/api/attachments/${encodeURIComponent(attachmentId)}`, { method: 'DELETE' });
+    setText('mileageStatus', 'Mileage report removed');
+    await loadContext();
+  } catch (err) {
+    setText('mileageStatus', err.message);
+  }
+}
+
 function renderStubs() {
   const body = byId('stubsBody');
   if (!body || !context) return;
@@ -1841,10 +2135,11 @@ function renderStubs() {
   for (const row of context.compensation_stubs || []) {
     const tr = document.createElement('tr');
     addCell(tr, row.user_email);
-    addCell(tr, `${row.base_wage_input_type} ${money(row.base_wage_amount)}`);
-    addCell(tr, money(row.commission_average_monthly));
-    addCell(tr, money(row.commission_hourly_rate));
-    addCell(tr, money(row.calculated_hourly_rate));
+    addCell(tr, row.payroll_month);
+    addCell(tr, `${row.base_wage_input_type} ${currency(row.base_wage_amount)}`);
+    addCell(tr, currency(row.commission_average_monthly));
+    addCell(tr, currency(row.commission_hourly_rate));
+    addCell(tr, currency(row.calculated_hourly_rate));
     addCell(tr, row.filename);
     body.appendChild(tr);
   }
@@ -1893,6 +2188,10 @@ function renderInternalRoles() {
     body.appendChild(tr);
   }
 }
+function normalizeProfileWageInputType(form) {
+  if (!form || !form.base_wage_input_type) return;
+  if (!form.base_wage_input_type.value) form.base_wage_input_type.value = 'hourly';
+}
 function fillPayProfileForm(row) {
   const form = byId('payProfileForm');
   if (!form || !row) return;
@@ -1907,32 +2206,150 @@ function fillPayProfileForm(row) {
   form.commission_month_2_amount.value = row.commission_month_2_amount || '';
   form.commission_month_3_amount.value = row.commission_month_3_amount || '';
   form.status.value = row.status || 'active';
+  form.default_address.value = row.default_address || '';
   form.notes.value = row.notes || '';
+  normalizeProfileWageInputType(form);
+}
+function fillMyPayProfileForm() {
+  const form = byId('myPayProfileForm');
+  if (!form || !context) return;
+  const actor = context.actor || {};
+  const row = context.pay_profile || {};
+  form.principal_email.value = actor.email || row.principal_email || '';
+  form.principal_display_name.value = actor.display_name || row.principal_display_name || actor.email || '';
+  const presidentOption = form.pay_basis.querySelector('option[value="president"]');
+  const basis = row.pay_basis || 'hourly';
+  const canUsePresidentBasis = actor.can_lock || (actor.is_president && basis === 'president');
+  if (presidentOption) {
+    presidentOption.disabled = !canUsePresidentBasis;
+    presidentOption.hidden = !canUsePresidentBasis;
+  }
+  form.pay_basis.value = basis === 'president' && !canUsePresidentBasis ? 'hourly' : basis;
+  form.base_wage_input_type.value = row.base_wage_input_type || 'hourly';
+  form.base_wage_amount.value = row.base_wage_amount || '';
+  form.weekly_basis_hours.value = row.weekly_basis_hours || '40';
+  form.commission_month_1_amount.value = row.commission_month_1_amount || '';
+  form.commission_month_2_amount.value = row.commission_month_2_amount || '';
+  form.commission_month_3_amount.value = row.commission_month_3_amount || '';
+  form.default_address.value = row.default_address || '';
+  form.notes.value = row.notes || '';
+  normalizeProfileWageInputType(form);
+  const entryForm = byId('entryForm');
+  if (entryForm && entryForm.address && !entryForm.address.value) entryForm.address.value = row.default_address || '';
+  setText('myPayProfileSummary', row.calculated_hourly_rate ? `Current hourly rate $${money(row.calculated_hourly_rate)}` : 'No saved pay profile yet');
+  syncPayProfileVisibility();
+}
+function previousPayrollMonthFor(value) {
+  const raw = String(value || '').slice(0, 10);
+  const match = raw.match(/^([0-9]{4})-([0-9]{2})-[0-9]{2}$/);
+  const now = new Date();
+  let year = match ? Number(match[1]) : now.getFullYear();
+  let month = match ? Number(match[2]) : now.getMonth() + 1;
+  month -= 1;
+  if (month < 1) { month = 12; year -= 1; }
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+function currentEntryDateValue() {
+  const entryForm = byId('entryForm');
+  return (entryForm && entryForm.entry_date && entryForm.entry_date.value) || (context && context.period && context.period.period_start) || '';
+}
+function activePayBasis() {
+  const form = byId('myPayProfileForm');
+  if (form && form.pay_basis) return form.pay_basis.value || 'hourly';
+  return (context && context.pay_profile && context.pay_profile.pay_basis) || 'hourly';
+}
+function syncPayProfileVisibility() {
+  normalizeProfileWageInputType(byId('myPayProfileForm'));
+  normalizeProfileWageInputType(byId('payProfileForm'));
+  const basis = activePayBasis();
+  document.querySelectorAll('[data-basis-field="wage"]').forEach(node => node.classList.toggle('hidden', basis === 'expense_only'));
+  document.querySelectorAll('[data-basis-field="commission"]').forEach(node => node.classList.toggle('hidden', basis !== 'commission'));
+  const proofPanel = byId('commissionProofPanel');
+  if (proofPanel) proofPanel.classList.toggle('hidden', basis !== 'commission');
+  const stubForm = byId('stubForm');
+  const profile = (context && context.pay_profile) || {};
+  if (stubForm && context) {
+    if (!stubForm.user_email.value) stubForm.user_email.value = (context.actor && context.actor.email) || '';
+    if (!stubForm.payroll_month.value) stubForm.payroll_month.value = previousPayrollMonthFor(currentEntryDateValue());
+    stubForm.base_wage_input_type.value = profile.base_wage_input_type || 'hourly';
+    stubForm.base_wage_amount.value = profile.base_wage_amount || '';
+    stubForm.weekly_basis_hours.value = profile.weekly_basis_hours || '40';
+    stubForm.commission_month_1_amount.value = profile.commission_month_1_amount || '';
+    stubForm.commission_month_2_amount.value = profile.commission_month_2_amount || '';
+    stubForm.commission_month_3_amount.value = profile.commission_month_3_amount || '';
+  }
+  setText('commissionProofHelp', basis === 'commission' ? `Required for lost-wage hours using ${previousPayrollMonthFor(currentEntryDateValue())} company payroll.` : '');
+}
+function mergedPayProfileRows() {
+  const rowsByEmail = new Map();
+  function mergeRow(email, values) {
+    const key = String(email || '').toLowerCase();
+    if (!key) return;
+    const existing = rowsByEmail.get(key) || { principal_email: key, sources: [] };
+    const source = values.source || '';
+    if (source && !existing.sources.includes(source)) existing.sources.push(source);
+    rowsByEmail.set(key, { ...existing, ...values, principal_email: values.principal_email || key });
+  }
+  for (const row of context.pay_profiles || []) mergeRow(row.principal_email, { ...row, source: 'Profile' });
+  for (const row of context.pay_users || []) {
+    mergeRow(row.email, {
+      source: 'External pay user',
+      principal_email: row.email,
+      principal_display_name: row.display_name,
+      status: row.status,
+    });
+  }
+  for (const row of context.internal_roles || []) {
+    mergeRow(row.principal_email, {
+      source: row.role === 'president' ? 'President role' : row.role === 'treasurer' ? 'Treasurer role' : 'Internal role',
+      principal_id: row.principal_id,
+      principal_email: row.principal_email,
+      principal_display_name: row.principal_display_name,
+      status: row.status,
+    });
+  }
+  return Array.from(rowsByEmail.values()).sort((a, b) => String(a.principal_display_name || a.principal_email || '').localeCompare(String(b.principal_display_name || b.principal_email || '')));
 }
 function renderPayProfiles() {
   const body = byId('payProfilesBody');
   if (!body || !context) return;
   body.innerHTML = '';
-  const rows = context.pay_profiles || [];
+  const rows = mergedPayProfileRows();
   if (!rows.length) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 7;
-    td.textContent = 'No pay profiles saved.';
+    td.colSpan = 9;
+    td.textContent = 'No people or pay profiles saved.';
     tr.appendChild(td);
     body.appendChild(tr);
     return;
   }
   for (const row of rows) {
     const tr = document.createElement('tr');
-    tr.addEventListener('click', () => fillPayProfileForm(row));
+    addCell(tr, (row.sources && row.sources.length ? row.sources : [row.source || 'Profile']).join(', '));
     addCell(tr, row.principal_display_name);
     addCell(tr, row.principal_email);
-    addCell(tr, row.pay_basis);
-    addCell(tr, `${row.base_wage_input_type} ${money(row.base_wage_amount)}`);
-    addCell(tr, money(row.commission_hourly_rate));
-    addCell(tr, money(row.calculated_hourly_rate));
+    addCell(tr, row.pay_basis || 'No profile');
+    addCell(tr, row.base_wage_input_type ? `${row.base_wage_input_type} ${currency(row.base_wage_amount)}` : '');
+    addCell(tr, currency(row.commission_hourly_rate));
+    addCell(tr, currency(row.calculated_hourly_rate));
     addCell(tr, row.status);
+    const actionCell = document.createElement('td');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'secondary';
+    button.textContent = 'Edit Profile';
+    button.addEventListener('click', () => fillPayProfileForm(row));
+    actionCell.appendChild(button);
+    if (row.pay_basis) {
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'danger';
+      remove.textContent = 'Remove Person';
+      remove.addEventListener('click', () => removePayProfile(row.principal_email, row.principal_display_name));
+      actionCell.appendChild(remove);
+    }
+    tr.appendChild(actionCell);
     body.appendChild(tr);
   }
 }
@@ -1991,7 +2408,7 @@ function renderIrsCandidates() {
   for (const row of rows) {
     const tr = document.createElement('tr');
     addCell(tr, row.rate_year);
-    addCell(tr, row.rate_per_mile);
+    addCell(tr, rateCurrency(row.rate_per_mile, 3));
     const sourceCell = document.createElement('td');
     const link = document.createElement('a');
     link.href = row.source_url;
@@ -2013,11 +2430,27 @@ function renderIrsCandidates() {
     body.appendChild(tr);
   }
 }
+function latestSavedWageScale() {
+  const rows = context && Array.isArray(context.wage_scales) ? context.wage_scales.slice() : [];
+  rows.sort((a, b) => {
+    const updatedA = Date.parse(a.updated_at_utc || '') || 0;
+    const updatedB = Date.parse(b.updated_at_utc || '') || 0;
+    if (updatedA !== updatedB) return updatedB - updatedA;
+    return Number(b.id || 0) - Number(a.id || 0);
+  });
+  return rows.find(row => String(row.target_scale || '36') === '36') || rows[0] || null;
+}
 function fillSettings() {
   const form = byId('settingsForm');
   if (form && context) {
     form.president_email.value = context.settings.president_email || '';
     form.treasurer_emails.value = Array.isArray(context.settings.treasurer_emails) ? context.settings.treasurer_emails.join(', ') : '';
+    const wageScale = latestSavedWageScale();
+    if (wageScale) {
+      if (form.effective_date) form.effective_date.value = wageScale.effective_date || '';
+      if (form.weekly_basis_hours) form.weekly_basis_hours.value = String(wageScale.weekly_basis_hours || 40);
+      if (form.target_weekly_amount) form.target_weekly_amount.value = wageScale.target_weekly_amount == null ? '' : String(wageScale.target_weekly_amount);
+    }
   }
   const demoForm = byId('demoSettingsForm');
   if (demoForm && context) {
@@ -2028,7 +2461,9 @@ function fillSettings() {
   }
 }
 async function loadContext() {
-  context = await api(PAY_VIEW === 'demo' ? '/pay/api/demo/context' : '/pay/api/context');
+  const periodQuery = selectedPeriodId ? `?period_id=${encodeURIComponent(selectedPeriodId)}` : '';
+  context = await api(PAY_VIEW === 'demo' ? '/pay/api/demo/context' : `/pay/api/context${periodQuery}`);
+  if (!selectedPeriodId && context.current_period_id) selectedPeriodId = context.current_period_id;
   renderSummary();
   renderEntries();
   renderDailyTally();
@@ -2038,6 +2473,7 @@ async function loadContext() {
   renderStubs();
   renderPayUsers();
   renderPayProfiles();
+  fillMyPayProfileForm();
   renderInternalRoles();
   renderAdminCommonPlaces();
   renderDemoCycle();
@@ -2047,14 +2483,26 @@ async function loadContext() {
   fillSettings();
   syncMileageRateFromDate();
 }
+bind('periodSelect', 'change', async event => {
+  selectedPeriodId = event.target.value || '';
+  try { localStorage.setItem('paySelectedPeriodId', selectedPeriodId); } catch (_err) {}
+  selectedEntryId = null;
+  await loadContext();
+});
 bind('entryForm', 'submit', async event => {
   event.preventDefault();
   const data = Object.fromEntries(new FormData(event.target).entries());
   data.period_id = context.period.id;
   data.display_name = data.display_name || (context.actor && (context.actor.display_name || context.actor.email)) || '';
   for (const key of ['hourly_rate','lost_wage_amount','hours','mileage_miles','mileage_rate','mileage_amount','rentals_amount','meals_amount','hotel_amount','miscellaneous_amount','president_diff_hours','weekly_basis_hours']) data[key] = Number(data[key] || 0);
-  try { await api('/pay/api/entries', { method: 'POST', body: JSON.stringify(data) }); setText('entryStatus', 'Saved'); await loadContext(); }
+  data.submitter_certified = !!event.target.querySelector('input[name="submitter_certified"]:checked');
+  try { await api('/pay/api/entries', { method: 'POST', body: JSON.stringify(data) }); setText('entryStatus', 'Signed off and saved'); await loadContext(); }
   catch (err) { setText('entryStatus', err.message); }
+});
+bind('entryForm', 'change', () => {
+  const stubForm = byId('stubForm');
+  if (stubForm && activePayBasis() === 'commission') stubForm.payroll_month.value = previousPayrollMonthFor(currentEntryDateValue());
+  syncPayProfileVisibility();
 });
 bind('stubForm', 'submit', async event => {
   event.preventDefault();
@@ -2070,6 +2518,7 @@ bind('stubForm', 'submit', async event => {
     commission_month_1_amount: Number(form.commission_month_1_amount || 0),
     commission_month_2_amount: Number(form.commission_month_2_amount || 0),
     commission_month_3_amount: Number(form.commission_month_3_amount || 0),
+    payroll_month: form.payroll_month,
     filename: file.name,
     content_type: file.type,
     content_base64: bytesToBase64(await file.arrayBuffer()),
@@ -2105,7 +2554,7 @@ bind('commonPlaceSelect', 'change', event => {
 bind('mileageForm', 'submit', async event => {
   event.preventDefault();
   const form = event.target;
-  const locations = Array.from(form.querySelectorAll('input[name="locations"]')).map(input => input.value.trim()).filter(Boolean);
+  let locations = mileageLocationsFromInputs();
   if (locations.length < 2) { setText('mileageStatus', 'Enter at least an origin and destination.'); return; }
   const entry = selectedEntry();
   const signedInName = (context.actor && (context.actor.display_name || context.actor.email)) || '';
@@ -2121,6 +2570,8 @@ bind('mileageForm', 'submit', async event => {
     rate: null,
   };
   try {
+    const checked = await checkMileageAddresses({ quiet: true });
+    locations = checked.locations || locations;
     let entryId = selectedEntryId;
     if (!entryId) {
       const entry = await api('/pay/api/entries', {
@@ -2140,7 +2591,7 @@ bind('mileageForm', 'submit', async event => {
       selectedEntryId = entryId;
     }
     const result = await api(`/pay/api/entries/${entryId}/mileage`, { method: 'POST', body: JSON.stringify(body) });
-    setText('mileageStatus', `${result.filename || 'Mileage PDF'} attached | ${money(result.mileage_miles)} miles | $${money(result.reimbursement)}`);
+    setText('mileageStatus', `${result.filename || 'Mileage PDF'} attached | ${money(result.mileage_miles)} miles | ${currency(result.reimbursement)}`);
     await loadContext();
   } catch (err) { setText('mileageStatus', err.message); }
 });
@@ -2152,6 +2603,113 @@ document.querySelectorAll('#locations .address-input').forEach(input => wireAddr
 document.querySelectorAll('#locations .remove-location').forEach(button => button.addEventListener('click', () => button.parentElement.remove()));
 const addLocationButton = document.querySelector('#mileageForm .add-location');
 if (addLocationButton) addLocationButton.addEventListener('click', () => addMileageLocationField(''));
+bind('checkMileageAddressesBtn', 'click', async () => {
+  try { await checkMileageAddresses(); }
+  catch (err) { setText('addressCheckStatus', err.message); setText('mileageStatus', err.message); }
+});
+async function deleteEntry(row) {
+  if (!row || !row.id) return;
+  const label = `${row.entry_date || 'this date'}${row.notes ? ' - ' + row.notes : ''}`;
+  if (!confirm(`Delete this voucher entry?
+
+${label}
+
+This removes the entry and any receipts or mileage reports attached to it while the period is unlocked.`)) return;
+  try {
+    await api(`/pay/api/entries/${encodeURIComponent(row.id)}`, { method: 'DELETE' });
+    if (selectedEntryId === row.id) selectedEntryId = null;
+    setText('entryStatus', 'Entry deleted');
+    setText('mileageStatus', 'Entry deleted');
+    await loadContext();
+  } catch (err) {
+    setText('entryStatus', err.message);
+    setText('mileageStatus', err.message);
+  }
+}
+function setFormValue(form, name, value) {
+  if (form && form[name]) form[name].value = value == null ? '' : String(value);
+}
+function openEntryForEdit(row) {
+  const form = byId('entryForm');
+  if (!form || !row) return;
+  selectedEntryId = row.id;
+  setFormValue(form, 'entry_date', row.entry_date || '');
+  setFormValue(form, 'hours', row.hours || '');
+  setFormValue(form, 'meals_amount', row.meals_amount || '');
+  setFormValue(form, 'hotel_amount', row.hotel_amount || '');
+  setFormValue(form, 'rentals_amount', row.rentals_amount || '');
+  setFormValue(form, 'miscellaneous_amount', row.miscellaneous_amount || '');
+  setFormValue(form, 'local_number', row.local_number || '3106');
+  setFormValue(form, 'address', row.address || '');
+  setFormValue(form, 'president_diff_hours', row.president_diff_hours || '');
+  setFormValue(form, 'notes', row.notes || '');
+  const certify = form.querySelector('input[name="submitter_certified"]');
+  if (certify) certify.checked = !!row.submitter_certified_at_utc;
+  document.querySelectorAll('input[name="entryPick"]').forEach(input => { input.checked = input.value === String(row.id); });
+  setText('entryStatus', `Editing ${row.entry_date || 'voucher entry'}. Sign off and save to update this voucher.`);
+  syncMileageFormFromEntry();
+  syncPayProfileVisibility();
+  form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const first = form.querySelector('input[name="entry_date"]');
+  if (first) first.focus({ preventScroll: true });
+}
+function hideCorrectionPanel() {
+  const panel = byId('correctionPanel');
+  if (panel) panel.classList.add('hidden');
+  setText('correctionStatus', 'Choose Edit Voucher on a row below.');
+}
+function openCorrectionForEntry(row) {
+  const panel = byId('correctionPanel');
+  const form = byId('correctionForm');
+  if (!panel || !form || !row) return;
+  selectedEntryId = row.id;
+  panel.classList.remove('hidden');
+  if (form.user_email) form.user_email.value = row.user_email || '';
+  if (form.display_name) form.display_name.value = row.display_name || '';
+  if (form.entry_date) form.entry_date.value = row.entry_date || '';
+  if (form.local_number) form.local_number.value = row.local_number || '3106';
+  if (form.address) form.address.value = row.address || '';
+  for (const key of ['hours','mileage_miles','mileage_rate','mileage_amount','rentals_amount','meals_amount','hotel_amount','miscellaneous_amount']) {
+    if (form[key]) form[key].value = '';
+  }
+  if (form.notes) form.notes.value = '';
+  setText('correctionTitle', `Edit Voucher Additions: ${row.display_name || row.user_email || 'Member'} ${row.entry_date || ''}`.trim());
+  setText('correctionStatus', 'Add only missing time, mileage, or expenses. Existing submitted values are not reduced here.');
+  syncMileageFormFromEntry();
+  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+async function reviewEntry(entryId, reviewStatus, reviewNote) {
+  try {
+    await api(`/pay/api/entries/${encodeURIComponent(entryId)}/review`, {
+      method: 'POST',
+      body: JSON.stringify({ review_status: reviewStatus, review_note: reviewNote }),
+    });
+    setText('treasurerStatus', 'Review saved');
+    await loadContext();
+  } catch (err) {
+    setText('treasurerStatus', err.message);
+  }
+}
+bind('correctionForm', 'submit', async event => {
+  event.preventDefault();
+  const data = Object.fromEntries(new FormData(event.target).entries());
+  data.period_id = context.period.id;
+  for (const key of ['hours','mileage_miles','mileage_rate','mileage_amount','rentals_amount','meals_amount','hotel_amount','miscellaneous_amount']) data[key] = Number(data[key] || 0);
+  try {
+    await api('/pay/api/entries/corrections', { method: 'POST', body: JSON.stringify(data) });
+    setText('correctionStatus', 'Correction added');
+    event.target.reset();
+    hideCorrectionPanel();
+    await loadContext();
+  } catch (err) {
+    setText('correctionStatus', err.message);
+  }
+});
+bind('cancelCorrectionBtn', 'click', () => {
+  const form = byId('correctionForm');
+  if (form) form.reset();
+  hideCorrectionPanel();
+});
 bind('lockBtn', 'click', async () => {
   try { const result = await api(`/pay/api/periods/${context.period.id}/lock`, { method: 'POST', body: JSON.stringify({}) }); setText('treasurerStatus', result.signing_link || 'Sent'); await loadContext(); }
   catch (err) { setText('treasurerStatus', err.message); }
@@ -2246,18 +2804,46 @@ bind('payUserForm', 'submit', async event => {
   try { await api('/pay/api/users', { method: 'POST', body: JSON.stringify(data) }); setText('payUserStatus', 'Saved'); event.target.reset(); await loadContext(); }
   catch (err) { setText('payUserStatus', err.message); }
 });
+bind('myPayProfileForm', 'change', syncPayProfileVisibility);
+bind('myPayProfileForm', 'submit', async event => {
+  event.preventDefault();
+  normalizeProfileWageInputType(event.target);
+  const data = Object.fromEntries(new FormData(event.target).entries());
+  for (const key of ['base_wage_amount','weekly_basis_hours','commission_month_1_amount','commission_month_2_amount','commission_month_3_amount']) data[key] = Number(data[key] || 0);
+  data.status = 'active';
+  try {
+    await api('/pay/api/profiles', { method: 'POST', body: JSON.stringify(data) });
+    setText('myPayProfileStatus', 'Saved');
+    await loadContext();
+  } catch (err) {
+    setText('myPayProfileStatus', err.message);
+  }
+});
 bind('payProfileForm', 'submit', async event => {
   event.preventDefault();
+  normalizeProfileWageInputType(event.target);
   const data = Object.fromEntries(new FormData(event.target).entries());
   for (const key of ['base_wage_amount','weekly_basis_hours','commission_month_1_amount','commission_month_2_amount','commission_month_3_amount']) data[key] = Number(data[key] || 0);
   try {
     await api('/pay/api/profiles', { method: 'POST', body: JSON.stringify(data) });
-    setText('internalRoleStatus', 'Pay profile saved');
+    setText('payProfileStatus', 'Pay profile saved');
     await loadContext();
   } catch (err) {
-    setText('internalRoleStatus', err.message);
+    setText('payProfileStatus', err.message);
   }
 });
+async function removePayProfile(email, name) {
+  if (!email) return;
+  const label = name || email;
+  if (!confirm(`Remove ${label} from People and Pay Profiles? Historical submitted entries will stay on file.`)) return;
+  try {
+    await api(`/pay/api/profiles/${encodeURIComponent(email)}`, { method: 'DELETE' });
+    setText('payProfileStatus', 'Person removed');
+    await loadContext();
+  } catch (err) {
+    setText('payProfileStatus', err.message);
+  }
+}
 bind('commonPlaceForm', 'submit', async event => {
   event.preventDefault();
   const data = Object.fromEntries(new FormData(event.target).entries());
@@ -2270,6 +2856,16 @@ bind('commonPlaceForm', 'submit', async event => {
     event.target.reset();
   } catch (err) {
     setText('commonPlaceStatus', err.message);
+  }
+});
+bind('importLicensedUsersBtn', 'click', async () => {
+  try {
+    const result = await api('/pay/api/internal-users/import', { method: 'POST', body: JSON.stringify({ limit: 999 }) });
+    const skipped = Number(result.skipped_count || 0);
+    setText('internalRoleStatus', `Imported ${result.imported_count || 0} paid Microsoft user${result.imported_count === 1 ? '' : 's'}${skipped ? `, skipped ${skipped}` : ''}`);
+    await loadContext();
+  } catch (err) {
+    setText('internalRoleStatus', err.message);
   }
 });
 bind('internalRoleSearchForm', 'submit', async event => {
@@ -2321,7 +2917,7 @@ async function removeInternalRole(assignmentId) {
   }
 }
 async function approveIrsRate(candidateId) {
-  try { const result = await api(`/pay/api/irs-rates/${candidateId}/approve`, { method: 'POST', body: JSON.stringify({}) }); setText('irsStatus', `Approved ${result.rate_year}: ${result.active_rate}`); await loadContext(); }
+  try { const result = await api(`/pay/api/irs-rates/${candidateId}/approve`, { method: 'POST', body: JSON.stringify({}) }); setText('irsStatus', `Approved ${result.rate_year}: ${rateCurrency(result.active_rate, 3)}`); await loadContext(); }
   catch (err) { setText('irsStatus', err.message); }
 }
 loadContext().catch(err => { const main = document.querySelector('.main'); if (main) main.innerHTML = '<section class="panel"><h2>Access</h2><p>' + err.message + '</p></section>'; });
@@ -2582,11 +3178,13 @@ async def pay_page(request: Request):
 @router.get("/pay/{view}", response_class=HTMLResponse)
 async def pay_view_page(view: str, request: Request):
     normalized_view = str(view or "").strip().lower()
-    if normalized_view not in _PAY_VIEW_TITLES:
-        raise HTTPException(status_code=404, detail="pay page not found")
     actor = await _current_pay_actor(request)
     if not actor:
         return RedirectResponse(url="/pay/start", status_code=303)
+    if normalized_view == "president":
+        return RedirectResponse(url="/pay/entry", status_code=303)
+    if normalized_view not in _PAY_VIEW_TITLES:
+        raise HTTPException(status_code=404, detail="pay page not found")
     if normalized_view == "treasurer" and not actor.can_view_all:
         raise _forbidden("officer access required")
     if normalized_view == "admin" and not actor.can_lock:
@@ -2594,11 +3192,55 @@ async def pay_view_page(view: str, request: Request):
     return HTMLResponse(_render_pay_workspace_page(view=normalized_view, actor=actor))
 
 
+async def _pay_period_choices(db: Db) -> list[dict[str, object]]:
+    rows = await db.fetchall(
+        """SELECT p.id, p.period_start, p.period_end, p.status, p.revision,
+                  COUNT(e.id) AS entry_count
+           FROM pay_periods p
+           LEFT JOIN pay_entries e ON e.period_id = p.id
+           GROUP BY p.id, p.period_start, p.period_end, p.status, p.revision
+           ORDER BY p.period_start DESC, p.revision DESC
+           LIMIT 26"""
+    )
+    return [
+        {
+            "id": row[0],
+            "period_start": row[1],
+            "period_end": row[2],
+            "status": row[3],
+            "revision": row[4],
+            "entry_count": row[5],
+        }
+        for row in rows
+    ]
+
+
 @router.get("/pay/api/context")
 async def pay_context(request: Request):
     actor = await _require_pay_actor(request)
     db: Db = request.app.state.db
-    period = await ensure_pay_period(db)
+    current_period = await ensure_pay_period(db)
+    requested_period_id = str(getattr(request, "query_params", {}).get("period_id", "") or "").strip()
+    period = current_period
+    if requested_period_id and requested_period_id != str(current_period["id"]):
+        row = await db.fetchone(
+            "SELECT id, period_start, period_end, status, revision, locked_at_utc, sharepoint_folder_path, created_at_utc, updated_at_utc FROM pay_periods WHERE id=?",
+            (requested_period_id,),
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="pay period not found")
+        period = {
+            "id": row[0],
+            "period_start": row[1],
+            "period_end": row[2],
+            "status": row[3],
+            "revision": row[4],
+            "locked_at_utc": row[5],
+            "sharepoint_folder_path": row[6],
+            "created_at_utc": row[7],
+            "updated_at_utc": row[8],
+        }
+    periods = await _pay_period_choices(db)
     entries = await list_entries(db, period_id=str(period["id"]), actor=actor)
     attachments = await list_attachments(db, period_id=str(period["id"]), actor=actor)
     compensation_stubs = await list_compensation_stubs(db, actor=actor)
@@ -2613,8 +3255,11 @@ async def pay_context(request: Request):
             "can_edit_all": actor.can_edit_all,
             "can_lock": actor.can_lock,
             "is_guest": actor.is_guest,
+            "is_president": actor.is_president,
         },
         "period": period,
+        "current_period_id": current_period["id"],
+        "periods": periods,
         "entries": entries,
         "attachments": attachments,
         "compensation_stubs": compensation_stubs,
@@ -2646,6 +3291,7 @@ async def pay_demo_context(request: Request):
             "can_edit_all": actor.can_edit_all,
             "can_lock": actor.can_lock,
             "is_guest": actor.is_guest,
+            "is_president": actor.is_president,
         },
         "period": {
             "id": "demo",
@@ -2717,6 +3363,17 @@ async def save_pay_entry(body: PayEntryUpsertRequest, request: Request):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.delete("/pay/api/entries/{entry_id}")
+async def delete_pay_entry_route(entry_id: str, request: Request):
+    actor = await _require_pay_actor(request)
+    try:
+        return await delete_pay_entry(request.app.state.db, entry_id=entry_id, actor=actor)
+    except PermissionError as exc:
+        raise _forbidden(str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/pay/api/compensation-stubs")
 async def upload_pay_compensation_stub(body: PayCompensationStubRequest, request: Request):
     actor = await _require_pay_actor(request)
@@ -2733,6 +3390,7 @@ async def upload_pay_compensation_stub(body: PayCompensationStubRequest, request
             commission_month_1_amount=body.commission_month_1_amount,
             commission_month_2_amount=body.commission_month_2_amount,
             commission_month_3_amount=body.commission_month_3_amount,
+            payroll_month=body.payroll_month,
             filename=body.filename,
             content_type=body.content_type,
             content=content,
@@ -2745,6 +3403,40 @@ async def upload_pay_compensation_stub(body: PayCompensationStubRequest, request
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/pay/api/entries/{entry_id}/review")
+async def review_pay_entry_route(entry_id: str, body: PayEntryReviewRequest, request: Request):
+    actor = await _require_treasurer(request)
+    try:
+        return await review_pay_entry(
+            request.app.state.db,
+            entry_id=entry_id,
+            actor=actor,
+            review_status=body.review_status,
+            review_note=body.review_note,
+        )
+    except PermissionError as exc:
+        raise _forbidden(str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/pay/api/entries/corrections")
+async def create_pay_entry_correction_route(body: PayEntryCorrectionRequest, request: Request):
+    actor = await _require_treasurer(request)
+    try:
+        return await create_pay_entry_correction(
+            request.app.state.db,
+            period_id=body.period_id,
+            actor=actor,
+            data=body.model_dump(),
+            pay_cfg=request.app.state.cfg.pay_portal,
+        )
+    except PermissionError as exc:
+        raise _forbidden(str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/pay/api/entries/{entry_id}/attachments")
@@ -2766,6 +3458,50 @@ async def upload_pay_attachment(entry_id: str, body: PayAttachmentUploadRequest,
         )
     except PermissionError as exc:
         raise _forbidden(str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/pay/api/attachments/{attachment_id}/download")
+async def download_pay_attachment(attachment_id: str, request: Request):
+    actor = await _require_pay_actor(request)
+    try:
+        attachment = await attachment_for_actor(request.app.state.db, attachment_id=attachment_id, actor=actor)
+    except PermissionError as exc:
+        raise _forbidden(str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    local_path = str(attachment.get("local_path") or "")
+    if not local_path:
+        raise HTTPException(status_code=404, detail="attachment file not found")
+    return FileResponse(
+        local_path,
+        media_type=str(attachment.get("content_type") or "application/octet-stream"),
+        filename=str(attachment.get("filename") or "attachment"),
+    )
+
+
+@router.delete("/pay/api/attachments/{attachment_id}")
+async def delete_pay_attachment(attachment_id: str, request: Request):
+    actor = await _require_pay_actor(request)
+    try:
+        return await remove_mileage_attachment(request.app.state.db, attachment_id=attachment_id, actor=actor)
+    except PermissionError as exc:
+        raise _forbidden(str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/pay/api/mileage/check-addresses")
+async def check_pay_mileage_addresses(body: PayMileageAddressCheckRequest, request: Request):
+    await _require_pay_actor(request)
+    try:
+        return validate_mileage_locations(
+            google_maps_api_key=request.app.state.cfg.pay_portal.google_maps_api_key,
+            locations=body.locations,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -2946,6 +3682,56 @@ async def approve_pay_irs_rate(candidate_id: int, request: Request):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/pay/api/internal-users/import")
+async def import_pay_internal_users(body: PayInternalUserImportRequest, request: Request):
+    actor = await _require_treasurer(request)
+    graph = getattr(request.app.state, "graph", None)
+    if graph is None or not hasattr(graph, "list_licensed_directory_users"):
+        raise HTTPException(status_code=503, detail="Microsoft licensed-user import is unavailable")
+    try:
+        rows = graph.list_licensed_directory_users(limit=body.limit)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    imported: list[dict[str, object]] = []
+    skipped: list[dict[str, object]] = []
+    for row in rows:
+        email = normalize_email(getattr(row, "email", None) or getattr(row, "user_principal_name", None))
+        display_name = str(getattr(row, "display_name", None) or email).strip()
+        principal_id = str(getattr(row, "id", "") or "").strip() or None
+        if not email:
+            skipped.append({"email": "", "reason": "missing email"})
+            continue
+        existing = await pay_profile_by_email(request.app.state.db, email=email)
+        if existing:
+            skipped.append({"email": email, "reason": "profile exists"})
+            continue
+        saved = await upsert_pay_profile(
+            request.app.state.db,
+            principal_id=principal_id,
+            principal_email=email,
+            principal_display_name=display_name,
+            pay_basis="expense_only",
+            base_wage_input_type="hourly",
+            base_wage_amount=0,
+            weekly_basis_hours=40,
+            commission_month_1_amount=0,
+            commission_month_2_amount=0,
+            commission_month_3_amount=0,
+            status="active",
+            notes="Auto-imported from Microsoft paid license roster. Add wages before reimbursing lost time.",
+            updated_by=actor.email,
+        )
+        imported.append(saved)
+
+    return {
+        "imported_count": len(imported),
+        "skipped_count": len(skipped),
+        "imported": imported,
+        "skipped": skipped,
+    }
+
+
 @router.post("/pay/api/users")
 async def save_pay_user(body: PayUserUpsertRequest, request: Request):
     actor = await _require_treasurer(request)
@@ -3018,23 +3804,45 @@ async def _save_pay_profile_request(
     *,
     email_override: str | None = None,
 ):
-    actor = await _require_treasurer(request)
+    actor = await _require_pay_actor(request)
+    requested_email = normalize_email(email_override or body.principal_email)
+    if actor.can_lock:
+        target_email = requested_email
+        target_principal_id = body.principal_id
+        target_display_name = body.principal_display_name
+        target_status = body.status
+        target_pay_basis = body.pay_basis
+    else:
+        if requested_email and requested_email != actor.email:
+            raise _forbidden("cannot edit another user's pay profile")
+        existing = await pay_profile_by_email(request.app.state.db, email=actor.email)
+        existing_basis = str((existing or {}).get("pay_basis") or "")
+        requested_basis = str(body.pay_basis or "expense_only").strip().lower()
+        if requested_basis == "president" and not (actor.is_president and existing_basis == "president"):
+            raise _forbidden("treasurer access required for president pay profiles")
+        target_email = actor.email
+        target_principal_id = str((existing or {}).get("principal_id") or "").strip() or None
+        target_display_name = body.principal_display_name or (existing or {}).get("principal_display_name") or actor.display_name
+        target_status = str((existing or {}).get("status") or "active")
+        target_pay_basis = "president" if actor.is_president and existing_basis == "president" else body.pay_basis
+    wage_input_type = body.base_wage_input_type
     try:
         return await upsert_pay_profile(
             request.app.state.db,
-            principal_id=body.principal_id,
-            principal_email=email_override or body.principal_email,
-            principal_display_name=body.principal_display_name,
-            pay_basis=body.pay_basis,
-            base_wage_input_type=body.base_wage_input_type,
+            principal_id=target_principal_id,
+            principal_email=target_email,
+            principal_display_name=target_display_name,
+            pay_basis=target_pay_basis,
+            base_wage_input_type=wage_input_type,
             base_wage_amount=body.base_wage_amount,
             weekly_basis_hours=body.weekly_basis_hours,
             commission_month_1_amount=body.commission_month_1_amount,
             commission_month_2_amount=body.commission_month_2_amount,
             commission_month_3_amount=body.commission_month_3_amount,
-            status=body.status,
+            status=target_status,
             notes=body.notes,
             updated_by=actor.email,
+            default_address=body.default_address,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -3048,6 +3856,16 @@ async def create_pay_profile(body: PayProfileUpsertRequest, request: Request):
 @router.put("/pay/api/profiles/{email}")
 async def update_pay_profile(email: str, body: PayProfileUpsertRequest, request: Request):
     return await _save_pay_profile_request(body, request, email_override=email)
+
+
+@router.delete("/pay/api/profiles/{email}")
+async def remove_pay_profile(email: str, request: Request):
+    actor = await _require_treasurer(request)
+    try:
+        removed = await delete_pay_profile(request.app.state.db, email=email)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"removed": removed, "removed_by": actor.email}
 
 
 @router.post("/pay/api/wage-scales")

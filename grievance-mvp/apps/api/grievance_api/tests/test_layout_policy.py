@@ -271,6 +271,44 @@ class LayoutPolicyTests(unittest.TestCase):
         self.assertGreaterEqual(len(settlement_rows), 2)
         self.assertEqual(context["issue_article"], "5.2")
 
+    def test_data_request_letterhead_context_builds_auto_expanding_rows(self) -> None:
+        payload = IntakeRequest(
+            request_id="req-data-letterhead",
+            contract="CWA",
+            grievant_firstname="Jane",
+            grievant_lastname="Doe",
+            grievant_email="jane@example.com",
+            narrative="Data request cover letter",
+            template_data={
+                "data_requested": (
+                    "Personnel file, attendance records, payroll records, schedules, discipline notes, "
+                    "supervisor emails, policy documents, and all other documents relied upon by the company."
+                ),
+            },
+        )
+        cfg = SimpleNamespace(
+            rendering=RenderingConfig(
+                normalize_split_placeholders=True,
+                layout_policies={},
+            )
+        )
+
+        context, _ = _build_template_context(
+            cfg=cfg,
+            payload=payload,
+            case_id="C124",
+            grievance_id="2026002",
+            document_id="D124",
+            doc_type="data_request_letterhead",
+            grievance_number="2026002",
+        )
+
+        rows = context["data_requested_rows"]
+        self.assertIsInstance(rows, list)
+        self.assertGreaterEqual(len(rows), 2)
+        self.assertEqual(context["data_requested_line_count"], len(rows))
+        self.assertIn("Personnel file", context["data_requested_full_text"])
+
     def test_settlement_context_uses_article_fallback_and_blank_row_default(self) -> None:
         payload = IntakeRequest(
             request_id="req-4",

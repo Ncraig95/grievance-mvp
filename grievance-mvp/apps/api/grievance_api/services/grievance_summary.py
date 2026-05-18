@@ -122,9 +122,10 @@ def build_grievance_summary(
     *,
     manual_text: object | None = None,
     max_chars: int = _DEFAULT_MAX_CHARS,
+    include_low_priority: bool = True,
 ) -> GrievanceSummary:
     """Build a short, local-only overview summary from known grievance text fields."""
-    candidates = _candidate_texts(payload, manual_text=manual_text)
+    candidates = _candidate_texts(payload, manual_text=manual_text, include_low_priority=include_low_priority)
     if not candidates:
         return GrievanceSummary(summary=None, full_text=None, source=None)
 
@@ -165,12 +166,14 @@ def _candidate_texts(
     payload: dict[str, object],
     *,
     manual_text: object | None,
+    include_low_priority: bool,
 ) -> list[tuple[str, str]]:
     candidates: list[tuple[str, str]] = []
     seen: set[str] = set()
 
     _add_field_candidates(candidates, seen, payload, _PRIMARY_NARRATIVE_FIELDS)
-    _add_field_candidates(candidates, seen, payload, _LOW_PRIORITY_NARRATIVE_FIELDS)
+    if include_low_priority:
+        _add_field_candidates(candidates, seen, payload, _LOW_PRIORITY_NARRATIVE_FIELDS)
     _add_candidate(candidates, seen, "tracking_issue_summary", manual_text)
 
     return candidates
@@ -181,6 +184,13 @@ def low_priority_grievance_text_candidates(payload: dict[str, object]) -> list[t
     seen: set[str] = set()
     _add_field_candidates(candidates, seen, payload, _LOW_PRIORITY_NARRATIVE_FIELDS)
     return candidates
+
+
+def is_low_priority_grievance_text(payload: dict[str, object], value: object) -> bool:
+    text = _normalize_text(value)
+    if not text:
+        return False
+    return any(text == candidate_text for _source, candidate_text in low_priority_grievance_text_candidates(payload))
 
 
 def _add_field_candidates(

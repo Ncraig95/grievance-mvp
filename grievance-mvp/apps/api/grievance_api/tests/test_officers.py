@@ -392,7 +392,7 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         result = await officer_cases(request)
 
         row = result.rows[0]
-        self.assertEqual(row.issue_summary, "Most recent action was a first level request.")
+        self.assertEqual(row.issue_summary, "Original statement submitted by the member.")
         self.assertEqual(row.narrative_full, "Original statement submitted by the member.")
         self.assertEqual(row.narrative_summary, "Original statement submitted by the member.")
         self.assertEqual(row.summary_source, "narrative")

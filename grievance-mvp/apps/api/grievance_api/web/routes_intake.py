@@ -554,6 +554,27 @@ def _apply_dynamic_settlement_context(context: dict[str, object]) -> None:
     )
 
 
+def _apply_dynamic_data_request_letterhead_context(context: dict[str, object]) -> None:
+    _apply_dynamic_rows_context(
+        context=context,
+        source_keys=(
+            "data_requested",
+            "requested_information",
+            "requested_info",
+            "request_info",
+            "main_data_request_info",
+            "data_request_info",
+        ),
+        continuation_keys=("data_requested_continuation",),
+        lines_key="data_requested_lines",
+        rows_key="data_requested_rows",
+        full_text_key="data_requested_full_text",
+        line_count_key="data_requested_line_count",
+        has_continuation_key="data_requested_has_continuation",
+        wrap_width_key="data_requested_line_wrap_width",
+    )
+
+
 def _preferred_signer_email(payload: IntakeRequest) -> str | None:
     template_data = payload.template_data or {}
     if isinstance(template_data, dict):
@@ -1514,6 +1535,8 @@ def _build_template_context(
     context.setdefault("request_date", today)
     _apply_dynamic_statement_context(context)
     _apply_dynamic_settlement_context(context)
+    if doc_type == "data_request_letterhead":
+        _apply_dynamic_data_request_letterhead_context(context)
     layout_meta = _apply_layout_policy_context(
         cfg=cfg,
         doc_type=doc_type,

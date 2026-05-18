@@ -17,7 +17,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -32,6 +32,7 @@ from .signature_workflow import resolve_docuseal_template_id
 
 
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._ -]+")
+_PAYROLL_MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _ANCHOR_PERIOD_START = date(2025, 9, 7)
 _CURRENCY = Decimal("0.01")
 _MILES = Decimal("0.01")
@@ -109,6 +110,7 @@ class PayActor:
     can_edit_all: bool
     can_lock: bool
     is_guest: bool = False
+    is_president: bool = False
 
 
 @dataclass(frozen=True)
@@ -117,6 +119,7 @@ class DifferentialResult:
     diff_rate: Decimal
     diff_amount: Decimal
     lost_wage_hourly_rate: Decimal
+    presidential_hourly_rate: Decimal
 
 
 @dataclass(frozen=True)
@@ -166,6 +169,14 @@ def _quantity(value: object) -> Decimal:
     except Exception:
         return Decimal("0")
     return parsed.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+
+
+def _mileage_rate(value: object) -> Decimal:
+    try:
+        parsed = Decimal(str(value or "0").replace("$", "").replace(",", "").strip())
+    except Exception:
+        return Decimal("0")
+    return parsed.quantize(_IRS_RATE_QUANT, rounding=ROUND_HALF_UP)
 
 
 def normalize_wage_input(
@@ -230,6 +241,21 @@ def calculate_commission_compensation(
     )
 
 
+def required_commission_payroll_month(entry_date: date | str) -> str:
+    parsed = date.fromisoformat(str(entry_date)) if not isinstance(entry_date, date) else entry_date
+    previous_month_day = parsed.replace(day=1) - timedelta(days=1)
+    return previous_month_day.strftime("%Y-%m")
+
+
+def normalize_payroll_month(value: object, *, default_for: date | str | None = None) -> str:
+    raw = str(value or "").strip()
+    if not raw and default_for is not None:
+        return required_commission_payroll_month(default_for)
+    if not _PAYROLL_MONTH_RE.match(raw):
+        raise ValueError("payroll_month must be YYYY-MM")
+    return raw
+
+
 def normalize_pay_basis(value: object) -> str:
     basis = str(value or "expense_only").strip().lower()
     if basis not in _PAY_PROFILE_BASIS_VALUES:
@@ -273,26 +299,9 @@ def calculate_pay_profile_snapshot(
             "calculated_hourly_rate": Decimal("0.00"),
         }
 
-    if basis == "hourly":
+    if basis in {"hourly", "weekly"}:
         wage_type, wage_amount, hourly_rate = normalize_wage_input(
-            input_type="hourly",
-            amount=base_wage_amount,
-            weekly_basis_hours=weekly_basis,
-        )
-        commission = CommissionCompensationResult(
-            base_wage_input_type=wage_type,
-            base_wage_amount=wage_amount,
-            base_hourly_rate=hourly_rate,
-            commission_month_1_amount=Decimal("0.00"),
-            commission_month_2_amount=Decimal("0.00"),
-            commission_month_3_amount=Decimal("0.00"),
-            commission_average_monthly=Decimal("0.00"),
-            commission_hourly_rate=Decimal("0.00"),
-            calculated_hourly_rate=hourly_rate,
-        )
-    elif basis == "weekly":
-        wage_type, wage_amount, hourly_rate = normalize_wage_input(
-            input_type="weekly",
+            input_type=base_wage_input_type,
             amount=base_wage_amount,
             weekly_basis_hours=weekly_basis,
         )
@@ -1008,7 +1017,7 @@ _DEMO_NARRATIVE_PHRASES: tuple[str, ...] = (
     "met with member about payroll correction and documented next steps",
     "reviewed route mileage, receipts, and pay profile rate for officer practice",
     "prepared grievance packet notes for treasurer review",
-    "confirmed president differential example and approval path",
+    "confirmed president differential example and president-only packet signature path",
     "reconciled mileage attachment with daily expense voucher totals",
     "recorded officer training feedback for the demo cycle",
     "checked supporting documents before the demo lock step",
@@ -1048,11 +1057,10 @@ _DEMO_MILEAGE_ROUTES: tuple[tuple[str, ...], ...] = (
 
 
 def _demo_people_for_packet(actor: PayActor) -> list[dict[str, str]]:
-    actor_name = str(actor.display_name or actor.email or "").strip() or "Demo Officer"
     actor_email = normalize_email(actor.email) or "demo.officer@cwa3106.local"
     people = [
         {
-            "display_name": actor_name,
+            "display_name": "Nick Craig",
             "email": actor_email,
             "address": "4076 Union Hall Pl, Jacksonville, FL 32205, USA",
             "role": "officer",
@@ -1073,9 +1081,11 @@ def _demo_day_offsets(rng: random.Random, *, demo_step: int, person_index: int) 
 
 
 def _demo_hourly_rate(rng: random.Random, *, person_index: int) -> Decimal:
-    base_cents = rng.randrange(3200, 5900, 25)
+    if person_index == 0:
+        return Decimal("250.00")
     if person_index == 1:
-        base_cents = max(base_cents, 5000)
+        return Decimal("45.00")
+    base_cents = rng.randrange(3200, 5900, 25)
     return (Decimal(base_cents) / Decimal("100")).quantize(_CURRENCY, rounding=ROUND_HALF_UP)
 
 
@@ -1106,7 +1116,13 @@ def _demo_entries_for_packet(
         hours = Decimal(str(rng.choice(["2.00", "2.50", "3.00", "4.00", "6.00", "8.00"])))
         misc_amount = Decimal(str(rng.choice(["12.50", "18.75", "24.00", "31.25"]))) if has_receipt else Decimal("0")
         meals_amount = Decimal(str(rng.choice(["15.00", "22.50", "28.00"]))) if has_receipt and entry_index % 2 == 0 else Decimal("0")
-        president_diff = Decimal("35.00") if person.get("role") == "president" and demo_step >= 3 else Decimal("0")
+        normal_hourly_rate = Decimal("45.00") if person.get("role") == "president" else hourly_rate
+        presidential_hourly_rate = Decimal("62.00") if person.get("role") == "president" else normal_hourly_rate
+        president_diff_hours = hours if person.get("role") == "president" and demo_step >= 3 else Decimal("0")
+        president_diff_rate = (presidential_hourly_rate - normal_hourly_rate).quantize(_CURRENCY, rounding=ROUND_HALF_UP) if president_diff_hours > 0 else Decimal("0")
+        if president_diff_rate < 0:
+            president_diff_rate = Decimal("0")
+        president_diff = (president_diff_hours * president_diff_rate).quantize(_CURRENCY, rounding=ROUND_HALF_UP)
         note = rng.choice(_DEMO_NARRATIVE_PHRASES)
         if entry_index == 1:
             note = "reviewed route mileage, receipts, and pay profile rate for officer practice"
@@ -1122,8 +1138,8 @@ def _demo_entries_for_packet(
                 "address": person.get("address") or "4076 Union Hall Pl, Jacksonville, FL 32205, USA",
                 "local_number": "3106",
                 "hours": float(hours),
-                "hourly_rate": float(hourly_rate),
-                "lost_wage_hourly_rate": float(hourly_rate),
+                "hourly_rate": float(presidential_hourly_rate),
+                "lost_wage_hourly_rate": float(presidential_hourly_rate),
                 "mileage_miles": float(entry_miles),
                 "mileage_rate": float(mileage_rate),
                 "mileage_amount": float(entry_mileage_amount),
@@ -1131,7 +1147,12 @@ def _demo_entries_for_packet(
                 "meals_amount": float(meals_amount),
                 "hotel_amount": 0,
                 "miscellaneous_amount": float(misc_amount),
+                "president_diff_hours": float(president_diff_hours),
+                "president_diff_rate": float(president_diff_rate),
                 "president_diff_amount": float(president_diff),
+                "submitter_certified_at_utc": f"{(start + timedelta(days=day_offset)).isoformat()}T12:00:00Z",
+                "submitter_certified_by": person.get("email") or "demo.officer@cwa3106.local",
+                "submitter_certification_text": "DEMO TRAINING - submitter signed off on this daily entry in Pay Portal.",
                 "notes": f"DEMO TRAINING - {note}.",
             }
         )
@@ -1828,11 +1849,12 @@ def _pay_profile_from_row(row: Any) -> dict[str, object]:
         "commission_average_monthly": float(row[11] or 0),
         "commission_hourly_rate": float(row[12] or 0),
         "calculated_hourly_rate": float(row[13] or 0),
-        "status": row[14],
-        "notes": row[15],
-        "created_at_utc": row[16],
-        "updated_at_utc": row[17],
-        "updated_by": row[18],
+        "default_address": row[14],
+        "status": row[15],
+        "notes": row[16],
+        "created_at_utc": row[17],
+        "updated_at_utc": row[18],
+        "updated_by": row[19],
     }
 
 
@@ -1841,7 +1863,7 @@ _PAY_PROFILE_SELECT = """
            base_wage_input_type, base_wage_amount, weekly_basis_hours,
            commission_month_1_amount, commission_month_2_amount, commission_month_3_amount,
            commission_average_monthly, commission_hourly_rate, calculated_hourly_rate,
-           status, notes, created_at_utc, updated_at_utc, updated_by
+           default_address, status, notes, created_at_utc, updated_at_utc, updated_by
     FROM pay_profiles
 """
 
@@ -1870,6 +1892,21 @@ async def pay_profile_by_email(
     return _pay_profile_from_row(row) if row else None
 
 
+async def delete_pay_profile(
+    db: Db,
+    *,
+    email: str,
+) -> dict[str, object]:
+    normalized_email = normalize_email(email)
+    if not normalized_email:
+        raise ValueError("principal_email is required")
+    existing = await pay_profile_by_email(db, email=normalized_email)
+    if not existing:
+        raise ValueError("pay profile not found")
+    await db.exec("DELETE FROM pay_profiles WHERE principal_email=?", (normalized_email,))
+    return existing
+
+
 async def upsert_pay_profile(
     db: Db,
     *,
@@ -1886,6 +1923,7 @@ async def upsert_pay_profile(
     status: str,
     notes: str | None,
     updated_by: str,
+    default_address: str | None = None,
 ) -> dict[str, object]:
     normalized_email = normalize_email(principal_email)
     if not normalized_email:
@@ -1910,8 +1948,8 @@ async def upsert_pay_profile(
           base_wage_input_type, base_wage_amount, weekly_basis_hours,
           commission_month_1_amount, commission_month_2_amount, commission_month_3_amount,
           commission_average_monthly, commission_hourly_rate, calculated_hourly_rate,
-          status, notes, created_at_utc, updated_at_utc, updated_by
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          default_address, status, notes, created_at_utc, updated_at_utc, updated_by
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(principal_email) DO UPDATE SET
           principal_id=excluded.principal_id,
           principal_display_name=excluded.principal_display_name,
@@ -1925,6 +1963,7 @@ async def upsert_pay_profile(
           commission_average_monthly=excluded.commission_average_monthly,
           commission_hourly_rate=excluded.commission_hourly_rate,
           calculated_hourly_rate=excluded.calculated_hourly_rate,
+          default_address=excluded.default_address,
           status=excluded.status,
           notes=excluded.notes,
           updated_at_utc=excluded.updated_at_utc,
@@ -1944,6 +1983,7 @@ async def upsert_pay_profile(
             float(snapshot["commission_average_monthly"]),
             float(snapshot["commission_hourly_rate"]),
             float(snapshot["calculated_hourly_rate"]),
+            str(default_address or "").strip() or None,
             normalized_status,
             str(notes or "").strip() or None,
             now,
@@ -1997,14 +2037,15 @@ def _compensation_stub_from_row(row: Any) -> dict[str, object]:
         "commission_average_monthly": row[9],
         "commission_hourly_rate": row[10],
         "calculated_hourly_rate": row[11],
-        "filename": row[12],
-        "content_type": row[13],
-        "size_bytes": row[14],
-        "sha256": row[15],
-        "scan_status": row[16],
-        "sharepoint_url": row[17],
-        "notes": row[18],
-        "created_at_utc": row[19],
+        "payroll_month": row[12],
+        "filename": row[13],
+        "content_type": row[14],
+        "size_bytes": row[15],
+        "sha256": row[16],
+        "scan_status": row[17],
+        "sharepoint_url": row[18],
+        "notes": row[19],
+        "created_at_utc": row[20],
     }
 
 
@@ -2012,7 +2053,7 @@ async def list_compensation_stubs(db: Db, *, actor: PayActor) -> list[dict[str, 
     select_sql = """SELECT id, user_email, uploaded_by, base_wage_input_type, base_wage_amount,
                            weekly_basis_hours, commission_month_1_amount, commission_month_2_amount,
                            commission_month_3_amount, commission_average_monthly,
-                           commission_hourly_rate, calculated_hourly_rate, original_filename,
+                           commission_hourly_rate, calculated_hourly_rate, payroll_month, original_filename,
                            content_type, size_bytes, sha256, scan_status, sharepoint_url,
                            notes, created_at_utc
                     FROM pay_compensation_stubs"""
@@ -2031,7 +2072,7 @@ async def latest_compensation_stub(db: Db, *, user_email: str) -> dict[str, obje
         """SELECT id, user_email, uploaded_by, base_wage_input_type, base_wage_amount,
                   weekly_basis_hours, commission_month_1_amount, commission_month_2_amount,
                   commission_month_3_amount, commission_average_monthly,
-                  commission_hourly_rate, calculated_hourly_rate, original_filename,
+                  commission_hourly_rate, calculated_hourly_rate, payroll_month, original_filename,
                   content_type, size_bytes, sha256, scan_status, sharepoint_url,
                   notes, created_at_utc
            FROM pay_compensation_stubs
@@ -2039,6 +2080,29 @@ async def latest_compensation_stub(db: Db, *, user_email: str) -> dict[str, obje
            ORDER BY created_at_utc DESC, id DESC
            LIMIT 1""",
         (normalize_email(user_email),),
+    )
+    return _compensation_stub_from_row(row) if row else None
+
+
+async def compensation_stub_for_payroll_month(
+    db: Db,
+    *,
+    user_email: str,
+    payroll_month: str,
+) -> dict[str, object] | None:
+    normalized_month = normalize_payroll_month(payroll_month)
+    row = await db.fetchone(
+        """SELECT id, user_email, uploaded_by, base_wage_input_type, base_wage_amount,
+                  weekly_basis_hours, commission_month_1_amount, commission_month_2_amount,
+                  commission_month_3_amount, commission_average_monthly,
+                  commission_hourly_rate, calculated_hourly_rate, payroll_month, original_filename,
+                  content_type, size_bytes, sha256, scan_status, sharepoint_url,
+                  notes, created_at_utc
+           FROM pay_compensation_stubs
+           WHERE user_email=? AND payroll_month=?
+           ORDER BY created_at_utc DESC, id DESC
+           LIMIT 1""",
+        (normalize_email(user_email), normalized_month),
     )
     return _compensation_stub_from_row(row) if row else None
 
@@ -2094,6 +2158,48 @@ async def upsert_wage_scale(
     return {"id": int(row[0]) if row else None}
 
 
+async def president_week_scheduled_hours(
+    db: Db,
+    *,
+    period_start: date,
+    entry_date: date,
+    period_id: str,
+    user_email: str,
+    exclude_entry_date: str | None = None,
+) -> Decimal:
+    week_start = period_start if (entry_date - period_start).days < 7 else period_start + timedelta(days=7)
+    week_end = min(week_start + timedelta(days=6), period_start + timedelta(days=13))
+    params: list[object] = [period_id, user_email, week_start.isoformat(), week_end.isoformat()]
+    exclude_clause = ""
+    if exclude_entry_date:
+        exclude_clause = " AND entry_date <> ?"
+        params.append(exclude_entry_date)
+    row = await db.fetchone(
+        f"""SELECT COALESCE(SUM(hours + president_diff_hours), 0)
+             FROM pay_entries
+             WHERE period_id=? AND user_email=? AND entry_date BETWEEN ? AND ?{exclude_clause}""",
+        tuple(params),
+    )
+    return _quantity(row[0] if row else 0)
+
+
+def validate_president_week_scheduled_hours(
+    *,
+    existing_week_hours: Decimal,
+    union_hours: Decimal,
+    requested_diff_hours: Decimal,
+) -> Decimal:
+    cap = Decimal("40.00")
+    if existing_week_hours + union_hours > cap:
+        raise ValueError("president scheduled lost-wage hours cannot exceed 40 hours in a week")
+    if requested_diff_hours <= 0:
+        return Decimal("0.00")
+    available = cap - existing_week_hours - union_hours
+    if requested_diff_hours > available:
+        raise ValueError("president differential plus union lost-wage hours cannot exceed 40 scheduled hours in a week")
+    return requested_diff_hours
+
+
 async def calculate_president_differential(
     db: Db,
     *,
@@ -2111,19 +2217,13 @@ async def calculate_president_differential(
         amount=lost_wage_amount,
         weekly_basis_hours=weekly_basis_hours,
     )
-    if hours <= 0:
-        return DifferentialResult(
-            wage_scale_id=None,
-            diff_rate=Decimal("0.00"),
-            diff_amount=Decimal("0.00"),
-            lost_wage_hourly_rate=lost_wage_hourly,
-        )
     if lost_wage_hourly <= 0:
         return DifferentialResult(
             wage_scale_id=None,
             diff_rate=Decimal("0.00"),
             diff_amount=Decimal("0.00"),
             lost_wage_hourly_rate=lost_wage_hourly,
+            presidential_hourly_rate=lost_wage_hourly,
         )
 
     row = await db.fetchone(
@@ -2142,6 +2242,7 @@ async def calculate_president_differential(
             diff_rate=Decimal("0.00"),
             diff_amount=Decimal("0.00"),
             lost_wage_hourly_rate=lost_wage_hourly,
+            presidential_hourly_rate=lost_wage_hourly,
         )
 
     basis = Decimal(str(row[1]))
@@ -2151,10 +2252,11 @@ async def calculate_president_differential(
             diff_rate=Decimal("0.00"),
             diff_amount=Decimal("0.00"),
             lost_wage_hourly_rate=lost_wage_hourly,
+            presidential_hourly_rate=lost_wage_hourly,
         )
     # Wage scale rows store the scale 36 base; the presidential target is scale 36 plus 20%.
     multiplier = Decimal(str(row[3] if row[3] is not None else target_multiplier))
-    target_hourly = (Decimal(str(row[2])) / basis) * multiplier
+    target_hourly = ((Decimal(str(row[2])) / basis) * multiplier).quantize(Decimal("1"), rounding=ROUND_CEILING)
     diff_rate = max(target_hourly - lost_wage_hourly, Decimal("0")).quantize(_CURRENCY, rounding=ROUND_HALF_UP)
     diff_amount = (diff_rate * hours).quantize(_CURRENCY, rounding=ROUND_HALF_UP)
     return DifferentialResult(
@@ -2162,6 +2264,7 @@ async def calculate_president_differential(
         diff_rate=diff_rate,
         diff_amount=diff_amount,
         lost_wage_hourly_rate=lost_wage_hourly,
+        presidential_hourly_rate=target_hourly,
     )
 
 
@@ -2173,7 +2276,10 @@ async def list_entries(db: Db, *, period_id: str, actor: PayActor) -> list[dict[
                       compensation_stub_id, hours, mileage_miles, mileage_rate, mileage_amount,
                       rentals_amount, meals_amount, hotel_amount, miscellaneous_amount,
                       president_diff_hours, president_diff_rate, president_diff_amount,
-                      wage_scale_id, notes, locked_at_utc, created_at_utc, updated_at_utc
+                      wage_scale_id, notes, review_status, review_note, reviewed_by, reviewed_at_utc,
+                      submitter_certified_at_utc, submitter_certified_by, submitter_certification_text,
+                      locked_at_utc, created_at_utc, updated_at_utc,
+                      (SELECT COUNT(*) FROM pay_entry_corrections c WHERE c.entry_id=pay_entries.id) AS correction_count
                FROM pay_entries
                WHERE period_id=?
                ORDER BY entry_date, user_email""",
@@ -2186,7 +2292,10 @@ async def list_entries(db: Db, *, period_id: str, actor: PayActor) -> list[dict[
                       compensation_stub_id, hours, mileage_miles, mileage_rate, mileage_amount,
                       rentals_amount, meals_amount, hotel_amount, miscellaneous_amount,
                       president_diff_hours, president_diff_rate, president_diff_amount,
-                      wage_scale_id, notes, locked_at_utc, created_at_utc, updated_at_utc
+                      wage_scale_id, notes, review_status, review_note, reviewed_by, reviewed_at_utc,
+                      submitter_certified_at_utc, submitter_certified_by, submitter_certification_text,
+                      locked_at_utc, created_at_utc, updated_at_utc,
+                      (SELECT COUNT(*) FROM pay_entry_corrections c WHERE c.entry_id=pay_entries.id) AS correction_count
                FROM pay_entries
                WHERE period_id=? AND user_email=?
                ORDER BY entry_date, user_email""",
@@ -2220,9 +2329,17 @@ async def list_entries(db: Db, *, period_id: str, actor: PayActor) -> list[dict[
                 "president_diff_amount": row[21],
                 "wage_scale_id": row[22],
                 "notes": row[23],
-                "locked_at_utc": row[24],
-                "created_at_utc": row[25],
-                "updated_at_utc": row[26],
+                "review_status": row[24] or "pending",
+                "review_note": row[25],
+                "reviewed_by": row[26],
+                "reviewed_at_utc": row[27],
+                "submitter_certified_at_utc": row[28],
+                "submitter_certified_by": row[29],
+                "submitter_certification_text": row[30],
+                "locked_at_utc": row[31],
+                "created_at_utc": row[32],
+                "updated_at_utc": row[33],
+                "correction_count": int(row[34] or 0),
             }
         )
     return entries
@@ -2270,6 +2387,7 @@ async def upsert_entry(
         diff_rate=Decimal("0.00"),
         diff_amount=Decimal("0.00"),
         lost_wage_hourly_rate=Decimal("0.00"),
+        presidential_hourly_rate=Decimal("0.00"),
     )
 
     if not profile:
@@ -2282,9 +2400,25 @@ async def upsert_entry(
         if pay_basis == "expense_only":
             if hours > 0 or requested_president_diff_hours > 0:
                 raise ValueError("pay profile is expense-only; lost-wage hours are not allowed")
-        elif profile_hourly <= 0:
+        elif pay_basis == "commission" and hours > 0:
+            required_payroll_month = required_commission_payroll_month(parsed_entry_date)
+            compensation_stub = await compensation_stub_for_payroll_month(
+                db,
+                user_email=target_email,
+                payroll_month=required_payroll_month,
+            )
+            if not compensation_stub:
+                raise ValueError(
+                    f"commission payroll proof for {required_payroll_month} is required before submitting lost-wage hours"
+                )
+            compensation_stub_id = str(compensation_stub["id"])
+            weekly_basis_hours = float(compensation_stub.get("weekly_basis_hours") or weekly_basis_hours)
+            profile_hourly = _money(compensation_stub.get("calculated_hourly_rate"))
+            if profile_hourly <= 0:
+                raise ValueError("commission payroll proof must calculate a positive wage rate")
+        elif (hours > 0 or requested_president_diff_hours > 0) and profile_hourly <= 0:
             raise ValueError("pay profile must have a positive wage rate before submitting lost-wage hours")
-        else:
+        if pay_basis != "expense_only":
             normalized_wage_type = pay_basis
             hourly_rate = profile_hourly
             lost_wage_hourly_rate = profile_hourly
@@ -2293,10 +2427,20 @@ async def upsert_entry(
             else:
                 lost_wage_amount = _money(profile.get("base_wage_amount"))
             if pay_basis == "president":
-                president_diff_hours = (
-                    requested_president_diff_hours
-                    if (actor.can_edit_all or actor.can_lock) and requested_president_diff_hours > 0
-                    else hours
+                can_enter_president_diff = actor.can_edit_all or actor.can_lock or actor.is_president or actor.email == target_email
+                effective_requested_diff_hours = requested_president_diff_hours if can_enter_president_diff else Decimal("0.00")
+                existing_week_hours = await president_week_scheduled_hours(
+                    db,
+                    period_start=period_start,
+                    entry_date=parsed_entry_date,
+                    period_id=period_id,
+                    user_email=target_email,
+                    exclude_entry_date=entry_date,
+                )
+                president_diff_hours = validate_president_week_scheduled_hours(
+                    existing_week_hours=existing_week_hours,
+                    union_hours=hours,
+                    requested_diff_hours=effective_requested_diff_hours,
                 )
                 diff = await calculate_president_differential(
                     db,
@@ -2308,7 +2452,8 @@ async def upsert_entry(
                     lost_wage_input_type=profile.get("base_wage_input_type"),
                     lost_wage_amount=profile.get("base_wage_amount"),
                 )
-                lost_wage_hourly_rate = diff.lost_wage_hourly_rate
+                lost_wage_hourly_rate = diff.presidential_hourly_rate
+                hourly_rate = diff.presidential_hourly_rate
 
     row = await db.fetchone(
         "SELECT id, locked_at_utc FROM pay_entries WHERE period_id=? AND user_email=? AND entry_date=?",
@@ -2319,6 +2464,19 @@ async def upsert_entry(
     entry_id = str(row[0]) if row else f"pay-entry-{uuid4().hex}"
     now = utcnow()
     submitted_display_name = str(data.get("display_name") or "").strip() if actor.can_edit_all else ""
+    submitted_address = str(data.get("address") or "").strip()
+    profile_default_address = str((profile or {}).get("default_address") or "").strip()
+    entry_address = submitted_address or profile_default_address
+
+    certify_value = data.get("submitter_certified")
+    submitter_certified = certify_value is True or str(certify_value or "").strip().lower() in {"1", "true", "yes", "on"}
+    certification_text = str(
+        data.get("submitter_certification_text")
+        or "I certify that this daily lost-wage and expense entry is accurate and was submitted by me."
+    ).strip()
+    certified_at = now if submitter_certified else None
+    certified_by = actor.email if submitter_certified else None
+
     values = {
         "display_name": str(
             submitted_display_name
@@ -2327,7 +2485,7 @@ async def upsert_entry(
             or target_email
         ).strip(),
         "local_number": str(data.get("local_number") or "").strip(),
-        "address": str(data.get("address") or "").strip(),
+        "address": entry_address,
         "hourly_rate": float(hourly_rate),
         "lost_wage_input_type": normalized_wage_type,
         "lost_wage_amount": float(lost_wage_amount),
@@ -2335,7 +2493,7 @@ async def upsert_entry(
         "compensation_stub_id": compensation_stub_id,
         "hours": float(hours),
         "mileage_miles": float(_quantity(data.get("mileage_miles"))),
-        "mileage_rate": float(_money(data.get("mileage_rate"))),
+        "mileage_rate": float(_mileage_rate(data.get("mileage_rate"))),
         "mileage_amount": float(_money(data.get("mileage_amount"))),
         "rentals_amount": float(_money(data.get("rentals_amount"))),
         "meals_amount": float(_money(data.get("meals_amount"))),
@@ -2346,6 +2504,9 @@ async def upsert_entry(
         "president_diff_amount": float(diff.diff_amount),
         "wage_scale_id": diff.wage_scale_id,
         "notes": str(data.get("notes") or "").strip(),
+        "submitter_certified_at_utc": certified_at,
+        "submitter_certified_by": certified_by,
+        "submitter_certification_text": certification_text if submitter_certified else None,
     }
     await db.exec(
         """
@@ -2355,8 +2516,9 @@ async def upsert_entry(
           compensation_stub_id, hours, mileage_miles, mileage_rate, mileage_amount,
           rentals_amount, meals_amount, hotel_amount, miscellaneous_amount,
           president_diff_hours, president_diff_rate, president_diff_amount, wage_scale_id,
-          notes, created_at_utc, updated_at_utc
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          notes, submitter_certified_at_utc, submitter_certified_by, submitter_certification_text,
+          created_at_utc, updated_at_utc
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(period_id, user_email, entry_date) DO UPDATE SET
           display_name=excluded.display_name,
           local_number=excluded.local_number,
@@ -2379,6 +2541,10 @@ async def upsert_entry(
           president_diff_amount=excluded.president_diff_amount,
           wage_scale_id=excluded.wage_scale_id,
           notes=excluded.notes,
+          submitter_certified_at_utc=excluded.submitter_certified_at_utc,
+          submitter_certified_by=excluded.submitter_certified_by,
+          submitter_certification_text=excluded.submitter_certification_text,
+          review_status='pending',
           updated_at_utc=excluded.updated_at_utc
         """,
         (
@@ -2407,10 +2573,19 @@ async def upsert_entry(
             values["president_diff_amount"],
             values["wage_scale_id"],
             values["notes"],
+            values["submitter_certified_at_utc"],
+            values["submitter_certified_by"],
+            values["submitter_certification_text"],
             now,
             now,
         ),
     )
+    if profile and submitted_address and not profile_default_address:
+        await db.exec(
+            "UPDATE pay_profiles SET default_address=?, updated_at_utc=?, updated_by=? WHERE principal_email=?",
+            (submitted_address, now, actor.email, target_email),
+        )
+
     await add_pay_event(
         db,
         period_id=period_id,
@@ -2421,6 +2596,239 @@ async def upsert_entry(
     )
     entries = await list_entries(db, period_id=period_id, actor=PayActor(target_email, None, "guest", True, True, False))
     return next(row for row in entries if row["id"] == entry_id)
+
+
+
+async def delete_pay_entry(
+    db: Db,
+    *,
+    entry_id: str,
+    actor: PayActor,
+) -> dict[str, object]:
+    row = await db.fetchone(
+        """SELECT e.id, e.period_id, e.user_email, e.display_name, e.entry_date, e.locked_at_utc,
+                  p.status, e.hours, e.mileage_miles, e.mileage_amount,
+                  e.rentals_amount, e.meals_amount, e.hotel_amount, e.miscellaneous_amount,
+                  e.president_diff_hours, e.president_diff_amount, e.notes,
+                  (SELECT COUNT(*) FROM pay_attachments a WHERE a.entry_id=e.id) AS attachment_count,
+                  (SELECT COUNT(*) FROM pay_entry_corrections c WHERE c.entry_id=e.id) AS correction_count
+           FROM pay_entries e
+           JOIN pay_periods p ON p.id=e.period_id
+           WHERE e.id=?""",
+        (entry_id,),
+    )
+    if not row:
+        raise ValueError("entry not found")
+    owner_email = normalize_email(row[2])
+    if not (actor.can_edit_all or actor.can_lock or owner_email == actor.email):
+        raise PermissionError("cannot delete another user's entry")
+    if row[5] or str(row[6] or "") != "open":
+        raise ValueError("entry is locked")
+    snapshot = {
+        "entry_id": row[0],
+        "period_id": row[1],
+        "user_email": row[2],
+        "display_name": row[3],
+        "entry_date": row[4],
+        "hours": row[7],
+        "mileage_miles": row[8],
+        "mileage_amount": row[9],
+        "rentals_amount": row[10],
+        "meals_amount": row[11],
+        "hotel_amount": row[12],
+        "miscellaneous_amount": row[13],
+        "president_diff_hours": row[14],
+        "president_diff_amount": row[15],
+        "notes": row[16],
+        "attachment_count": int(row[17] or 0),
+        "correction_count": int(row[18] or 0),
+    }
+    await db.exec("UPDATE pay_events SET entry_id=NULL WHERE entry_id=?", (entry_id,))
+    await db.exec("DELETE FROM pay_entry_corrections WHERE entry_id=?", (entry_id,))
+    await db.exec("DELETE FROM pay_attachments WHERE entry_id=?", (entry_id,))
+    await db.exec("DELETE FROM pay_entries WHERE id=?", (entry_id,))
+    await add_pay_event(
+        db,
+        period_id=str(row[1]),
+        event_type="entry_deleted",
+        actor=actor.email,
+        details=snapshot,
+    )
+    return {"ok": True, **snapshot}
+
+
+_PAY_REVIEW_STATUSES = {"pending", "approved", "needs_fix", "rejected"}
+
+
+def normalize_pay_review_status(value: object) -> str:
+    status = str(value or "pending").strip().lower()
+    if status not in _PAY_REVIEW_STATUSES:
+        raise ValueError("review_status must be pending, approved, needs_fix, or rejected")
+    return status
+
+
+async def review_pay_entry(
+    db: Db,
+    *,
+    entry_id: str,
+    actor: PayActor,
+    review_status: str,
+    review_note: str | None = None,
+) -> dict[str, object]:
+    if not actor.can_lock:
+        raise PermissionError("treasurer access required")
+    normalized_status = normalize_pay_review_status(review_status)
+    note = str(review_note or "").strip() or None
+    if normalized_status in {"needs_fix", "rejected"} and not note:
+        raise ValueError("review_note is required")
+    row = await db.fetchone("SELECT period_id FROM pay_entries WHERE id=?", (entry_id,))
+    if not row:
+        raise ValueError("entry not found")
+    now = utcnow()
+    await db.exec(
+        """UPDATE pay_entries
+           SET review_status=?, review_note=?, reviewed_by=?, reviewed_at_utc=?, updated_at_utc=?
+           WHERE id=?""",
+        (normalized_status, note, actor.email, now, now, entry_id),
+    )
+    await add_pay_event(
+        db,
+        period_id=str(row[0]),
+        entry_id=entry_id,
+        event_type="entry_reviewed",
+        actor=actor.email,
+        details={"review_status": normalized_status, "review_note": note},
+    )
+    entries = await list_entries(db, period_id=str(row[0]), actor=PayActor(actor.email, actor.display_name, actor.role, True, True, True))
+    return next(item for item in entries if item["id"] == entry_id)
+
+
+async def create_pay_entry_correction(
+    db: Db,
+    *,
+    period_id: str,
+    actor: PayActor,
+    data: dict[str, object],
+    pay_cfg: Any,
+) -> dict[str, object]:
+    if not actor.can_lock:
+        raise PermissionError("treasurer access required")
+    target_email = normalize_email(data.get("user_email"))
+    if not target_email:
+        raise ValueError("user_email is required")
+    entry_date = str(data.get("entry_date") or "").strip()
+    if not entry_date:
+        raise ValueError("entry_date is required")
+    amount_fields = {
+        "hours": _quantity(data.get("hours")),
+        "mileage_miles": _quantity(data.get("mileage_miles")),
+        "mileage_rate": _quantity(data.get("mileage_rate")),
+        "mileage_amount": _money(data.get("mileage_amount")),
+        "rentals_amount": _money(data.get("rentals_amount")),
+        "meals_amount": _money(data.get("meals_amount")),
+        "hotel_amount": _money(data.get("hotel_amount")),
+        "miscellaneous_amount": _money(data.get("miscellaneous_amount")),
+    }
+    for key, value in amount_fields.items():
+        if value < 0:
+            raise ValueError("correction values cannot be negative")
+    if not any(value > 0 for key, value in amount_fields.items() if key != "mileage_rate"):
+        raise ValueError("correction must add at least one amount")
+    existing = await db.fetchone(
+        "SELECT id FROM pay_entries WHERE period_id=? AND user_email=? AND entry_date=?",
+        (period_id, target_email, entry_date),
+    )
+    if not existing:
+        await upsert_entry(
+            db,
+            period_id=period_id,
+            actor=PayActor(actor.email, actor.display_name, actor.role, True, True, True),
+            data={
+                "user_email": target_email,
+                "display_name": data.get("display_name") or target_email,
+                "entry_date": entry_date,
+                "local_number": data.get("local_number") or "3106",
+                "address": data.get("address") or "",
+                "notes": data.get("notes") or "Treasurer correction entry",
+            },
+            pay_cfg=pay_cfg,
+        )
+        existing = await db.fetchone(
+            "SELECT id FROM pay_entries WHERE period_id=? AND user_email=? AND entry_date=?",
+            (period_id, target_email, entry_date),
+        )
+    if not existing:
+        raise RuntimeError("failed to create correction target entry")
+    entry_id = str(existing[0])
+    if amount_fields["mileage_miles"] > 0 and amount_fields["mileage_rate"] <= 0:
+        row = await db.fetchone("SELECT mileage_rate FROM pay_entries WHERE id=?", (entry_id,))
+        amount_fields["mileage_rate"] = _quantity(row[0] if row else 0)
+    correction_id = f"pay-correction-{uuid4().hex}"
+    now = utcnow()
+    await db.exec(
+        """INSERT INTO pay_entry_corrections(
+             id, period_id, entry_id, target_user_email, display_name, entry_date,
+             hours, mileage_miles, mileage_rate, mileage_amount, rentals_amount,
+             meals_amount, hotel_amount, miscellaneous_amount, notes, created_by, created_at_utc
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            correction_id,
+            period_id,
+            entry_id,
+            target_email,
+            str(data.get("display_name") or "").strip() or None,
+            entry_date,
+            float(amount_fields["hours"]),
+            float(amount_fields["mileage_miles"]),
+            float(amount_fields["mileage_rate"]),
+            float(amount_fields["mileage_amount"]),
+            float(amount_fields["rentals_amount"]),
+            float(amount_fields["meals_amount"]),
+            float(amount_fields["hotel_amount"]),
+            float(amount_fields["miscellaneous_amount"]),
+            str(data.get("notes") or "").strip() or None,
+            actor.email,
+            now,
+        ),
+    )
+    await db.exec(
+        """UPDATE pay_entries
+           SET hours=hours+?,
+               mileage_miles=mileage_miles+?,
+               mileage_rate=CASE WHEN ? > 0 THEN ? ELSE mileage_rate END,
+               mileage_amount=mileage_amount+?,
+               rentals_amount=rentals_amount+?,
+               meals_amount=meals_amount+?,
+               hotel_amount=hotel_amount+?,
+               miscellaneous_amount=miscellaneous_amount+?,
+               review_status='pending',
+               updated_at_utc=?
+           WHERE id=?""",
+        (
+            float(amount_fields["hours"]),
+            float(amount_fields["mileage_miles"]),
+            float(amount_fields["mileage_rate"]),
+            float(amount_fields["mileage_rate"]),
+            float(amount_fields["mileage_amount"]),
+            float(amount_fields["rentals_amount"]),
+            float(amount_fields["meals_amount"]),
+            float(amount_fields["hotel_amount"]),
+            float(amount_fields["miscellaneous_amount"]),
+            now,
+            entry_id,
+        ),
+    )
+    await add_pay_event(
+        db,
+        period_id=period_id,
+        entry_id=entry_id,
+        event_type="entry_correction_added",
+        actor=actor.email,
+        details={"correction_id": correction_id, "user_email": target_email, "entry_date": entry_date},
+    )
+    row = await db.fetchone("SELECT * FROM pay_entry_corrections WHERE id=?", (correction_id,))
+    entries = await list_entries(db, period_id=period_id, actor=PayActor(actor.email, actor.display_name, actor.role, True, True, True))
+    return {"id": correction_id, "entry": next(item for item in entries if item["id"] == entry_id)}
 
 
 def decode_content_base64(value: str) -> bytes:
@@ -2490,6 +2898,9 @@ async def store_attachment(
     content_type: str | None,
     content: bytes,
     scan: bool = True,
+    mileage_miles: object | None = None,
+    mileage_rate: object | None = None,
+    mileage_amount: object | None = None,
 ) -> dict[str, object]:
     entry = await db.fetchone(
         "SELECT user_email, locked_at_utc FROM pay_entries WHERE id=? AND period_id=?",
@@ -2532,8 +2943,8 @@ async def store_attachment(
         """INSERT INTO pay_attachments(
              id, period_id, entry_id, uploaded_by, attachment_type, original_filename,
              stored_filename, local_path, content_type, size_bytes, sha256, scan_status,
-             scan_result, created_at_utc
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             scan_result, mileage_miles, mileage_rate, mileage_amount, created_at_utc
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             attachment_id,
             period_id,
@@ -2548,6 +2959,9 @@ async def store_attachment(
             sha,
             "clean",
             scan_result,
+            float(_quantity(mileage_miles)) if mileage_miles is not None else None,
+            float(_quantity(mileage_rate)) if mileage_rate is not None else None,
+            float(_money(mileage_amount)) if mileage_amount is not None else None,
             utcnow(),
         ),
     )
@@ -2567,6 +2981,9 @@ async def store_attachment(
         "size_bytes": len(content),
         "sha256": sha,
         "scan_status": "clean",
+        "mileage_miles": float(_quantity(mileage_miles)) if mileage_miles is not None else None,
+        "mileage_rate": float(_quantity(mileage_rate)) if mileage_rate is not None else None,
+        "mileage_amount": float(_money(mileage_amount)) if mileage_amount is not None else None,
     }
 
 
@@ -2585,6 +3002,7 @@ async def store_compensation_stub(
     filename: str,
     content_type: str | None,
     content: bytes,
+    payroll_month: object | None = None,
     notes: str | None = None,
     scan: bool = True,
 ) -> dict[str, object]:
@@ -2614,6 +3032,7 @@ async def store_compensation_stub(
     basis = _quantity(weekly_basis_hours)
     if basis <= 0:
         basis = Decimal("40")
+    normalized_payroll_month = normalize_payroll_month(payroll_month, default_for=date.today())
     calc = calculate_commission_compensation(
         base_wage_input_type=base_wage_input_type,
         base_wage_amount=base_wage_amount,
@@ -2636,9 +3055,9 @@ async def store_compensation_stub(
              id, user_email, uploaded_by, base_wage_input_type, base_wage_amount,
              weekly_basis_hours, commission_month_1_amount, commission_month_2_amount,
              commission_month_3_amount, commission_average_monthly, commission_hourly_rate,
-             calculated_hourly_rate, original_filename, stored_filename, local_path,
+             calculated_hourly_rate, payroll_month, original_filename, stored_filename, local_path,
              content_type, size_bytes, sha256, scan_status, scan_result, notes, created_at_utc
-           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             stub_id,
             target_email,
@@ -2652,6 +3071,7 @@ async def store_compensation_stub(
             float(calc.commission_average_monthly),
             float(calc.commission_hourly_rate),
             float(calc.calculated_hourly_rate),
+            normalized_payroll_month,
             safe_name,
             stored_filename,
             str(local_path),
@@ -2671,6 +3091,7 @@ async def store_compensation_stub(
         actor=actor.email,
         details={
             "user_email": target_email,
+            "payroll_month": normalized_payroll_month,
             "filename": safe_name,
             "sha256": sha,
             "calculated_hourly_rate": float(calc.calculated_hourly_rate),
@@ -2685,45 +3106,205 @@ async def store_compensation_stub(
 
 
 async def list_attachments(db: Db, *, period_id: str, actor: PayActor) -> list[dict[str, object]]:
+    select_sql = """SELECT a.id, a.entry_id, a.attachment_type, a.original_filename, a.content_type,
+                         a.size_bytes, a.sha256, a.scan_status, a.sharepoint_url, a.created_at_utc,
+                         e.user_email, e.entry_date, a.mileage_miles, a.mileage_rate, a.mileage_amount,
+                         e.locked_at_utc, p.status,
+                         (SELECT COUNT(*) FROM pay_attachments ma
+                          WHERE ma.entry_id=a.entry_id AND ma.attachment_type='mileage_pdf'
+                            AND ma.removed_at_utc IS NULL) AS active_mileage_count,
+                         e.display_name, e.local_number, e.notes,
+                         e.mileage_miles, e.mileage_rate, e.mileage_amount
+                  FROM pay_attachments a
+                  JOIN pay_entries e ON e.id = a.entry_id
+                  JOIN pay_periods p ON p.id = a.period_id
+                  WHERE a.period_id=? AND a.removed_at_utc IS NULL
+             AND COALESCE(e.review_status, 'pending') IN ('pending', 'approved')"""
     if actor.can_view_all:
-        rows = await db.fetchall(
-            """SELECT a.id, a.entry_id, a.attachment_type, a.original_filename, a.content_type,
-                      a.size_bytes, a.sha256, a.scan_status, a.sharepoint_url, a.created_at_utc,
-                      e.user_email, e.entry_date
-               FROM pay_attachments a
-               JOIN pay_entries e ON e.id = a.entry_id
-               WHERE a.period_id=?
-               ORDER BY e.entry_date, a.created_at_utc""",
-            (period_id,),
-        )
+        rows = await db.fetchall(f"{select_sql} ORDER BY e.entry_date, a.created_at_utc", (period_id,))
     else:
         rows = await db.fetchall(
-            """SELECT a.id, a.entry_id, a.attachment_type, a.original_filename, a.content_type,
-                      a.size_bytes, a.sha256, a.scan_status, a.sharepoint_url, a.created_at_utc,
-                      e.user_email, e.entry_date
-               FROM pay_attachments a
-               JOIN pay_entries e ON e.id = a.entry_id
-               WHERE a.period_id=? AND e.user_email=?
-               ORDER BY e.entry_date, a.created_at_utc""",
+            f"{select_sql} AND e.user_email=? ORDER BY e.entry_date, a.created_at_utc",
             (period_id, actor.email),
         )
-    return [
-        {
-            "id": row[0],
-            "entry_id": row[1],
-            "attachment_type": row[2],
-            "filename": row[3],
-            "content_type": row[4],
-            "size_bytes": row[5],
-            "sha256": row[6],
-            "scan_status": row[7],
-            "sharepoint_url": row[8],
-            "created_at_utc": row[9],
-            "user_email": row[10],
-            "entry_date": row[11],
-        }
-        for row in rows
-    ]
+    attachments: list[dict[str, object]] = []
+    for row in rows:
+        is_mileage = str(row[2] or "") == "mileage_pdf"
+        has_summary = row[14] is not None
+        entry_locked = bool(row[15]) or str(row[16] or "") != "open"
+        active_mileage_count = int(row[17] or 0)
+        fallback_miles = row[21] if row[21] is not None else row[12]
+        fallback_rate = row[22] if row[22] is not None else row[13]
+        fallback_amount = row[23] if row[23] is not None else row[14]
+        legacy_totals_available = is_mileage and fallback_amount is not None and _money(fallback_amount) > 0
+        can_remove = is_mileage and not entry_locked and (has_summary or active_mileage_count == 1 or legacy_totals_available)
+        remove_reason = ""
+        if is_mileage and entry_locked:
+            remove_reason = "Entry is locked."
+        elif is_mileage and not can_remove:
+            remove_reason = "This older report cannot be safely removed automatically."
+        attachments.append(
+            {
+                "id": row[0],
+                "entry_id": row[1],
+                "attachment_type": row[2],
+                "filename": row[3],
+                "content_type": row[4],
+                "size_bytes": row[5],
+                "sha256": row[6],
+                "scan_status": row[7],
+                "sharepoint_url": row[8],
+                "created_at_utc": row[9],
+                "user_email": row[10],
+                "entry_date": row[11],
+                "mileage_miles": row[12] if row[12] is not None else fallback_miles,
+                "mileage_rate": row[13] if row[13] is not None else fallback_rate,
+                "mileage_amount": row[14] if row[14] is not None else fallback_amount,
+                "display_name": row[18],
+                "local_number": row[19],
+                "description": row[20],
+                "legacy_summary": is_mileage and not has_summary and legacy_totals_available,
+                "active_mileage_count": active_mileage_count,
+                "can_remove": can_remove,
+                "remove_reason": remove_reason,
+            }
+        )
+    return attachments
+
+
+async def attachment_for_actor(
+    db: Db,
+    *,
+    attachment_id: str,
+    actor: PayActor,
+    include_removed: bool = False,
+) -> dict[str, object]:
+    removed_clause = "" if include_removed else "AND a.removed_at_utc IS NULL"
+    row = await db.fetchone(
+        f"""SELECT a.id, a.period_id, a.entry_id, a.attachment_type, a.original_filename,
+                   a.local_path, a.content_type, a.size_bytes, a.sha256, a.scan_status,
+                   a.mileage_miles, a.mileage_rate, a.mileage_amount, a.removed_at_utc,
+                   e.user_email, e.entry_date, e.locked_at_utc, e.mileage_miles, e.mileage_rate,
+                   e.mileage_amount, p.status,
+                   (SELECT COUNT(*) FROM pay_attachments ma
+                    WHERE ma.entry_id=a.entry_id AND ma.attachment_type='mileage_pdf'
+                      AND ma.removed_at_utc IS NULL) AS active_mileage_count
+            FROM pay_attachments a
+            JOIN pay_entries e ON e.id = a.entry_id
+            JOIN pay_periods p ON p.id = a.period_id
+            WHERE a.id=? {removed_clause}""",
+        (attachment_id,),
+    )
+    if not row:
+        raise ValueError("attachment not found")
+    if not (actor.can_edit_all or actor.can_lock) and normalize_email(row[14]) != actor.email:
+        raise PermissionError("cannot access another user's attachment")
+    return {
+        "id": row[0],
+        "period_id": row[1],
+        "entry_id": row[2],
+        "attachment_type": row[3],
+        "filename": row[4],
+        "local_path": row[5],
+        "content_type": row[6],
+        "size_bytes": row[7],
+        "sha256": row[8],
+        "scan_status": row[9],
+        "mileage_miles": row[10],
+        "mileage_rate": row[11],
+        "mileage_amount": row[12],
+        "removed_at_utc": row[13],
+        "user_email": row[14],
+        "entry_date": row[15],
+        "locked_at_utc": row[16],
+        "entry_mileage_miles": row[17],
+        "entry_mileage_rate": row[18],
+        "entry_mileage_amount": row[19],
+        "period_status": row[20],
+        "active_mileage_count": int(row[21] or 0),
+    }
+
+
+async def remove_mileage_attachment(
+    db: Db,
+    *,
+    attachment_id: str,
+    actor: PayActor,
+    reason: str | None = None,
+) -> dict[str, object]:
+    attachment = await attachment_for_actor(db, attachment_id=attachment_id, actor=actor)
+    if str(attachment["attachment_type"] or "") != "mileage_pdf":
+        raise ValueError("only mileage reports can be removed here")
+    if attachment.get("locked_at_utc") or str(attachment.get("period_status") or "") != "open":
+        raise ValueError("entry is locked")
+
+    miles_value = attachment.get("mileage_miles")
+    rate_value = attachment.get("mileage_rate")
+    amount_value = attachment.get("mileage_amount")
+    subtract_entry_totals = True
+    if amount_value is None:
+        active_mileage_count = int(attachment.get("active_mileage_count") or 0)
+        if active_mileage_count != 1:
+            entry_amount = _money(attachment.get("entry_mileage_amount"))
+            if entry_amount <= 0:
+                raise ValueError("this older mileage report cannot be safely removed automatically")
+            miles_value = Decimal("0.00")
+            rate_value = attachment.get("entry_mileage_rate")
+            amount_value = Decimal("0.00")
+            subtract_entry_totals = False
+        else:
+            miles_value = attachment.get("entry_mileage_miles")
+            rate_value = attachment.get("entry_mileage_rate")
+            amount_value = attachment.get("entry_mileage_amount")
+            await db.exec(
+                """UPDATE pay_attachments
+                   SET mileage_miles=?, mileage_rate=?, mileage_amount=?
+                   WHERE id=?""",
+                (float(_quantity(miles_value)), float(_quantity(rate_value)), float(_money(amount_value)), attachment_id),
+            )
+
+    remove_miles = _quantity(miles_value)
+    remove_amount = _money(amount_value)
+    current_miles = _quantity(attachment.get("entry_mileage_miles"))
+    current_amount = _money(attachment.get("entry_mileage_amount"))
+    new_miles = max(current_miles - remove_miles, Decimal("0.00")) if subtract_entry_totals else current_miles
+    new_amount = max(current_amount - remove_amount, Decimal("0.00")) if subtract_entry_totals else current_amount
+    new_rate = Decimal("0.00") if new_miles == 0 else _quantity(attachment.get("entry_mileage_rate"))
+    now = utcnow()
+    await db.exec(
+        """UPDATE pay_attachments
+           SET removed_at_utc=?, removed_by=?, removed_reason=?
+           WHERE id=? AND removed_at_utc IS NULL""",
+        (now, actor.email, str(reason or "submitter removed mileage report").strip(), attachment_id),
+    )
+    await db.exec(
+        """UPDATE pay_entries
+           SET mileage_miles=?, mileage_rate=?, mileage_amount=?, updated_at_utc=?
+           WHERE id=? AND period_id=?""",
+        (float(new_miles), float(new_rate), float(new_amount), now, attachment["entry_id"], attachment["period_id"]),
+    )
+    await add_pay_event(
+        db,
+        period_id=str(attachment["period_id"]),
+        entry_id=str(attachment["entry_id"]),
+        event_type="mileage_report_removed",
+        actor=actor.email,
+        details={
+            "attachment_id": attachment_id,
+            "filename": attachment.get("filename"),
+            "mileage_miles": float(remove_miles),
+            "mileage_amount": float(remove_amount),
+            "subtracted_entry_totals": subtract_entry_totals,
+        },
+    )
+    return {
+        **attachment,
+        "removed_at_utc": now,
+        "mileage_miles": float(remove_miles),
+        "mileage_rate": float(_quantity(rate_value)),
+        "mileage_amount": float(remove_amount),
+        "subtracted_entry_totals": subtract_entry_totals,
+    }
 
 
 def _cell_set_text(cell: Any, text: object) -> None:
@@ -2764,6 +3345,27 @@ def _entry_amounts(row: dict[str, object]) -> dict[str, Decimal]:
         "hotel": _money(row.get("hotel_amount")),
         "misc": _money(row.get("miscellaneous_amount")),
         "president_diff": _money(row.get("president_diff_amount")),
+    }
+
+
+def _voucher_quantity(value: object) -> Decimal:
+    return _quantity(value).quantize(_CURRENCY, rounding=ROUND_HALF_UP)
+
+
+def _voucher_quantity_text(value: object) -> str:
+    amount = _voucher_quantity(value)
+    return "" if amount == 0 else f"{amount:.2f}"
+
+
+def _entry_weekly_quantities(row: dict[str, object]) -> dict[str, Decimal]:
+    return {
+        "hours": _voucher_quantity(row.get("hours")),
+        "mileage": _voucher_quantity(row.get("mileage_miles")),
+        "rentals": _money(row.get("rentals_amount")),
+        "meals": _money(row.get("meals_amount")),
+        "hotel": _money(row.get("hotel_amount")),
+        "misc": _money(row.get("miscellaneous_amount")),
+        "president_diff": _voucher_quantity(row.get("president_diff_hours")),
     }
 
 
@@ -2903,19 +3505,21 @@ def fill_pay_voucher_docx(
                 continue
             col = index + 1
             amounts = _entry_amounts(entry)
+            weekly_values = _entry_weekly_quantities(entry)
             for key, row_no in row_names.items():
-                value = amounts[key]
-                totals_by_category[key] += value
-                day_totals[index] += value
-                _cell_set_text(table.rows[row_no].cells[col], _currency_text(value))
+                totals_by_category[key] += amounts[key]
+                value = weekly_values[key]
+                current_value = _money(table.rows[row_no].cells[col].text)
+                _cell_set_text(table.rows[row_no].cells[col], _voucher_quantity_text(current_value + value))
+            day_totals[index] += weekly_values["hours"] + weekly_values["president_diff"]
         for key, row_no in row_names.items():
             row_total = Decimal("0.00")
             for col in range(1, 8):
                 row_total += _money(table.rows[row_no].cells[col].text)
-            _cell_set_text(table.rows[row_no].cells[8], _currency_text(row_total))
+            _cell_set_text(table.rows[row_no].cells[8], _voucher_quantity_text(row_total))
         for index, day_total in enumerate(day_totals):
-            _cell_set_text(table.rows[8].cells[index + 1], _currency_text(day_total))
-        _cell_set_text(table.rows[8].cells[8], _currency_text(sum(day_totals, Decimal("0.00"))))
+            _cell_set_text(table.rows[8].cells[index + 1], _voucher_quantity_text(day_total))
+        _cell_set_text(table.rows[8].cells[8], _voucher_quantity_text(sum(day_totals, Decimal("0.00"))))
 
     _remove_front_receipt_explanation_rows(doc)
 
@@ -2935,13 +3539,11 @@ def fill_pay_voucher_docx(
                 _cell_set_text(totals_row.cells[idx], _currency_total_text(value))
 
     if include_signature_placeholders:
-        filer_index = max(1, int(filer_signer_index or 1))
-        paid_by_index = max(1, int(paid_by_signer_index or 2))
+        paid_by_index = max(1, int(paid_by_signer_index or 1))
         for paragraph in doc.paragraphs:
             if paragraph.text.strip().startswith("Signature"):
                 paragraph.text = (
-                    f"Signature\t{{{{Sig_es_:signer{filer_index}:signer{filer_index}_signature}}}}    "
-                    f"{{{{Dte_es_:signer{filer_index}:signer{filer_index}_date}}}}\tPaid by "
+                    "Signature\tSubmitted electronically in Pay Portal\tPaid by "
                     f"{{{{Sig_es_:signer{paid_by_index}:signer{paid_by_index}_signature}}}}    "
                     f"{{{{Dte_es_:signer{paid_by_index}:signer{paid_by_index}_date}}}}"
                 )
@@ -3014,6 +3616,8 @@ async def _attachments_for_packet(db: Db, period_id: str) -> list[dict[str, obje
            FROM pay_attachments a
            JOIN pay_entries e ON e.id = a.entry_id
            WHERE a.period_id=?
+             AND a.removed_at_utc IS NULL
+             AND COALESCE(e.review_status, 'pending') IN ('pending', 'approved')
            ORDER BY e.user_email, e.entry_date, a.created_at_utc""",
         (period_id,),
     )
@@ -3040,6 +3644,7 @@ async def _compensation_stubs_for_packet(db: Db, period_id: str) -> list[dict[st
            FROM pay_entries e
            JOIN pay_compensation_stubs s ON s.id = e.compensation_stub_id
            WHERE e.period_id=?
+             AND COALESCE(e.review_status, 'pending') IN ('pending', 'approved')
            ORDER BY s.user_email, s.created_at_utc""",
         (period_id,),
     )
@@ -3078,21 +3683,11 @@ async def _upload_if_configured(
 
 
 def pay_packet_signer_order(*, grouped_entry_emails: list[str], president_signer_email: str) -> tuple[list[str], int]:
-    signers: list[str] = []
-    seen: set[str] = set()
+    _ = grouped_entry_emails
     president = normalize_email(president_signer_email)
     if not president:
         raise ValueError("president signer email is required")
-    for email in grouped_entry_emails:
-        normalized = normalize_email(email)
-        if normalized == president:
-            continue
-        if normalized and normalized not in seen:
-            seen.add(normalized)
-            signers.append(normalized)
-    signers.append(president)
-    president_index = len(signers)
-    return signers, president_index
+    return [president], 1
 
 
 async def lock_period_and_send_packet(
@@ -3118,8 +3713,10 @@ async def lock_period_and_send_packet(
         period_id=period_id,
         actor=PayActor(actor.email, actor.display_name, actor.role, True, True, True),
     )
+    excluded_entries = [entry for entry in entries if str(entry.get("review_status") or "pending") in {"needs_fix", "rejected"}]
+    entries = [entry for entry in entries if str(entry.get("review_status") or "pending") in {"pending", "approved"}]
     if not entries:
-        raise ValueError("cannot lock an empty pay period")
+        raise ValueError("cannot lock a pay period with no includable entries")
     president_signer = await president_email(db, explicit=president_signer_email, pay_cfg=cfg.pay_portal)
     if not president_signer:
         raise ValueError("president signer email is required")
@@ -3145,11 +3742,26 @@ async def lock_period_and_send_packet(
     voucher_paths: list[str] = []
     voucher_pdf_paths: list[str] = []
     anchor_pdf_paths: list[str] = []
+    packet_pdf_paths: list[str] = []
+    alignment_pdf_paths: list[str] = []
+    support_pdf_paths_by_user: dict[str, list[str]] = {}
+    for attachment in await _attachments_for_packet(db, period_id):
+        source = Path(str(attachment["local_path"]))
+        if not source.exists():
+            continue
+        user_email = normalize_email(str(attachment["user_email"]))
+        if str(attachment["content_type"]) == "application/pdf":
+            support_pdf_paths_by_user.setdefault(user_email, []).append(str(source))
+            continue
+        target = support_dir / f"{attachment['id']}.pdf"
+        image_to_pdf(str(source), str(target))
+        support_pdf_paths_by_user.setdefault(user_email, []).append(str(target))
+
     for index, (email, rows) in enumerate(ordered_groups, start=1):
         label = safe_filename(rows[0].get("display_name") or email, fallback=f"voucher-{index}")
         docx_path = voucher_dir / f"{index:02d}-{label}.docx"
         anchor_docx_path = voucher_dir / f"{index:02d}-{label}.anchor.docx"
-        filer_signer_index = signer_order.index(normalize_email(email)) + 1
+        filer_signer_index = 0
         fill_pay_voucher_docx(
             template_path=cfg.pay_portal.voucher_template_path,
             output_path=str(docx_path),
@@ -3193,23 +3805,14 @@ async def lock_period_and_send_packet(
         voucher_paths.append(str(docx_path))
         voucher_pdf_paths.append(voucher_pdf)
         anchor_pdf_paths.append(anchor_pdf)
-
-    support_pdf_paths: list[str] = []
-    for attachment in await _attachments_for_packet(db, period_id):
-        source = Path(str(attachment["local_path"]))
-        if not source.exists():
-            continue
-        if str(attachment["content_type"]) == "application/pdf":
-            support_pdf_paths.append(str(source))
-            continue
-        target = support_dir / f"{attachment['id']}.pdf"
-        image_to_pdf(str(source), str(target))
-        support_pdf_paths.append(str(target))
+        support_pdf_paths = support_pdf_paths_by_user.get(normalize_email(email), [])
+        packet_pdf_paths.extend([voucher_pdf, *support_pdf_paths])
+        alignment_pdf_paths.extend([anchor_pdf, *support_pdf_paths])
 
     unsigned_packet_path = str(packet_dir / f"{period_start}_to_{period_end}_packet.pdf")
     alignment_packet_path = str(packet_dir / f"{period_start}_to_{period_end}_alignment.pdf")
-    merge_pdfs([*voucher_pdf_paths, *support_pdf_paths], unsigned_packet_path)
-    merge_pdfs([*anchor_pdf_paths, *support_pdf_paths], alignment_packet_path)
+    merge_pdfs(packet_pdf_paths, unsigned_packet_path)
+    merge_pdfs(alignment_pdf_paths, alignment_packet_path)
     packet_bytes = Path(unsigned_packet_path).read_bytes()
     alignment_bytes = Path(alignment_packet_path).read_bytes()
     sha = hashlib.sha256(packet_bytes).hexdigest()
@@ -3335,6 +3938,7 @@ async def lock_period_and_send_packet(
             "signing_link": signing_link,
             "president_signer_email": president_signer,
             "signer_order": signer_order,
+            "excluded_entries": excluded_entries,
         },
     )
     return {
@@ -3345,6 +3949,7 @@ async def lock_period_and_send_packet(
         "signing_link": signing_link,
         "signer_order": signer_order,
         "sharepoint_unsigned_url": sharepoint_unsigned_url,
+        "excluded_entries": excluded_entries,
     }
 
 
@@ -3590,6 +4195,40 @@ def _google_leg(*, api_key: str, origin: str, destination: str) -> dict[str, obj
     return result
 
 
+def validate_mileage_locations(*, google_maps_api_key: str, locations: list[str]) -> dict[str, object]:
+    if not google_maps_api_key:
+        raise RuntimeError("Google Maps API key is not configured")
+    cleaned = [str(item or "").strip() for item in locations if str(item or "").strip()]
+    if len(cleaned) < 2:
+        raise ValueError("at least two locations are required")
+    legs: list[dict[str, object]] = []
+    resolved = list(cleaned)
+    total_miles = Decimal("0")
+    for idx in range(len(cleaned) - 1):
+        leg = _google_leg(api_key=google_maps_api_key, origin=cleaned[idx], destination=cleaned[idx + 1])
+        origin = str(leg.get("origin") or cleaned[idx]).strip()
+        destination = str(leg.get("destination") or cleaned[idx + 1]).strip()
+        resolved[idx] = origin
+        resolved[idx + 1] = destination
+        miles = _quantity(leg.get("distance_miles"))
+        total_miles += miles
+        legs.append(
+            {
+                "origin_input": cleaned[idx],
+                "destination_input": cleaned[idx + 1],
+                "origin": origin,
+                "destination": destination,
+                "distance_text": leg.get("distance_text") or "",
+                "distance_miles": float(miles.quantize(_MILES, rounding=ROUND_HALF_UP)),
+            }
+        )
+    return {
+        "locations": resolved,
+        "legs": legs,
+        "total_miles": float(total_miles.quantize(_MILES, rounding=ROUND_HALF_UP)),
+    }
+
+
 def _prefetch_google_legs(
     *,
     api_key: str,
@@ -3789,18 +4428,22 @@ async def create_mileage_attachment(
         content_type="application/pdf",
         content=pdf_bytes,
         scan=False,
+        mileage_miles=total_miles,
+        mileage_rate=rate,
+        mileage_amount=reimbursement,
     )
     row = await db.fetchone(
-        "SELECT mileage_amount FROM pay_entries WHERE id=? AND period_id=?",
+        "SELECT mileage_miles, mileage_amount FROM pay_entries WHERE id=? AND period_id=?",
         (entry_id, period_id),
     )
-    current_mileage_amount = _money(row[0] if row else 0)
+    current_mileage_miles = _quantity(row[0] if row else 0)
+    current_mileage_amount = _money(row[1] if row else 0)
     await db.exec(
         """UPDATE pay_entries
            SET mileage_miles=?, mileage_rate=?, mileage_amount=?, updated_at_utc=?
            WHERE id=? AND period_id=?""",
         (
-            float(total_miles),
+            float(current_mileage_miles + total_miles),
             float(rate),
             float(current_mileage_amount + reimbursement),
             utcnow(),
@@ -3808,4 +4451,4 @@ async def create_mileage_attachment(
             period_id,
         ),
     )
-    return {**attachment, "mileage_miles": float(total_miles), "reimbursement": float(reimbursement)}
+    return {**attachment, "mileage_miles": float(total_miles), "mileage_rate": float(rate), "mileage_amount": float(reimbursement), "reimbursement": float(reimbursement)}

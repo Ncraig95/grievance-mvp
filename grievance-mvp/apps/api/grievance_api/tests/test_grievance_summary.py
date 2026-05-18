@@ -38,6 +38,21 @@ class GrievanceSummaryTests(unittest.TestCase):
         self.assertEqual(result.full_text, "Original statement submitted by the member.")
         self.assertEqual(result.summary, "Original statement submitted by the member.")
 
+    def test_can_exclude_action_taken_and_current_status_for_tracker_display(self) -> None:
+        result = build_grievance_summary(
+            {
+                "template_data": {
+                    "action_taken": "Most recent action was a first level request.",
+                    "current_status": "Waiting on a company response.",
+                },
+            },
+            include_low_priority=False,
+        )
+
+        self.assertIsNone(result.source)
+        self.assertIsNone(result.full_text)
+        self.assertIsNone(result.summary)
+
     def test_short_text_passes_through(self) -> None:
         text = "Member was denied requested vacation in violation of the contract."
 

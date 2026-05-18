@@ -663,6 +663,7 @@ CREATE TABLE IF NOT EXISTS pay_profiles (
   commission_average_monthly REAL NOT NULL DEFAULT 0,
   commission_hourly_rate REAL NOT NULL DEFAULT 0,
   calculated_hourly_rate REAL NOT NULL DEFAULT 0,
+  default_address TEXT,
   status TEXT NOT NULL DEFAULT 'active',
   notes TEXT,
   created_at_utc TEXT NOT NULL,
@@ -756,6 +757,7 @@ CREATE TABLE IF NOT EXISTS pay_compensation_stubs (
   commission_average_monthly REAL NOT NULL DEFAULT 0,
   commission_hourly_rate REAL NOT NULL DEFAULT 0,
   calculated_hourly_rate REAL NOT NULL DEFAULT 0,
+  payroll_month TEXT NOT NULL DEFAULT '',
   original_filename TEXT NOT NULL,
   stored_filename TEXT NOT NULL,
   local_path TEXT NOT NULL,
@@ -772,6 +774,9 @@ CREATE TABLE IF NOT EXISTS pay_compensation_stubs (
 
 CREATE INDEX IF NOT EXISTS idx_pay_compensation_stubs_user_date
 ON pay_compensation_stubs(user_email, created_at_utc);
+
+CREATE INDEX IF NOT EXISTS idx_pay_compensation_stubs_user_month
+ON pay_compensation_stubs(user_email, payroll_month);
 
 CREATE TABLE IF NOT EXISTS pay_entries (
   id TEXT PRIMARY KEY,
@@ -799,6 +804,13 @@ CREATE TABLE IF NOT EXISTS pay_entries (
   president_diff_amount REAL NOT NULL DEFAULT 0,
   wage_scale_id INTEGER,
   notes TEXT,
+  review_status TEXT NOT NULL DEFAULT 'pending',
+  review_note TEXT,
+  reviewed_by TEXT,
+  reviewed_at_utc TEXT,
+  submitter_certified_at_utc TEXT,
+  submitter_certified_by TEXT,
+  submitter_certification_text TEXT,
   locked_at_utc TEXT,
   created_at_utc TEXT NOT NULL,
   updated_at_utc TEXT NOT NULL,
@@ -819,6 +831,37 @@ ON pay_entries(user_email, entry_date);
 CREATE INDEX IF NOT EXISTS idx_pay_entries_compensation_stub
 ON pay_entries(compensation_stub_id);
 
+CREATE INDEX IF NOT EXISTS idx_pay_entries_review_status
+ON pay_entries(period_id, review_status);
+
+CREATE TABLE IF NOT EXISTS pay_entry_corrections (
+  id TEXT PRIMARY KEY,
+  period_id TEXT NOT NULL,
+  entry_id TEXT NOT NULL,
+  target_user_email TEXT NOT NULL,
+  display_name TEXT,
+  entry_date TEXT NOT NULL,
+  hours REAL NOT NULL DEFAULT 0,
+  mileage_miles REAL NOT NULL DEFAULT 0,
+  mileage_rate REAL NOT NULL DEFAULT 0,
+  mileage_amount REAL NOT NULL DEFAULT 0,
+  rentals_amount REAL NOT NULL DEFAULT 0,
+  meals_amount REAL NOT NULL DEFAULT 0,
+  hotel_amount REAL NOT NULL DEFAULT 0,
+  miscellaneous_amount REAL NOT NULL DEFAULT 0,
+  notes TEXT,
+  created_by TEXT NOT NULL,
+  created_at_utc TEXT NOT NULL,
+  FOREIGN KEY (period_id) REFERENCES pay_periods (id),
+  FOREIGN KEY (entry_id) REFERENCES pay_entries (id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pay_entry_corrections_period
+ON pay_entry_corrections(period_id, entry_date);
+
+CREATE INDEX IF NOT EXISTS idx_pay_entry_corrections_entry
+ON pay_entry_corrections(entry_id);
+
 CREATE TABLE IF NOT EXISTS pay_attachments (
   id TEXT PRIMARY KEY,
   period_id TEXT NOT NULL,
@@ -833,8 +876,14 @@ CREATE TABLE IF NOT EXISTS pay_attachments (
   sha256 TEXT NOT NULL,
   scan_status TEXT NOT NULL,
   scan_result TEXT NOT NULL,
+  mileage_miles REAL,
+  mileage_rate REAL,
+  mileage_amount REAL,
   sharepoint_url TEXT,
   sharepoint_path TEXT,
+  removed_at_utc TEXT,
+  removed_by TEXT,
+  removed_reason TEXT,
   created_at_utc TEXT NOT NULL,
   FOREIGN KEY (period_id) REFERENCES pay_periods (id),
   FOREIGN KEY (entry_id) REFERENCES pay_entries (id)
@@ -845,6 +894,9 @@ ON pay_attachments(entry_id);
 
 CREATE INDEX IF NOT EXISTS idx_pay_attachments_period
 ON pay_attachments(period_id);
+
+CREATE INDEX IF NOT EXISTS idx_pay_attachments_period_removed
+ON pay_attachments(period_id, removed_at_utc);
 
 CREATE TABLE IF NOT EXISTS pay_packets (
   id TEXT PRIMARY KEY,
