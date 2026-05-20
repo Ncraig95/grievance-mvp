@@ -11,6 +11,7 @@ import logging
 import os
 import random
 import re
+import shutil
 import socket
 import subprocess
 import threading
@@ -58,6 +59,10 @@ _RECEIPT_CONTENT_TYPES = {
 }
 _PAY_PROFILE_BASIS_VALUES = {"hourly", "weekly", "commission", "president", "expense_only"}
 _PAY_PROFILE_STATUS_VALUES = {"active", "disabled"}
+_PAY_FUND_TYPES = {"sif", "growth"}
+_PAY_FUND_STATUS_VALUES = {"active", "closed"}
+_PAY_FUND_LEDGER_TYPES = {"advance", "reimbursement_submitted", "reimbursement_received", "adjustment"}
+_FUND_FICA_RATE = Decimal("0.0765")
 
 
 def _pay_lock_log(stage: str, **fields: object) -> None:
@@ -879,6 +884,7 @@ async def pay_settings(db: Db, *, pay_cfg: Any | None = None) -> dict[str, objec
         "treasurer_emails": list(getattr(pay_cfg, "treasurer_emails", ()) or ()),
         "president_email": str(getattr(pay_cfg, "president_email", "") or ""),
         "irs_rates": dict(getattr(pay_cfg, "irs_rates", {}) or {}),
+        "fund_fica_rate": str(getattr(pay_cfg, "fund_fica_rate", _FUND_FICA_RATE) or _FUND_FICA_RATE),
         "common_places": default_common_places,
         "common_places_managed": False,
     }
@@ -922,6 +928,1048 @@ async def save_pay_settings(
     normalized.update(setting)
     await db.upsert_app_setting(setting_key="pay_portal", setting=normalized, updated_by=updated_by)
     return normalized
+
+
+def normalize_pay_fund_type(value: object) -> str:
+    normalized = str(value or "sif").strip().lower()
+    if normalized in {"growth_fund", "growth fund"}:
+        normalized = "growth"
+    if normalized not in _PAY_FUND_TYPES:
+        raise ValueError("fund_type must be sif or growth")
+    return normalized
+
+
+def normalize_pay_fund_status(value: object) -> str:
+    normalized = str(value or "active").strip().lower()
+    if normalized not in _PAY_FUND_STATUS_VALUES:
+        raise ValueError("fund status must be active or closed")
+    return normalized
+
+
+def normalize_pay_fund_ledger_type(value: object) -> str:
+    normalized = str(value or "advance").strip().lower()
+    if normalized not in _PAY_FUND_LEDGER_TYPES:
+        raise ValueError("ledger_type must be advance, reimbursement_submitted, reimbursement_received, or adjustment")
+    return normalized
+
+
+def fund_fica_rate_from_settings(settings: dict[str, object] | None) -> Decimal:
+    raw = (settings or {}).get("fund_fica_rate", _FUND_FICA_RATE)
+    rate = _quantity(raw)
+    if rate < 0:
+        return _FUND_FICA_RATE
+    return rate.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+
+
+def _fund_ledger_signed_amount(ledger_type: object, amount: object) -> Decimal:
+    kind = normalize_pay_fund_ledger_type(ledger_type)
+    value = _money(amount)
+    if kind == "reimbursement_submitted":
+        return Decimal("0.00")
+    return value
+
+
+def _fund_row_from_db(row: Any) -> dict[str, object]:
+    return {
+        "id": row[0],
+        "fund_type": row[1],
+        "name": row[2],
+        "status": row[3],
+        "local_number": row[4],
+        "description": row[5],
+        "created_by": row[6],
+        "created_at_utc": row[7],
+        "updated_at_utc": row[8],
+        "updated_by": row[9],
+    }
+
+
+async def pay_fund_by_id(db: Db, *, fund_id: str) -> dict[str, object] | None:
+    row = await db.fetchone(
+        """SELECT id, fund_type, name, status, local_number, description,
+                  created_by, created_at_utc, updated_at_utc, updated_by
+           FROM pay_funds
+           WHERE id=?""",
+        (fund_id,),
+    )
+    return _fund_row_from_db(row) if row else None
+
+
+async def upsert_pay_fund(
+    db: Db,
+    *,
+    fund_id: str | None = None,
+    fund_type: object = "sif",
+    name: str,
+    status: object = "active",
+    local_number: str | None = "3106",
+    description: str | None = None,
+    actor_email: str,
+) -> dict[str, object]:
+    normalized_name = str(name or "").strip()
+    if not normalized_name:
+        raise ValueError("fund name is required")
+    normalized_type = normalize_pay_fund_type(fund_type)
+    normalized_status = normalize_pay_fund_status(status)
+    normalized_local = str(local_number or "3106").strip() or "3106"
+    now = utcnow()
+    requested_id = str(fund_id or "").strip()
+    existing_name = await db.fetchone("SELECT id FROM pay_funds WHERE name=?", (normalized_name,))
+    if existing_name and requested_id and str(existing_name[0]) != requested_id:
+        raise ValueError("fund name already exists")
+    saved_id = requested_id or (str(existing_name[0]) if existing_name else f"pay-fund-{uuid4().hex}")
+    await db.exec(
+        """
+        INSERT INTO pay_funds(
+          id, fund_type, name, status, local_number, description,
+          created_by, created_at_utc, updated_at_utc, updated_by
+        ) VALUES(?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET
+          fund_type=excluded.fund_type,
+          name=excluded.name,
+          status=excluded.status,
+          local_number=excluded.local_number,
+          description=excluded.description,
+          updated_at_utc=excluded.updated_at_utc,
+          updated_by=excluded.updated_by
+        """,
+        (
+            saved_id,
+            normalized_type,
+            normalized_name,
+            normalized_status,
+            normalized_local,
+            str(description or "").strip() or None,
+            actor_email,
+            now,
+            now,
+            actor_email,
+        ),
+    )
+    fund = await pay_fund_by_id(db, fund_id=saved_id)
+    if not fund:
+        raise RuntimeError("failed to save fund")
+    return fund
+
+
+async def add_pay_fund_ledger_entry(
+    db: Db,
+    *,
+    fund_id: str,
+    ledger_type: object,
+    amount: object,
+    effective_date: str,
+    reference: str | None = None,
+    notes: str | None = None,
+    actor_email: str,
+) -> dict[str, object]:
+    fund = await pay_fund_by_id(db, fund_id=fund_id)
+    if not fund:
+        raise ValueError("fund not found")
+    normalized_type = normalize_pay_fund_ledger_type(ledger_type)
+    parsed_date = date.fromisoformat(str(effective_date or "").strip())
+    value = _money(amount)
+    if normalized_type != "adjustment" and value < 0:
+        raise ValueError("ledger amount cannot be negative")
+    ledger_id = f"pay-fund-ledger-{uuid4().hex}"
+    now = utcnow()
+    await db.exec(
+        """INSERT INTO pay_fund_ledger_entries(
+             id, fund_id, ledger_type, amount, effective_date, reference, notes, created_by, created_at_utc
+           ) VALUES(?,?,?,?,?,?,?,?,?)""",
+        (
+            ledger_id,
+            fund_id,
+            normalized_type,
+            float(value),
+            parsed_date.isoformat(),
+            str(reference or "").strip() or None,
+            str(notes or "").strip() or None,
+            actor_email,
+            now,
+        ),
+    )
+    return {
+        "id": ledger_id,
+        "fund_id": fund_id,
+        "ledger_type": normalized_type,
+        "amount": float(value),
+        "effective_date": parsed_date.isoformat(),
+        "reference": str(reference or "").strip() or None,
+        "notes": str(notes or "").strip() or None,
+        "created_by": actor_email,
+        "created_at_utc": now,
+    }
+
+
+def _fund_allocation_cost(*, allocation: dict[str, object], entry: dict[str, object], fica_rate: Decimal) -> dict[str, Decimal]:
+    hourly_rate = _money(entry.get("lost_wage_hourly_rate") or entry.get("hourly_rate"))
+    hours = _quantity(allocation.get("hours"))
+    gross = (hours * hourly_rate).quantize(_CURRENCY, rounding=ROUND_HALF_UP)
+    fica = (gross * fica_rate).quantize(_CURRENCY, rounding=ROUND_HALF_UP)
+    mileage = _money(allocation.get("mileage_amount"))
+    rentals = _money(allocation.get("rentals_amount"))
+    meals = _money(allocation.get("meals_amount"))
+    hotel = _money(allocation.get("hotel_amount"))
+    misc = _money(allocation.get("miscellaneous_amount"))
+    expenses = (mileage + rentals + meals + hotel + misc).quantize(_CURRENCY, rounding=ROUND_HALF_UP)
+    total = (gross + fica + expenses).quantize(_CURRENCY, rounding=ROUND_HALF_UP)
+    return {
+        "lost_wage_gross": gross,
+        "fica": fica,
+        "mileage": mileage,
+        "rentals": rentals,
+        "meals": meals,
+        "hotel": hotel,
+        "miscellaneous": misc,
+        "expenses": expenses,
+        "total": total,
+    }
+
+
+def _allocation_from_row(row: Any) -> dict[str, object]:
+    return {
+        "id": row[0],
+        "period_id": row[1],
+        "entry_id": row[2],
+        "fund_id": row[3],
+        "fund_name": row[4],
+        "fund_type": row[5],
+        "entry_date": row[6],
+        "user_email": row[7],
+        "display_name": row[8],
+        "hours": row[9],
+        "mileage_miles": row[10],
+        "mileage_amount": row[11],
+        "rentals_amount": row[12],
+        "meals_amount": row[13],
+        "hotel_amount": row[14],
+        "miscellaneous_amount": row[15],
+        "notes": row[16],
+        "created_by": row[17],
+        "created_at_utc": row[18],
+        "updated_at_utc": row[19],
+    }
+
+
+async def list_pay_fund_allocations(
+    db: Db,
+    *,
+    actor: PayActor,
+    period_id: str | None = None,
+) -> list[dict[str, object]]:
+    where = ["1=1"]
+    params: list[object] = []
+    if period_id:
+        where.append("fa.period_id=?")
+        params.append(period_id)
+    if not actor.can_view_all:
+        where.append("e.user_email=?")
+        params.append(actor.email)
+    rows = await db.fetchall(
+        f"""SELECT fa.id, fa.period_id, fa.entry_id, fa.fund_id, f.name, f.fund_type,
+                  e.entry_date, e.user_email, e.display_name,
+                  fa.hours, fa.mileage_miles, fa.mileage_amount, fa.rentals_amount,
+                  fa.meals_amount, fa.hotel_amount, fa.miscellaneous_amount, fa.notes,
+                  fa.created_by, fa.created_at_utc, fa.updated_at_utc
+           FROM pay_fund_allocations fa
+           JOIN pay_entries e ON e.id = fa.entry_id
+           JOIN pay_funds f ON f.id = fa.fund_id
+           WHERE {' AND '.join(where)}
+           ORDER BY e.entry_date, e.user_email, f.name""",
+        tuple(params),
+    )
+    return [_allocation_from_row(row) for row in rows]
+
+
+async def save_pay_fund_allocations_for_entry(
+    db: Db,
+    *,
+    entry_id: str,
+    actor: PayActor,
+    allocations: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    row = await db.fetchone(
+        """SELECT e.period_id, e.user_email, e.entry_date, e.locked_at_utc, p.status,
+                  e.hours, e.mileage_miles, e.mileage_amount, e.rentals_amount,
+                  e.meals_amount, e.hotel_amount, e.miscellaneous_amount
+           FROM pay_entries e
+           JOIN pay_periods p ON p.id = e.period_id
+           WHERE e.id=?""",
+        (entry_id,),
+    )
+    if not row:
+        raise ValueError("entry not found")
+    if row[3] or str(row[4] or "") != "open":
+        raise ValueError("entry is locked")
+    owner_email = normalize_email(row[1])
+    if not (actor.can_edit_all or actor.can_lock or owner_email == actor.email):
+        raise PermissionError("cannot allocate another user's entry")
+
+    period_id = str(row[0])
+    parent_totals = {
+        "hours": _quantity(row[5]),
+        "mileage_miles": _quantity(row[6]),
+        "mileage_amount": _money(row[7]),
+        "rentals_amount": _money(row[8]),
+        "meals_amount": _money(row[9]),
+        "hotel_amount": _money(row[10]),
+        "miscellaneous_amount": _money(row[11]),
+    }
+    seen_funds: set[str] = set()
+    normalized_rows: list[dict[str, object]] = []
+    totals = {key: Decimal("0.00") for key in parent_totals}
+    for raw in allocations:
+        fund_id = str(raw.get("fund_id") or "").strip()
+        if not fund_id:
+            continue
+        if fund_id in seen_funds:
+            raise ValueError("each fund can only appear once per entry")
+        seen_funds.add(fund_id)
+        fund = await pay_fund_by_id(db, fund_id=fund_id)
+        if not fund or str(fund.get("status") or "") != "active":
+            raise ValueError("active fund not found")
+        normalized = {
+            "fund_id": fund_id,
+            "hours": _quantity(raw.get("hours")),
+            "mileage_miles": _quantity(raw.get("mileage_miles")),
+            "mileage_amount": _money(raw.get("mileage_amount")),
+            "rentals_amount": _money(raw.get("rentals_amount")),
+            "meals_amount": _money(raw.get("meals_amount")),
+            "hotel_amount": _money(raw.get("hotel_amount")),
+            "miscellaneous_amount": _money(raw.get("miscellaneous_amount")),
+            "notes": str(raw.get("notes") or "").strip(),
+        }
+        for key, value in normalized.items():
+            if key in totals and value < 0:  # type: ignore[operator]
+                raise ValueError("fund allocation amounts cannot be negative")
+        for key in totals:
+            totals[key] += normalized[key]  # type: ignore[operator]
+        normalized_rows.append(normalized)
+
+    for key, total in totals.items():
+        allowed = parent_totals[key]
+        if key.endswith("amount") or key in {"rentals_amount", "meals_amount", "hotel_amount", "miscellaneous_amount"}:
+            if total > allowed + Decimal("0.01"):
+                raise ValueError(f"allocated {key} exceeds the entry total")
+        elif total > allowed + Decimal("0.0001"):
+            raise ValueError(f"allocated {key} exceeds the entry total")
+
+    existing = await db.fetchall("SELECT id FROM pay_fund_allocations WHERE entry_id=?", (entry_id,))
+    existing_ids = [str(item[0]) for item in existing]
+    if existing_ids:
+        placeholders = ",".join("?" for _ in existing_ids)
+        await db.exec(
+            f"DELETE FROM pay_fund_attachment_links WHERE allocation_id IN ({placeholders})",
+            tuple(existing_ids),
+        )
+    await db.exec("DELETE FROM pay_fund_allocations WHERE entry_id=?", (entry_id,))
+    now = utcnow()
+    for normalized in normalized_rows:
+        allocation_id = f"pay-fund-allocation-{uuid4().hex}"
+        await db.exec(
+            """INSERT INTO pay_fund_allocations(
+                 id, period_id, entry_id, fund_id, hours, mileage_miles, mileage_amount,
+                 rentals_amount, meals_amount, hotel_amount, miscellaneous_amount,
+                 notes, created_by, created_at_utc, updated_at_utc
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                allocation_id,
+                period_id,
+                entry_id,
+                normalized["fund_id"],
+                float(normalized["hours"]),
+                float(normalized["mileage_miles"]),
+                float(normalized["mileage_amount"]),
+                float(normalized["rentals_amount"]),
+                float(normalized["meals_amount"]),
+                float(normalized["hotel_amount"]),
+                float(normalized["miscellaneous_amount"]),
+                normalized["notes"] or None,
+                actor.email,
+                now,
+                now,
+            ),
+        )
+    await add_pay_event(
+        db,
+        period_id=period_id,
+        entry_id=entry_id,
+        event_type="fund_allocations_saved",
+        actor=actor.email,
+        details={"allocation_count": len(normalized_rows), "fund_ids": sorted(seen_funds)},
+    )
+    return await list_pay_fund_allocations(db, actor=actor, period_id=period_id)
+
+
+async def link_pay_attachment_to_fund(
+    db: Db,
+    *,
+    attachment_id: str,
+    fund_id: str,
+    actor: PayActor,
+    allocation_id: str | None = None,
+    notes: str | None = None,
+) -> dict[str, object]:
+    attachment = await attachment_for_actor(db, attachment_id=attachment_id, actor=actor)
+    fund = await pay_fund_by_id(db, fund_id=fund_id)
+    if not fund or str(fund.get("status") or "") != "active":
+        raise ValueError("active fund not found")
+    normalized_allocation_id = str(allocation_id or "").strip() or None
+    if normalized_allocation_id:
+        row = await db.fetchone(
+            "SELECT fund_id, entry_id FROM pay_fund_allocations WHERE id=?",
+            (normalized_allocation_id,),
+        )
+        if not row or str(row[0]) != fund_id or str(row[1]) != str(attachment.get("entry_id")):
+            raise ValueError("allocation does not match this fund and attachment")
+    link_id = f"pay-fund-link-{uuid4().hex}"
+    now = utcnow()
+    await db.exec(
+        """INSERT INTO pay_fund_attachment_links(
+             id, fund_id, allocation_id, attachment_id, notes, linked_by, created_at_utc
+           ) VALUES(?,?,?,?,?,?,?)
+           ON CONFLICT(fund_id, attachment_id) DO UPDATE SET
+             allocation_id=excluded.allocation_id,
+             notes=excluded.notes,
+             linked_by=excluded.linked_by,
+             created_at_utc=excluded.created_at_utc""",
+        (
+            link_id,
+            fund_id,
+            normalized_allocation_id,
+            attachment_id,
+            str(notes or "").strip() or None,
+            actor.email,
+            now,
+        ),
+    )
+    await add_pay_event(
+        db,
+        period_id=str(attachment.get("period_id") or ""),
+        entry_id=str(attachment.get("entry_id") or ""),
+        event_type="fund_attachment_linked",
+        actor=actor.email,
+        details={"fund_id": fund_id, "attachment_id": attachment_id},
+    )
+    return {
+        "id": link_id,
+        "fund_id": fund_id,
+        "allocation_id": normalized_allocation_id,
+        "attachment_id": attachment_id,
+        "linked_by": actor.email,
+        "created_at_utc": now,
+    }
+
+
+async def list_pay_fund_attachment_links(
+    db: Db,
+    *,
+    actor: PayActor,
+    period_id: str | None = None,
+) -> list[dict[str, object]]:
+    where = ["a.removed_at_utc IS NULL"]
+    params: list[object] = []
+    if period_id:
+        where.append("a.period_id=?")
+        params.append(period_id)
+    if not actor.can_view_all:
+        where.append("e.user_email=?")
+        params.append(actor.email)
+    rows = await db.fetchall(
+        f"""SELECT l.id, l.fund_id, f.name, l.allocation_id, l.attachment_id,
+                  a.original_filename, a.attachment_type, e.id, e.user_email,
+                  e.entry_date, l.notes, l.linked_by, l.created_at_utc
+           FROM pay_fund_attachment_links l
+           JOIN pay_funds f ON f.id = l.fund_id
+           JOIN pay_attachments a ON a.id = l.attachment_id
+           JOIN pay_entries e ON e.id = a.entry_id
+           WHERE {' AND '.join(where)}
+           ORDER BY e.entry_date, f.name, a.original_filename""",
+        tuple(params),
+    )
+    return [
+        {
+            "id": row[0],
+            "fund_id": row[1],
+            "fund_name": row[2],
+            "allocation_id": row[3],
+            "attachment_id": row[4],
+            "filename": row[5],
+            "attachment_type": row[6],
+            "entry_id": row[7],
+            "user_email": row[8],
+            "entry_date": row[9],
+            "notes": row[10],
+            "linked_by": row[11],
+            "created_at_utc": row[12],
+        }
+        for row in rows
+    ]
+
+
+async def _fund_ledger_totals(db: Db, *, fund_id: str, through_date: str | None = None) -> dict[str, Decimal]:
+    clause = "WHERE fund_id=?"
+    params: list[object] = [fund_id]
+    if through_date:
+        clause += " AND effective_date<=?"
+        params.append(through_date)
+    rows = await db.fetchall(
+        f"SELECT ledger_type, amount FROM pay_fund_ledger_entries {clause}",
+        tuple(params),
+    )
+    totals = {kind: Decimal("0.00") for kind in _PAY_FUND_LEDGER_TYPES}
+    for ledger_type, amount in rows:
+        totals[normalize_pay_fund_ledger_type(ledger_type)] += _money(amount)
+    totals["available"] = sum((_fund_ledger_signed_amount(kind, value) for kind, value in totals.items() if kind in _PAY_FUND_LEDGER_TYPES), Decimal("0.00"))
+    return totals
+
+
+async def _fund_allocated_total(
+    db: Db,
+    *,
+    fund_id: str,
+    fica_rate: Decimal,
+    before_date: str | None = None,
+    through_date: str | None = None,
+) -> Decimal:
+    where = ["fa.fund_id=?", "COALESCE(e.review_status, 'pending') IN ('pending', 'approved')"]
+    params: list[object] = [fund_id]
+    if before_date:
+        where.append("e.entry_date<?")
+        params.append(before_date)
+    if through_date:
+        where.append("e.entry_date<=?")
+        params.append(through_date)
+    rows = await db.fetchall(
+        f"""SELECT fa.hours, fa.mileage_amount, fa.rentals_amount, fa.meals_amount,
+                  fa.hotel_amount, fa.miscellaneous_amount, e.lost_wage_hourly_rate, e.hourly_rate
+           FROM pay_fund_allocations fa
+           JOIN pay_entries e ON e.id = fa.entry_id
+           WHERE {' AND '.join(where)}""",
+        tuple(params),
+    )
+    total = Decimal("0.00")
+    for row in rows:
+        allocation = {
+            "hours": row[0],
+            "mileage_amount": row[1],
+            "rentals_amount": row[2],
+            "meals_amount": row[3],
+            "hotel_amount": row[4],
+            "miscellaneous_amount": row[5],
+        }
+        entry = {"lost_wage_hourly_rate": row[6], "hourly_rate": row[7]}
+        total += _fund_allocation_cost(allocation=allocation, entry=entry, fica_rate=fica_rate)["total"]
+    return total.quantize(_CURRENCY, rounding=ROUND_HALF_UP)
+
+
+async def list_pay_funds(
+    db: Db,
+    *,
+    include_inactive: bool = False,
+    include_financials: bool = True,
+    fica_rate: Decimal = _FUND_FICA_RATE,
+) -> list[dict[str, object]]:
+    if include_inactive:
+        rows = await db.fetchall(
+            """SELECT id, fund_type, name, status, local_number, description,
+                      created_by, created_at_utc, updated_at_utc, updated_by
+               FROM pay_funds
+               ORDER BY status, name"""
+        )
+    else:
+        rows = await db.fetchall(
+            """SELECT id, fund_type, name, status, local_number, description,
+                      created_by, created_at_utc, updated_at_utc, updated_by
+               FROM pay_funds
+               WHERE status='active'
+               ORDER BY name"""
+        )
+    funds = [_fund_row_from_db(row) for row in rows]
+    if not include_financials:
+        return funds
+    for fund in funds:
+        ledger = await _fund_ledger_totals(db, fund_id=str(fund["id"]))
+        allocated = await _fund_allocated_total(db, fund_id=str(fund["id"]), fica_rate=fica_rate)
+        available = _money(ledger.get("available"))
+        submitted = _money(ledger.get("reimbursement_submitted"))
+        fund.update(
+            {
+                "advance_amount": float(_money(ledger.get("advance"))),
+                "reimbursement_submitted_amount": float(submitted),
+                "reimbursement_received_amount": float(_money(ledger.get("reimbursement_received"))),
+                "adjustment_amount": float(_money(ledger.get("adjustment"))),
+                "allocated_amount": float(allocated),
+                "remaining_balance": float((available - allocated).quantize(_CURRENCY, rounding=ROUND_HALF_UP)),
+                "reimbursement_needed": float(max(allocated - submitted, Decimal("0.00"))),
+            }
+        )
+    return funds
+
+
+def _fund_packet_support_folder_name(fund: dict[str, object], period_start: str, period_end: str, packet_id: str) -> str:
+    return f"Fund Packets/{safe_filename(fund.get('name'), fallback='fund')}/{period_start}_to_{period_end}_{packet_id[-8:]}"
+
+
+async def _fund_packet_rows(
+    db: Db,
+    *,
+    fund_id: str,
+    period_start: str,
+    period_end: str,
+    fica_rate: Decimal,
+) -> list[dict[str, object]]:
+    rows = await db.fetchall(
+        """SELECT fa.id, fa.entry_id, fa.hours, fa.mileage_miles, fa.mileage_amount,
+                  fa.rentals_amount, fa.meals_amount, fa.hotel_amount, fa.miscellaneous_amount,
+                  fa.notes, e.user_email, e.display_name, e.entry_date, e.local_number,
+                  e.lost_wage_hourly_rate, e.hourly_rate, e.mileage_rate
+           FROM pay_fund_allocations fa
+           JOIN pay_entries e ON e.id = fa.entry_id
+           WHERE fa.fund_id=?
+             AND e.entry_date BETWEEN ? AND ?
+             AND COALESCE(e.review_status, 'pending') IN ('pending', 'approved')
+           ORDER BY e.entry_date, e.display_name, e.user_email""",
+        (fund_id, period_start, period_end),
+    )
+    packet_rows: list[dict[str, object]] = []
+    for row in rows:
+        allocation = {
+            "hours": row[2],
+            "mileage_miles": row[3],
+            "mileage_amount": row[4],
+            "rentals_amount": row[5],
+            "meals_amount": row[6],
+            "hotel_amount": row[7],
+            "miscellaneous_amount": row[8],
+        }
+        entry = {"lost_wage_hourly_rate": row[14], "hourly_rate": row[15]}
+        costs = _fund_allocation_cost(allocation=allocation, entry=entry, fica_rate=fica_rate)
+        packet_rows.append(
+            {
+                "allocation_id": row[0],
+                "entry_id": row[1],
+                "hours": float(_quantity(row[2])),
+                "mileage_miles": float(_quantity(row[3])),
+                "mileage_amount": float(_money(row[4])),
+                "rentals_amount": float(_money(row[5])),
+                "meals_amount": float(_money(row[6])),
+                "hotel_amount": float(_money(row[7])),
+                "miscellaneous_amount": float(_money(row[8])),
+                "notes": row[9],
+                "user_email": row[10],
+                "display_name": row[11] or row[10],
+                "entry_date": row[12],
+                "local_number": row[13],
+                "hourly_rate": float(_money(row[14] or row[15])),
+                "mileage_rate": float(_mileage_rate(row[16])),
+                "lost_wage_gross": float(costs["lost_wage_gross"]),
+                "fica": float(costs["fica"]),
+                "total": float(costs["total"]),
+            }
+        )
+    return packet_rows
+
+
+def _write_fund_packet_workbook(
+    *,
+    path: Path,
+    fund: dict[str, object],
+    period_start: str,
+    period_end: str,
+    beginning_balance: Decimal,
+    rows: list[dict[str, object]],
+    fica_rate: Decimal,
+) -> tuple[Decimal, Decimal]:
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+    except ImportError as exc:  # pragma: no cover - dependency is declared for the API image.
+        raise RuntimeError("openpyxl is required for fund packet workbook generation") from exc
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet 1"
+    ws["A1"] = f"LOCAL:      {fund.get('local_number') or '3106'}"
+    ws["A1"].font = Font(bold=True)
+    headers = [
+        "Name",
+        "Date ",
+        "Hourly Rate",
+        "Lost Wages (Gross) ",
+        "FICA",
+        "Total Wage (Wage + FICA) ",
+        "Miles",
+        "Mileage         ",
+        "Hotel",
+        "Meals",
+        "Rental",
+        "Misc Exp",
+        "Misc",
+        "Total Expense",
+        "TOTAL Wage & Expense",
+        "Remaining",
+    ]
+    for col, header in enumerate(headers, start=1):
+        cell = ws.cell(row=2, column=col, value=header)
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill("solid", fgColor="D9EAF7")
+    ws["A3"] = f"Beginning {fund.get('name')} {period_start}"
+    ws["P3"] = float(beginning_balance)
+    for col in range(3, 16):
+        ws.cell(row=3, column=col, value=0)
+    current_balance = beginning_balance
+    first_data_row = 4
+    for offset, packet_row in enumerate(rows):
+        excel_row = first_data_row + offset
+        row_total = _money(packet_row.get("total"))
+        current_balance = (current_balance - row_total).quantize(_CURRENCY, rounding=ROUND_HALF_UP)
+        ws.cell(row=excel_row, column=1, value=packet_row.get("display_name"))
+        ws.cell(row=excel_row, column=2, value=date.fromisoformat(str(packet_row.get("entry_date"))))
+        ws.cell(row=excel_row, column=3, value=float(_money(packet_row.get("hourly_rate"))))
+        ws.cell(row=excel_row, column=4, value=float(_money(packet_row.get("lost_wage_gross"))))
+        ws.cell(row=excel_row, column=5, value=f"=ROUND(D{excel_row}*{fica_rate},2)")
+        ws.cell(row=excel_row, column=6, value=f"=SUM(D{excel_row}:E{excel_row})")
+        ws.cell(row=excel_row, column=7, value=float(_quantity(packet_row.get("mileage_miles"))))
+        mileage_rate = _mileage_rate(packet_row.get("mileage_rate"))
+        if mileage_rate > 0 and _quantity(packet_row.get("mileage_miles")) > 0:
+            ws.cell(row=excel_row, column=8, value=f"=ROUND(G{excel_row}*{mileage_rate},2)")
+        else:
+            ws.cell(row=excel_row, column=8, value=float(_money(packet_row.get("mileage_amount"))))
+        ws.cell(row=excel_row, column=9, value=float(_money(packet_row.get("hotel_amount"))))
+        ws.cell(row=excel_row, column=10, value=float(_money(packet_row.get("meals_amount"))))
+        ws.cell(row=excel_row, column=11, value=float(_money(packet_row.get("rentals_amount"))))
+        ws.cell(row=excel_row, column=12, value=0)
+        ws.cell(row=excel_row, column=13, value=float(_money(packet_row.get("miscellaneous_amount"))))
+        ws.cell(row=excel_row, column=14, value=f"=SUM(H{excel_row}:M{excel_row})")
+        ws.cell(row=excel_row, column=15, value=f"=SUM(F{excel_row},N{excel_row})")
+        ws.cell(row=excel_row, column=16, value=f"=P{excel_row - 1}-O{excel_row}")
+    total_row = first_data_row + len(rows)
+    ws.cell(row=total_row, column=1, value="TOTALS")
+    ws.cell(row=total_row, column=6, value=f"=SUM(F3:F{max(total_row - 1, 3)})")
+    ws.cell(row=total_row, column=8, value=f"=SUM(H3:H{max(total_row - 1, 3)})")
+    ws.cell(row=total_row, column=9, value=f"=SUM(I3:I{max(total_row - 1, 3)})")
+    ws.cell(row=total_row, column=10, value=f"=SUM(J3:J{max(total_row - 1, 3)})")
+    ws.cell(row=total_row, column=11, value=f"=SUM(K3:K{max(total_row - 1, 3)})")
+    ws.cell(row=total_row, column=13, value=f"=SUM(M3:M{max(total_row - 1, 3)})")
+    ws.cell(row=total_row, column=14, value=f"=SUM(N3:N{max(total_row - 1, 3)})")
+    ws.cell(row=total_row, column=15, value=f"=SUM(O3:O{max(total_row - 1, 3)})")
+    for column in "ABCDEFGHIJKLMNOP":
+        ws.column_dimensions[column].width = 16
+    for row in ws.iter_rows(min_row=3, max_row=total_row, min_col=3, max_col=16):
+        for cell in row:
+            cell.number_format = '0.00'
+    for cell in ws.iter_cols(min_col=2, max_col=2, min_row=4, max_row=max(total_row - 1, 4)):
+        for item in cell:
+            item.number_format = 'm/d/yy'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(path)
+    total_amount = sum((_money(row.get("total")) for row in rows), Decimal("0.00")).quantize(_CURRENCY, rounding=ROUND_HALF_UP)
+    return total_amount, current_balance
+
+
+async def _fund_support_documents_for_packet(
+    db: Db,
+    *,
+    fund_id: str,
+    period_start: str,
+    period_end: str,
+) -> list[dict[str, object]]:
+    rows = await db.fetchall(
+        """SELECT DISTINCT a.id, a.attachment_type, a.original_filename, a.local_path,
+                  a.content_type, a.sha256, e.entry_date, e.user_email
+           FROM pay_attachments a
+           JOIN pay_entries e ON e.id = a.entry_id
+           JOIN pay_fund_allocations fa ON fa.entry_id = e.id AND fa.fund_id=?
+           WHERE e.entry_date BETWEEN ? AND ?
+             AND a.removed_at_utc IS NULL
+             AND COALESCE(e.review_status, 'pending') IN ('pending', 'approved')
+           UNION
+           SELECT DISTINCT a.id, a.attachment_type, a.original_filename, a.local_path,
+                  a.content_type, a.sha256, e.entry_date, e.user_email
+           FROM pay_fund_attachment_links l
+           JOIN pay_attachments a ON a.id = l.attachment_id
+           JOIN pay_entries e ON e.id = a.entry_id
+           WHERE l.fund_id=?
+             AND e.entry_date BETWEEN ? AND ?
+             AND a.removed_at_utc IS NULL
+             AND COALESCE(e.review_status, 'pending') IN ('pending', 'approved')
+           ORDER BY entry_date, original_filename""",
+        (fund_id, period_start, period_end, fund_id, period_start, period_end),
+    )
+    return [
+        {
+            "id": row[0],
+            "attachment_type": row[1],
+            "original_filename": row[2],
+            "local_path": row[3],
+            "content_type": row[4],
+            "sha256": row[5],
+            "entry_date": row[6],
+            "user_email": row[7],
+        }
+        for row in rows
+    ]
+
+
+async def generate_pay_fund_packet(
+    db: Db,
+    *,
+    cfg: Any,
+    fund_id: str,
+    actor: PayActor,
+    period_start: str,
+    period_end: str,
+    graph: Any | None = None,
+) -> dict[str, object]:
+    fund = await pay_fund_by_id(db, fund_id=fund_id)
+    if not fund:
+        raise ValueError("fund not found")
+    start = date.fromisoformat(str(period_start or "").strip())
+    end = date.fromisoformat(str(period_end or "").strip())
+    if end < start:
+        raise ValueError("period_end must be on or after period_start")
+    settings = await pay_settings(db, pay_cfg=getattr(cfg, "pay_portal", None))
+    fica_rate = fund_fica_rate_from_settings(settings)
+    rows = await _fund_packet_rows(
+        db,
+        fund_id=fund_id,
+        period_start=start.isoformat(),
+        period_end=end.isoformat(),
+        fica_rate=fica_rate,
+    )
+    ledger = await _fund_ledger_totals(db, fund_id=fund_id, through_date=end.isoformat())
+    prior_allocated = await _fund_allocated_total(
+        db,
+        fund_id=fund_id,
+        fica_rate=fica_rate,
+        before_date=start.isoformat(),
+    )
+    beginning_balance = (_money(ledger.get("available")) - prior_allocated).quantize(_CURRENCY, rounding=ROUND_HALF_UP)
+    packet_id = f"pay-fund-packet-{uuid4().hex}"
+    packet_dir = Path(cfg.data_root) / "pay" / "funds" / safe_filename(fund.get("name"), fallback=fund_id) / "packets" / packet_id
+    workbook_path = packet_dir / f"{safe_filename(fund.get('name'), fallback='fund')}_{start.isoformat()}_to_{end.isoformat()}.xlsx"
+    total_amount, ending_balance = _write_fund_packet_workbook(
+        path=workbook_path,
+        fund=fund,
+        period_start=start.isoformat(),
+        period_end=end.isoformat(),
+        beginning_balance=beginning_balance,
+        rows=rows,
+        fica_rate=fica_rate,
+    )
+    support_original_dir = packet_dir / "support" / "original"
+    support_pdf_dir = packet_dir / "support" / "pdf"
+    support_original_dir.mkdir(parents=True, exist_ok=True)
+    support_pdf_dir.mkdir(parents=True, exist_ok=True)
+    support_docs = await _fund_support_documents_for_packet(
+        db,
+        fund_id=fund_id,
+        period_start=start.isoformat(),
+        period_end=end.isoformat(),
+    )
+    manifest_docs: list[dict[str, object]] = []
+    for index, doc in enumerate(support_docs, start=1):
+        source = Path(str(doc.get("local_path") or ""))
+        if not source.exists():
+            continue
+        original_name = f"{index:02d}-{safe_filename(doc.get('entry_date'), fallback='date')}-{safe_filename(doc.get('original_filename'), fallback='support')}"
+        original_path = support_original_dir / original_name
+        shutil.copy2(source, original_path)
+        pdf_path = None
+        if str(doc.get("content_type") or "") == "application/pdf":
+            pdf_path = support_pdf_dir / f"{Path(original_name).stem}.pdf"
+            shutil.copy2(source, pdf_path)
+        elif str(doc.get("content_type") or "").startswith("image/"):
+            pdf_path = support_pdf_dir / f"{Path(original_name).stem}.pdf"
+            image_to_pdf(str(source), str(pdf_path))
+        manifest_docs.append(
+            {
+                **doc,
+                "original_path": str(original_path),
+                "pdf_path": str(pdf_path) if pdf_path else None,
+            }
+        )
+    manifest = {
+        "packet_id": packet_id,
+        "fund": fund,
+        "period_start": start.isoformat(),
+        "period_end": end.isoformat(),
+        "fica_rate": str(fica_rate),
+        "beginning_balance": float(beginning_balance),
+        "total_amount": float(total_amount),
+        "ending_balance": float(ending_balance),
+        "rows": rows,
+        "support_documents": manifest_docs,
+        "created_by": actor.email,
+        "created_at_utc": utcnow(),
+    }
+    manifest_path = packet_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    workbook_sha = hashlib.sha256(workbook_path.read_bytes()).hexdigest()
+    sharepoint_folder_path = None
+    sharepoint_folder_web_url = None
+    upload_folder = _fund_packet_support_folder_name(fund, start.isoformat(), end.isoformat(), packet_id)
+    workbook_url, workbook_sp_path = await _upload_if_configured(
+        cfg=cfg,
+        graph=graph,
+        folder_path=upload_folder,
+        filename=workbook_path.name,
+        local_path=str(workbook_path),
+    )
+    if workbook_url:
+        sharepoint_folder_web_url = workbook_url
+        sharepoint_folder_path = workbook_sp_path
+        await _upload_if_configured(
+            cfg=cfg,
+            graph=graph,
+            folder_path=upload_folder,
+            filename=manifest_path.name,
+            local_path=str(manifest_path),
+        )
+        for doc in manifest_docs:
+            for key in ("original_path", "pdf_path"):
+                value = doc.get(key)
+                if value:
+                    await _upload_if_configured(
+                        cfg=cfg,
+                        graph=graph,
+                        folder_path=f"{upload_folder}/support",
+                        filename=Path(str(value)).name,
+                        local_path=str(value),
+                    )
+    now = utcnow()
+    await db.exec(
+        """INSERT INTO pay_fund_packets(
+             id, fund_id, period_start, period_end, status, packet_dir_path,
+             workbook_path, manifest_path, workbook_sha256, total_amount,
+             beginning_balance, ending_balance, sharepoint_folder_path,
+             sharepoint_folder_web_url, created_by, created_at_utc, updated_at_utc
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            packet_id,
+            fund_id,
+            start.isoformat(),
+            end.isoformat(),
+            "generated",
+            str(packet_dir),
+            str(workbook_path),
+            str(manifest_path),
+            workbook_sha,
+            float(total_amount),
+            float(beginning_balance),
+            float(ending_balance),
+            sharepoint_folder_path,
+            sharepoint_folder_web_url,
+            actor.email,
+            now,
+            now,
+        ),
+    )
+    await add_pay_event(
+        db,
+        period_id=None,
+        packet_id=None,
+        event_type="fund_packet_generated",
+        actor=actor.email,
+        details={"fund_id": fund_id, "fund_packet_id": packet_id, "total_amount": float(total_amount)},
+    )
+    return {
+        "id": packet_id,
+        "fund_id": fund_id,
+        "period_start": start.isoformat(),
+        "period_end": end.isoformat(),
+        "status": "generated",
+        "packet_dir_path": str(packet_dir),
+        "workbook_path": str(workbook_path),
+        "manifest_path": str(manifest_path),
+        "workbook_sha256": workbook_sha,
+        "total_amount": float(total_amount),
+        "beginning_balance": float(beginning_balance),
+        "ending_balance": float(ending_balance),
+        "support_document_count": len(manifest_docs),
+        "sharepoint_folder_path": sharepoint_folder_path,
+        "sharepoint_folder_web_url": sharepoint_folder_web_url,
+        "workbook_download_url": f"/pay/api/funds/packets/{packet_id}/workbook",
+    }
+
+
+async def list_pay_fund_packets(db: Db, *, fund_id: str | None = None) -> list[dict[str, object]]:
+    params: tuple[object, ...] = ()
+    where = ""
+    if fund_id:
+        where = "WHERE p.fund_id=?"
+        params = (fund_id,)
+    rows = await db.fetchall(
+        f"""SELECT p.id, p.fund_id, f.name, p.period_start, p.period_end, p.status,
+                  p.workbook_path, p.manifest_path, p.workbook_sha256, p.total_amount,
+                  p.beginning_balance, p.ending_balance, p.sharepoint_folder_path,
+                  p.sharepoint_folder_web_url, p.created_by, p.created_at_utc, p.updated_at_utc
+           FROM pay_fund_packets p
+           JOIN pay_funds f ON f.id = p.fund_id
+           {where}
+           ORDER BY p.created_at_utc DESC""",
+        params,
+    )
+    return [
+        {
+            "id": row[0],
+            "fund_id": row[1],
+            "fund_name": row[2],
+            "period_start": row[3],
+            "period_end": row[4],
+            "status": row[5],
+            "workbook_path": row[6],
+            "manifest_path": row[7],
+            "workbook_sha256": row[8],
+            "total_amount": row[9],
+            "beginning_balance": row[10],
+            "ending_balance": row[11],
+            "sharepoint_folder_path": row[12],
+            "sharepoint_folder_web_url": row[13],
+            "created_by": row[14],
+            "created_at_utc": row[15],
+            "updated_at_utc": row[16],
+            "workbook_download_url": f"/pay/api/funds/packets/{row[0]}/workbook",
+        }
+        for row in rows
+    ]
+
+
+async def pay_fund_packet_by_id(db: Db, *, packet_id: str) -> dict[str, object]:
+    packets = await db.fetchall(
+        """SELECT p.id, p.fund_id, f.name, p.period_start, p.period_end, p.status,
+                  p.workbook_path, p.manifest_path, p.workbook_sha256, p.total_amount,
+                  p.beginning_balance, p.ending_balance, p.sharepoint_folder_path,
+                  p.sharepoint_folder_web_url, p.created_by, p.created_at_utc, p.updated_at_utc
+           FROM pay_fund_packets p
+           JOIN pay_funds f ON f.id = p.fund_id
+           WHERE p.id=?""",
+        (packet_id,),
+    )
+    if not packets:
+        raise ValueError("fund packet not found")
+    row = packets[0]
+    return {
+        "id": row[0],
+        "fund_id": row[1],
+        "fund_name": row[2],
+        "period_start": row[3],
+        "period_end": row[4],
+        "status": row[5],
+        "workbook_path": row[6],
+        "manifest_path": row[7],
+        "workbook_sha256": row[8],
+        "total_amount": row[9],
+        "beginning_balance": row[10],
+        "ending_balance": row[11],
+        "sharepoint_folder_path": row[12],
+        "sharepoint_folder_web_url": row[13],
+        "created_by": row[14],
+        "created_at_utc": row[15],
+        "updated_at_utc": row[16],
+    }
 
 
 def _default_pay_demo_settings() -> dict[str, object]:

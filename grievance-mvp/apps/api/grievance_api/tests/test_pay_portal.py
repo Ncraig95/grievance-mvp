@@ -22,18 +22,23 @@ from grievance_api.services.docuseal_client import DocuSealClient
 from grievance_api.services.pay_portal import (
     PayActor,
     approve_irs_rate_candidate,
+    add_pay_fund_ledger_entry,
     calculate_commission_compensation,
     calculate_pay_profile_snapshot,
     calculate_president_differential,
     create_mileage_attachment,
     create_revision,
     handle_pay_docuseal_completion,
+    generate_pay_fund_packet,
     list_irs_rate_candidates,
+    list_pay_fund_allocations,
+    list_pay_funds,
     list_pay_profile_change_requests,
     lock_period_and_send_packet,
     parse_irs_mileage_rate_candidates,
     pay_profile_by_email,
     remove_mileage_attachment,
+    save_pay_fund_allocations_for_entry,
     delete_pay_entry,
     pay_settings,
     pay_packet_signer_order,
@@ -41,6 +46,7 @@ from grievance_api.services.pay_portal import (
     store_compensation_stub,
     sync_irs_mileage_rate_candidates,
     upsert_entry,
+    upsert_pay_fund,
     upsert_pay_profile,
     upsert_wage_scale,
     validate_receipt_file,
@@ -48,6 +54,11 @@ from grievance_api.services.pay_portal import (
 from grievance_api.services.sharepoint_graph import DirectoryUserRef, GraphUploader
 from grievance_api.web.routes_pay import (
     InternalRoleAssignmentRequest,
+    PayFundAllocationsRequest,
+    PayFundAllocationRow,
+    PayFundLedgerEntryRequest,
+    PayFundPacketRequest,
+    PayFundUpsertRequest,
     PayEntryCorrectionRequest,
     PayEntryReviewRequest,
     PayEntryUpsertRequest,
@@ -69,6 +80,7 @@ from grievance_api.web.routes_pay import (
     review_pay_entry_route,
     review_pay_profile_change,
     generate_pay_demo_output_files,
+    generate_pay_fund_packet_route,
     import_pay_internal_users,
     pay_context,
     pay_demo_context,
@@ -78,6 +90,9 @@ from grievance_api.web.routes_pay import (
     pay_view_page,
     remove_pay_internal_role,
     save_pay_entry,
+    save_pay_entry_fund_allocations,
+    save_pay_fund,
+    save_pay_fund_ledger_entry,
     save_pay_internal_role,
     submit_pay_demo_feedback,
     update_pay_demo_feedback,
@@ -469,6 +484,217 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
             )
         else:
             await self.db.exec("UPDATE pay_entries SET review_status='approved' WHERE period_id=?", (period_id,))
+
+    async def test_pay_fund_tables_are_migrated(self) -> None:
+        rows = await self.db.fetchall(
+            """SELECT name FROM sqlite_master
+               WHERE type='table'
+                 AND name IN (
+                   'pay_funds', 'pay_fund_ledger_entries', 'pay_fund_allocations',
+                   'pay_fund_attachment_links', 'pay_fund_packets'
+                 )"""
+        )
+        self.assertEqual(
+            {row[0] for row in rows},
+            {
+                "pay_funds",
+                "pay_fund_ledger_entries",
+                "pay_fund_allocations",
+                "pay_fund_attachment_links",
+                "pay_fund_packets",
+            },
+        )
+
+    async def test_fund_allocations_validate_against_entry_totals_and_update_balance(self) -> None:
+        cfg = self._cfg()
+        actor = PayActor("officer@example.org", "Officer Example", "officer", True, False, False)
+        await self._save_profile(email=actor.email, display_name=actor.display_name, base_wage_amount=45)
+        period = await pay_portal.ensure_pay_period(self.db)
+        entry = await upsert_entry(
+            self.db,
+            period_id=str(period["id"]),
+            actor=actor,
+            data={
+                "entry_date": str(period["period_start"]),
+                "display_name": actor.display_name,
+                "hours": 8,
+                "mileage_miles": 20,
+                "mileage_rate": 0.725,
+                "mileage_amount": 14.50,
+                "meals_amount": 25,
+                "hotel_amount": 100,
+                "rentals_amount": 40,
+                "miscellaneous_amount": 5,
+                "local_number": "3106",
+                "notes": "fund work",
+            },
+            pay_cfg=cfg.pay_portal,
+        )
+        fund = await upsert_pay_fund(
+            self.db,
+            fund_type="sif",
+            name="COJ SIF",
+            actor_email="treasurer@example.org",
+        )
+        await add_pay_fund_ledger_entry(
+            self.db,
+            fund_id=str(fund["id"]),
+            ledger_type="advance",
+            amount=1000,
+            effective_date=str(period["period_start"]),
+            actor_email="treasurer@example.org",
+        )
+
+        rows = await save_pay_fund_allocations_for_entry(
+            self.db,
+            entry_id=str(entry["id"]),
+            actor=actor,
+            allocations=[
+                {
+                    "fund_id": fund["id"],
+                    "hours": 4,
+                    "mileage_miles": 10,
+                    "mileage_amount": 7.25,
+                    "meals_amount": 10,
+                    "hotel_amount": 50,
+                }
+            ],
+        )
+
+        self.assertEqual(len([row for row in rows if row["entry_id"] == entry["id"]]), 1)
+        balances = await list_pay_funds(self.db, include_financials=True)
+        saved = balances[0]
+        self.assertAlmostEqual(saved["allocated_amount"], 261.02)
+        self.assertAlmostEqual(saved["remaining_balance"], 738.98)
+        with self.assertRaisesRegex(ValueError, "allocated hours exceeds"):
+            await save_pay_fund_allocations_for_entry(
+                self.db,
+                entry_id=str(entry["id"]),
+                actor=actor,
+                allocations=[{"fund_id": fund["id"], "hours": 9}],
+            )
+
+    async def test_fund_packet_generates_excel_and_support_manifest(self) -> None:
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            self.skipTest("openpyxl is not installed in this local test environment")
+        cfg = self._cfg()
+        actor = PayActor("officer@example.org", "Officer Example", "officer", True, False, False)
+        treasurer = PayActor("treasurer@example.org", "Treasurer", "treasurer", True, True, True)
+        await self._save_profile(email=actor.email, display_name=actor.display_name, base_wage_amount=45)
+        period = await pay_portal.ensure_pay_period(self.db)
+        entry = await upsert_entry(
+            self.db,
+            period_id=str(period["id"]),
+            actor=actor,
+            data={
+                "entry_date": str(period["period_start"]),
+                "display_name": actor.display_name,
+                "hours": 8,
+                "mileage_miles": 20,
+                "mileage_rate": 0.725,
+                "mileage_amount": 14.50,
+                "meals_amount": 25,
+                "local_number": "3106",
+                "notes": "fund packet work",
+            },
+            pay_cfg=cfg.pay_portal,
+        )
+        fund = await upsert_pay_fund(
+            self.db,
+            fund_type="growth",
+            name="Unbreakable Growth Fund",
+            actor_email=treasurer.email,
+        )
+        await add_pay_fund_ledger_entry(
+            self.db,
+            fund_id=str(fund["id"]),
+            ledger_type="advance",
+            amount=500,
+            effective_date=str(period["period_start"]),
+            actor_email=treasurer.email,
+        )
+        await save_pay_fund_allocations_for_entry(
+            self.db,
+            entry_id=str(entry["id"]),
+            actor=actor,
+            allocations=[{"fund_id": fund["id"], "hours": 4, "mileage_miles": 10, "mileage_amount": 7.25, "meals_amount": 10}],
+        )
+        await store_attachment(
+            self.db,
+            cfg=cfg,
+            period_id=str(period["id"]),
+            entry_id=str(entry["id"]),
+            actor=actor,
+            attachment_type="timesheet_screenshot",
+            filename="timesheet.pdf",
+            content_type="application/pdf",
+            content=b"%PDF-1.4\ntimesheet\n",
+            scan=False,
+        )
+
+        packet = await generate_pay_fund_packet(
+            self.db,
+            cfg=cfg,
+            fund_id=str(fund["id"]),
+            actor=treasurer,
+            period_start=str(period["period_start"]),
+            period_end=str(period["period_end"]),
+        )
+
+        workbook_path = Path(str(packet["workbook_path"]))
+        manifest_path = Path(str(packet["manifest_path"]))
+        self.assertTrue(workbook_path.exists())
+        self.assertTrue(manifest_path.exists())
+        self.assertEqual(packet["support_document_count"], 1)
+        wb = load_workbook(workbook_path, data_only=False)
+        ws = wb.active
+        self.assertEqual(ws["A1"].value, "LOCAL:      3106")
+        self.assertEqual(ws["A2"].value, "Name")
+        self.assertEqual(ws["D4"].value, 180)
+        self.assertEqual(ws["E4"].value, "=ROUND(D4*0.0765,2)")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["fund"]["name"], "Unbreakable Growth Fund")
+        self.assertEqual(manifest["support_documents"][0]["attachment_type"], "timesheet_screenshot")
+
+    async def test_fund_routes_are_permissioned_and_exposed_in_context(self) -> None:
+        cfg = self._cfg()
+        cfg.officer_auth.enabled = True
+        request = _Request(
+            state=SimpleNamespace(cfg=cfg, db=self.db),
+            session=self._staff_session("admin", email="treasurer@example.org"),
+        )
+        fund = await save_pay_fund(
+            PayFundUpsertRequest(name="Route SIF", fund_type="sif", local_number="3106"),
+            request,
+        )
+        await save_pay_fund_ledger_entry(
+            str(fund["id"]),
+            PayFundLedgerEntryRequest(ledger_type="advance", amount=250, effective_date="2026-05-17"),
+            request,
+        )
+        actor = PayActor("officer@example.org", "Officer Example", "officer", True, False, False)
+        await self._save_profile(email=actor.email, display_name=actor.display_name)
+        period = await pay_portal.ensure_pay_period(self.db)
+        entry = await upsert_entry(
+            self.db,
+            period_id=str(period["id"]),
+            actor=actor,
+            data={"entry_date": str(period["period_start"]), "hours": 4, "notes": "route allocation"},
+            pay_cfg=cfg.pay_portal,
+        )
+        await save_pay_entry_fund_allocations(
+            str(entry["id"]),
+            PayFundAllocationsRequest(allocations=[PayFundAllocationRow(fund_id=str(fund["id"]), hours=2)]),
+            request,
+        )
+
+        context = await pay_context(request)
+
+        self.assertEqual(context["funds"][0]["name"], "Route SIF")
+        self.assertEqual(context["fund_allocations"][0]["fund_id"], fund["id"])
+        self.assertIn("fund_packets", context)
 
     async def test_pay_settings_falls_back_to_configured_mileage_defaults(self) -> None:
         cfg = SimpleNamespace(

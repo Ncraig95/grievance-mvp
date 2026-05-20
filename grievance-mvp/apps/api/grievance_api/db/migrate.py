@@ -721,6 +721,32 @@ def migrate(db_path: str) -> None:
                 "CREATE INDEX IF NOT EXISTS idx_pay_attachments_period_removed "
                 "ON pay_attachments(period_id, removed_at_utc)"
             ),
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_funds_name ON pay_funds(name)",
+            "CREATE INDEX IF NOT EXISTS idx_pay_funds_status_type ON pay_funds(status, fund_type)",
+            (
+                "CREATE INDEX IF NOT EXISTS idx_pay_fund_ledger_entries_fund_date "
+                "ON pay_fund_ledger_entries(fund_id, effective_date)"
+            ),
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_fund_allocations_entry_fund "
+                "ON pay_fund_allocations(entry_id, fund_id)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_pay_fund_allocations_fund_period "
+                "ON pay_fund_allocations(fund_id, period_id)"
+            ),
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_fund_attachment_links_unique "
+                "ON pay_fund_attachment_links(fund_id, attachment_id)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_pay_fund_attachment_links_attachment "
+                "ON pay_fund_attachment_links(attachment_id)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_pay_fund_packets_fund_dates "
+                "ON pay_fund_packets(fund_id, period_start, period_end)"
+            ),
             (
                 "CREATE INDEX IF NOT EXISTS idx_pay_compensation_stubs_user_date "
                 "ON pay_compensation_stubs(user_email, created_at_utc)"

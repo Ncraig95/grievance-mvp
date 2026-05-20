@@ -128,6 +128,7 @@ class PayPortalConfig:
     treasurer_emails: tuple[str, ...] = ()
     president_target_scale: str = "36"
     president_target_multiplier: float = 1.20
+    fund_fica_rate: float = 0.0765
     google_maps_api_key: str = ""
     irs_rates: dict[str, str] = field(default_factory=dict)
     irs_rate_sync_enabled: bool = True
@@ -1002,6 +1003,10 @@ def load_config(path: str) -> AppConfig:
             president_target_multiplier=max(
                 0.0,
                 _as_float(pay_portal_raw.get("president_target_multiplier", 1.20), 1.20),
+            ),
+            fund_fica_rate=max(
+                0.0,
+                _as_float(pay_portal_raw.get("fund_fica_rate", 0.0765), 0.0765),
             ),
             google_maps_api_key=(
                 str(pay_portal_raw.get("google_maps_api_key", "")).strip()

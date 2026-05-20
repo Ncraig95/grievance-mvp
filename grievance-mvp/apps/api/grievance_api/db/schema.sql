@@ -960,6 +960,111 @@ ON pay_attachments(period_id);
 CREATE INDEX IF NOT EXISTS idx_pay_attachments_period_removed
 ON pay_attachments(period_id, removed_at_utc);
 
+CREATE TABLE IF NOT EXISTS pay_funds (
+  id TEXT PRIMARY KEY,
+  fund_type TEXT NOT NULL DEFAULT 'sif',
+  name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  local_number TEXT NOT NULL DEFAULT '3106',
+  description TEXT,
+  created_by TEXT,
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL,
+  updated_by TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_funds_name
+ON pay_funds(name);
+
+CREATE INDEX IF NOT EXISTS idx_pay_funds_status_type
+ON pay_funds(status, fund_type);
+
+CREATE TABLE IF NOT EXISTS pay_fund_ledger_entries (
+  id TEXT PRIMARY KEY,
+  fund_id TEXT NOT NULL,
+  ledger_type TEXT NOT NULL,
+  amount REAL NOT NULL,
+  effective_date TEXT NOT NULL,
+  reference TEXT,
+  notes TEXT,
+  created_by TEXT NOT NULL,
+  created_at_utc TEXT NOT NULL,
+  FOREIGN KEY (fund_id) REFERENCES pay_funds (id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pay_fund_ledger_entries_fund_date
+ON pay_fund_ledger_entries(fund_id, effective_date);
+
+CREATE TABLE IF NOT EXISTS pay_fund_allocations (
+  id TEXT PRIMARY KEY,
+  period_id TEXT NOT NULL,
+  entry_id TEXT NOT NULL,
+  fund_id TEXT NOT NULL,
+  hours REAL NOT NULL DEFAULT 0,
+  mileage_miles REAL NOT NULL DEFAULT 0,
+  mileage_amount REAL NOT NULL DEFAULT 0,
+  rentals_amount REAL NOT NULL DEFAULT 0,
+  meals_amount REAL NOT NULL DEFAULT 0,
+  hotel_amount REAL NOT NULL DEFAULT 0,
+  miscellaneous_amount REAL NOT NULL DEFAULT 0,
+  notes TEXT,
+  created_by TEXT NOT NULL,
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL,
+  FOREIGN KEY (period_id) REFERENCES pay_periods (id),
+  FOREIGN KEY (entry_id) REFERENCES pay_entries (id),
+  FOREIGN KEY (fund_id) REFERENCES pay_funds (id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_fund_allocations_entry_fund
+ON pay_fund_allocations(entry_id, fund_id);
+
+CREATE INDEX IF NOT EXISTS idx_pay_fund_allocations_fund_period
+ON pay_fund_allocations(fund_id, period_id);
+
+CREATE TABLE IF NOT EXISTS pay_fund_attachment_links (
+  id TEXT PRIMARY KEY,
+  fund_id TEXT NOT NULL,
+  allocation_id TEXT,
+  attachment_id TEXT NOT NULL,
+  notes TEXT,
+  linked_by TEXT NOT NULL,
+  created_at_utc TEXT NOT NULL,
+  FOREIGN KEY (fund_id) REFERENCES pay_funds (id),
+  FOREIGN KEY (allocation_id) REFERENCES pay_fund_allocations (id),
+  FOREIGN KEY (attachment_id) REFERENCES pay_attachments (id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pay_fund_attachment_links_unique
+ON pay_fund_attachment_links(fund_id, attachment_id);
+
+CREATE INDEX IF NOT EXISTS idx_pay_fund_attachment_links_attachment
+ON pay_fund_attachment_links(attachment_id);
+
+CREATE TABLE IF NOT EXISTS pay_fund_packets (
+  id TEXT PRIMARY KEY,
+  fund_id TEXT NOT NULL,
+  period_start TEXT NOT NULL,
+  period_end TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'generated',
+  packet_dir_path TEXT NOT NULL,
+  workbook_path TEXT NOT NULL,
+  manifest_path TEXT NOT NULL,
+  workbook_sha256 TEXT NOT NULL,
+  total_amount REAL NOT NULL DEFAULT 0,
+  beginning_balance REAL NOT NULL DEFAULT 0,
+  ending_balance REAL NOT NULL DEFAULT 0,
+  sharepoint_folder_path TEXT,
+  sharepoint_folder_web_url TEXT,
+  created_by TEXT NOT NULL,
+  created_at_utc TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL,
+  FOREIGN KEY (fund_id) REFERENCES pay_funds (id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pay_fund_packets_fund_dates
+ON pay_fund_packets(fund_id, period_start, period_end);
+
 CREATE TABLE IF NOT EXISTS pay_packets (
   id TEXT PRIMARY KEY,
   period_id TEXT NOT NULL,

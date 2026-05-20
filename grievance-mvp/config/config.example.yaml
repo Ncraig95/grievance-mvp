@@ -158,6 +158,8 @@ pay_portal:
   president_target_scale: "36"
   # Presidential wages are wage scale 36 plus 20%.
   president_target_multiplier: 1.20
+  # FICA multiplier used on SIF/Growth fund reimbursement packets.
+  fund_fica_rate: 0.0765
   # Optional; can also be supplied through GOOGLE_MAPS_API_KEY.
   google_maps_api_key: ""
   irs_rates:

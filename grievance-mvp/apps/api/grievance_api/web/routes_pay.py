@@ -5,6 +5,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from html import escape
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
@@ -19,6 +20,7 @@ from ..services.pay_portal import (
     add_pay_event,
     approve_irs_rate_candidate,
     create_pay_demo_feedback,
+    add_pay_fund_ledger_entry,
     attachment_for_actor,
     create_pay_entry_correction,
     delete_pay_entry,
@@ -29,10 +31,16 @@ from ..services.pay_portal import (
     decode_content_base64,
     ensure_pay_period,
     generate_pay_demo_artifacts,
+    generate_pay_fund_packet,
+    fund_fica_rate_from_settings,
     list_attachments,
     list_compensation_stubs,
     list_entries,
     list_pay_demo_artifacts,
+    list_pay_fund_allocations,
+    list_pay_fund_attachment_links,
+    list_pay_fund_packets,
+    list_pay_funds,
     list_pay_demo_feedback,
     list_irs_rate_candidates,
     list_pay_profiles,
@@ -47,6 +55,7 @@ from ..services.pay_portal import (
     pay_demo_settings,
     pay_demo_artifact_path,
     pay_profile_by_email,
+    pay_fund_packet_by_id,
     pay_profile_wage_fields_changed,
     pay_settings,
     remove_mileage_attachment,
@@ -57,12 +66,15 @@ from ..services.pay_portal import (
     save_pay_settings,
     store_attachment,
     store_compensation_stub,
+    link_pay_attachment_to_fund,
     sync_irs_mileage_rate_candidates,
     treasurer_recipients,
     validate_mileage_locations,
     update_pay_demo_feedback_status,
     upsert_entry,
     upsert_pay_profile,
+    upsert_pay_fund,
+    save_pay_fund_allocations_for_entry,
     upsert_pay_user,
     upsert_wage_scale,
     write_common_places_cache,
@@ -163,6 +175,50 @@ class PayAttachmentUploadRequest(BaseModel):
     content_type: str | None = None
     content_base64: str
     attachment_type: str = "receipt"
+
+
+class PayFundUpsertRequest(BaseModel):
+    id: str | None = None
+    fund_type: str = "sif"
+    name: str
+    status: str = "active"
+    local_number: str | None = "3106"
+    description: str | None = None
+
+
+class PayFundLedgerEntryRequest(BaseModel):
+    ledger_type: str = "advance"
+    amount: float
+    effective_date: str
+    reference: str | None = None
+    notes: str | None = None
+
+
+class PayFundAllocationRow(BaseModel):
+    fund_id: str
+    hours: float = 0
+    mileage_miles: float = 0
+    mileage_amount: float = 0
+    rentals_amount: float = 0
+    meals_amount: float = 0
+    hotel_amount: float = 0
+    miscellaneous_amount: float = 0
+    notes: str | None = None
+
+
+class PayFundAllocationsRequest(BaseModel):
+    allocations: list[PayFundAllocationRow] = Field(default_factory=list)
+
+
+class PayFundAttachmentLinkRequest(BaseModel):
+    fund_id: str
+    allocation_id: str | None = None
+    notes: str | None = None
+
+
+class PayFundPacketRequest(BaseModel):
+    period_start: str
+    period_end: str
 
 
 class PayCompensationStubRequest(BaseModel):
@@ -1261,6 +1317,41 @@ def _pay_view_content(view: str, *, actor: PayActor) -> str:
           </form>
         </section>
         <section class="panel">
+          <div class="section-head"><div><p class="eyebrow">SIF / Growth Funds</p><h2>Fund Ledger and Packets</h2></div><span id="fundStatus" class="muted"></span></div>
+          <form id="fundForm" class="form-stack">
+            <div class="field-grid">
+              <label>Fund Name<input name="name" required placeholder="COJ SIF"></label>
+              <label>Fund Type<select name="fund_type"><option value="sif">SIF</option><option value="growth">Growth Fund</option></select></label>
+              <label>Status<select name="status"><option value="active">Active</option><option value="closed">Closed</option></select></label>
+              <label>Local<input name="local_number" value="3106"></label>
+            </div>
+            <label>Description<textarea name="description"></textarea></label>
+            <div class="toolbar"><button type="submit" class="secondary">Save Fund</button></div>
+          </form>
+          <form id="fundLedgerForm" class="form-stack">
+            <div class="field-grid">
+              <label>Fund<select id="fundLedgerFundSelect" name="fund_id"></select></label>
+              <label>Type<select name="ledger_type"><option value="advance">Advance</option><option value="reimbursement_submitted">Reimbursement Submitted</option><option value="reimbursement_received">Reimbursement Received</option><option value="adjustment">Adjustment</option></select></label>
+              <label>Amount ($)<input name="amount" type="number" step="0.01" required></label>
+              <label>Date<input name="effective_date" type="date" required></label>
+              <label>Reference<input name="reference"></label>
+            </div>
+            <label>Notes<textarea name="notes"></textarea></label>
+            <div class="toolbar"><button type="submit" class="secondary">Add Ledger Entry</button></div>
+          </form>
+          <div class="table-wrap compact-table"><table><thead><tr><th>Fund</th><th>Type</th><th>Status</th><th>Advance</th><th>Allocated</th><th>Submitted</th><th>Needed</th><th>Remaining</th></tr></thead><tbody id="fundBalancesBody"></tbody></table></div>
+        </section>
+        <section class="panel">
+          <div class="section-head"><div><p class="eyebrow">SIF / Growth Funds</p><h2>Excel Packet Generator</h2></div><span id="fundPacketStatus" class="muted"></span></div>
+          <form id="fundPacketForm" class="inline-form">
+            <select id="fundPacketFundSelect" name="fund_id"></select>
+            <input name="period_start" type="date" required>
+            <input name="period_end" type="date" required>
+            <button type="submit" class="secondary">Generate Excel Packet</button>
+          </form>
+          <div class="table-wrap compact-table"><table><thead><tr><th>Fund</th><th>Dates</th><th>Total</th><th>Ending</th><th></th></tr></thead><tbody id="fundPacketsBody"></tbody></table></div>
+        </section>
+        <section class="panel">
           <div class="section-head"><div><p class="eyebrow">Training</p><h2>Demo Mode</h2></div><span id="demoSettingsStatus" class="muted"></span></div>
           <form id="demoSettingsForm" class="form-stack">
             <div class="field-grid">
@@ -1357,6 +1448,29 @@ def _pay_view_content(view: str, *, actor: PayActor) -> str:
     </section>
     {_my_pay_profile_html()}
     {_stub_form_html()}
+    <section class="panel" id="fundAllocationPanel">
+      <div class="section-head"><div><p class="eyebrow">SIF / Growth Funds</p><h2>Allocate This Entry</h2></div><span id="fundAllocationStatus" class="muted"></span></div>
+      <p class="muted" id="fundAllocationEntryLabel">Select an entry below</p>
+      <form id="fundAllocationForm" class="form-stack">
+        <div class="field-grid">
+          <label>Fund<select name="fund_id"></select></label>
+          <label>Hours<input name="hours" type="number" step="0.25" min="0"></label>
+          <label>Miles<input name="mileage_miles" type="number" step="0.01" min="0"></label>
+          <label>Mileage Amount ($)<input name="mileage_amount" type="number" step="0.01" min="0"></label>
+          <label>Meals ($)<input name="meals_amount" type="number" step="0.01" min="0"></label>
+          <label>Hotel ($)<input name="hotel_amount" type="number" step="0.01" min="0"></label>
+          <label>Rental ($)<input name="rentals_amount" type="number" step="0.01" min="0"></label>
+          <label>Misc. ($)<input name="miscellaneous_amount" type="number" step="0.01" min="0"></label>
+        </div>
+        <label>Allocation Notes<textarea name="notes"></textarea></label>
+        <div class="toolbar"><button type="submit" class="secondary">Save Fund Allocation</button></div>
+      </form>
+      <div class="subpanel form-stack">
+        <div><h3>Optional Timesheet Screenshot</h3><p class="muted">PDF, PNG, or JPEG. This is stored with the selected entry and included with fund packets for that day.</p></div>
+        <div class="toolbar"><input id="timesheetFile" type="file" accept=".pdf,image/png,image/jpeg"><button id="uploadTimesheetBtn" type="button" class="secondary">Attach Timesheet</button></div>
+      </div>
+      <div class="table-wrap compact-table"><table><thead><tr><th>Fund</th><th>Hours</th><th>Miles</th><th>Mileage</th><th>Meals</th><th>Hotel</th><th>Rental</th><th>Misc.</th><th></th></tr></thead><tbody id="fundAllocationsBody"></tbody></table></div>
+    </section>
     {_entries_table_html(attach=True)}
     {_daily_tally_html()}
     """
@@ -1812,7 +1926,7 @@ function renderEntries() {
     radio.name = 'entryPick';
     radio.value = row.id;
     radio.checked = row.id === selectedEntryId;
-    radio.addEventListener('change', () => { selectedEntryId = row.id; syncMileageFormFromEntry(); });
+    radio.addEventListener('change', () => { selectedEntryId = row.id; syncMileageFormFromEntry(); renderFundAllocationPanel(); });
     pick.appendChild(radio);
     tr.appendChild(pick);
     addCell(tr, row.entry_date);
@@ -1861,6 +1975,7 @@ function renderEntries() {
     body.appendChild(tr);
   }
   syncMileageFormFromEntry();
+  renderFundAllocationPanel();
 }
 function renderDailyTally() {
   const body = byId('dailyTallyBody');
@@ -2041,6 +2156,170 @@ function addMileageLocationField(value, placeholder = 'Enter location') {
   div.appendChild(button);
   locationsDiv.appendChild(div);
   wireAddressInput(input);
+}
+function activeFunds() {
+  return (context && context.funds ? context.funds : []).filter(row => (row.status || 'active') === 'active');
+}
+function populateFundSelect(select, { includeBlank = false } = {}) {
+  if (!select || !context) return;
+  const current = select.value;
+  select.innerHTML = '';
+  if (includeBlank) {
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = 'Select fund...';
+    select.appendChild(blank);
+  }
+  for (const fund of activeFunds()) {
+    const option = document.createElement('option');
+    option.value = fund.id;
+    option.textContent = `${fund.name} (${fund.fund_type || 'fund'})`;
+    select.appendChild(option);
+  }
+  if (current && Array.from(select.options).some(option => option.value === current)) select.value = current;
+}
+function currentFundAllocations() {
+  if (!context || !selectedEntryId) return [];
+  return (context.fund_allocations || []).filter(row => row.entry_id === selectedEntryId);
+}
+function allocationPayloadFromForm(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  return {
+    fund_id: data.fund_id || '',
+    hours: Number(data.hours || 0),
+    mileage_miles: Number(data.mileage_miles || 0),
+    mileage_amount: Number(data.mileage_amount || 0),
+    rentals_amount: Number(data.rentals_amount || 0),
+    meals_amount: Number(data.meals_amount || 0),
+    hotel_amount: Number(data.hotel_amount || 0),
+    miscellaneous_amount: Number(data.miscellaneous_amount || 0),
+    notes: data.notes || '',
+  };
+}
+async function saveFundAllocations(rows) {
+  if (!selectedEntryId) throw new Error('Select a pay entry first.');
+  await api(`/pay/api/entries/${encodeURIComponent(selectedEntryId)}/fund-allocations`, {
+    method: 'POST',
+    body: JSON.stringify({ allocations: rows }),
+  });
+  await loadContext();
+}
+async function removeFundAllocation(fundId) {
+  const rows = currentFundAllocations().filter(row => row.fund_id !== fundId).map(row => ({
+    fund_id: row.fund_id,
+    hours: Number(row.hours || 0),
+    mileage_miles: Number(row.mileage_miles || 0),
+    mileage_amount: Number(row.mileage_amount || 0),
+    rentals_amount: Number(row.rentals_amount || 0),
+    meals_amount: Number(row.meals_amount || 0),
+    hotel_amount: Number(row.hotel_amount || 0),
+    miscellaneous_amount: Number(row.miscellaneous_amount || 0),
+    notes: row.notes || '',
+  }));
+  await saveFundAllocations(rows);
+}
+function renderFundAllocationPanel() {
+  const form = byId('fundAllocationForm');
+  const body = byId('fundAllocationsBody');
+  if (!form || !body || !context) return;
+  populateFundSelect(form.elements.namedItem('fund_id'), { includeBlank: true });
+  const entry = selectedEntry();
+  setText('fundAllocationEntryLabel', entry ? `${entry.entry_date} - ${entry.display_name || entry.user_email}` : 'Select an entry below');
+  body.innerHTML = '';
+  const rows = currentFundAllocations();
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 9;
+    td.textContent = selectedEntryId ? 'No fund allocations saved for this entry.' : 'Select an entry to allocate time or expenses.';
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  for (const row of rows) {
+    const tr = document.createElement('tr');
+    addCell(tr, row.fund_name || row.fund_id);
+    addCell(tr, money(row.hours));
+    addCell(tr, money(row.mileage_miles));
+    addCell(tr, currency(row.mileage_amount));
+    addCell(tr, currency(row.meals_amount));
+    addCell(tr, currency(row.hotel_amount));
+    addCell(tr, currency(row.rentals_amount));
+    addCell(tr, currency(row.miscellaneous_amount));
+    const action = document.createElement('td');
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'secondary';
+    remove.textContent = 'Remove';
+    remove.addEventListener('click', async () => {
+      try { await removeFundAllocation(row.fund_id); setText('fundAllocationStatus', 'Allocation removed'); }
+      catch (err) { setText('fundAllocationStatus', err.message); }
+    });
+    action.appendChild(remove);
+    tr.appendChild(action);
+    body.appendChild(tr);
+  }
+}
+function renderFundsAdmin() {
+  if (!context) return;
+  for (const id of ['fundLedgerFundSelect', 'fundPacketFundSelect']) populateFundSelect(byId(id), { includeBlank: true });
+  const body = byId('fundBalancesBody');
+  if (body) {
+    body.innerHTML = '';
+    const funds = context.funds || [];
+    if (!funds.length) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 8;
+      td.textContent = 'No SIF or Growth funds set up yet.';
+      tr.appendChild(td);
+      body.appendChild(tr);
+    }
+    for (const fund of funds) {
+      const tr = document.createElement('tr');
+      addCell(tr, fund.name);
+      addCell(tr, fund.fund_type);
+      addCell(tr, fund.status);
+      addCell(tr, currency(fund.advance_amount));
+      addCell(tr, currency(fund.allocated_amount));
+      addCell(tr, currency(fund.reimbursement_submitted_amount));
+      addCell(tr, currency(fund.reimbursement_needed));
+      addCell(tr, currency(fund.remaining_balance));
+      body.appendChild(tr);
+    }
+  }
+  const packetBody = byId('fundPacketsBody');
+  if (packetBody) {
+    packetBody.innerHTML = '';
+    for (const packet of context.fund_packets || []) {
+      const tr = document.createElement('tr');
+      addCell(tr, packet.fund_name);
+      addCell(tr, `${packet.period_start} to ${packet.period_end}`);
+      addCell(tr, currency(packet.total_amount));
+      addCell(tr, currency(packet.ending_balance));
+      const link = document.createElement('td');
+      const a = document.createElement('a');
+      a.href = packet.workbook_download_url;
+      a.textContent = 'Download Excel';
+      link.appendChild(a);
+      if (packet.sharepoint_folder_web_url) {
+        link.appendChild(document.createTextNode(' | '));
+        const sp = document.createElement('a');
+        sp.href = packet.sharepoint_folder_web_url;
+        sp.textContent = 'SharePoint';
+        sp.target = '_blank';
+        sp.rel = 'noopener';
+        link.appendChild(sp);
+      }
+      tr.appendChild(link);
+      packetBody.appendChild(tr);
+    }
+  }
+  const packetForm = byId('fundPacketForm');
+  if (packetForm && context.period) {
+    if (!packetForm.period_start.value) packetForm.period_start.value = context.period.period_start || '';
+    if (!packetForm.period_end.value) packetForm.period_end.value = context.period.period_end || '';
+  }
 }
 function renderCommonPlaces() {
   const select = byId('commonPlaceSelect');
@@ -2634,6 +2913,8 @@ async function loadContext() {
   renderMileageEntrySelect();
   renderCommonPlaces();
   renderMileageForms();
+  renderFundAllocationPanel();
+  renderFundsAdmin();
   renderStubs();
   renderPayUsers();
   renderPayProfiles();
@@ -2705,6 +2986,50 @@ bind('uploadReceiptBtn', 'click', async () => {
     await api(`/pay/api/entries/${selectedEntryId}/attachments`, { method: 'POST', body: JSON.stringify({ period_id: context.period.id, filename: file.name, content_type: file.type, content_base64: bytesToBase64(await file.arrayBuffer()) }) });
     await loadContext();
   } catch (err) { alert(err.message); }
+});
+bind('uploadTimesheetBtn', 'click', async () => {
+  const fileInput = byId('timesheetFile');
+  const file = fileInput && fileInput.files[0];
+  if (!selectedEntryId || !file) { setText('fundAllocationStatus', 'Select an entry and choose a timesheet screenshot.'); return; }
+  try {
+    await api(`/pay/api/entries/${encodeURIComponent(selectedEntryId)}/attachments`, {
+      method: 'POST',
+      body: JSON.stringify({
+        period_id: context.period.id,
+        filename: file.name,
+        content_type: file.type,
+        attachment_type: 'timesheet_screenshot',
+        content_base64: bytesToBase64(await file.arrayBuffer()),
+      }),
+    });
+    setText('fundAllocationStatus', 'Timesheet screenshot attached');
+    fileInput.value = '';
+    await loadContext();
+  } catch (err) { setText('fundAllocationStatus', err.message); }
+});
+bind('fundAllocationForm', 'submit', async event => {
+  event.preventDefault();
+  const form = event.target;
+  const next = allocationPayloadFromForm(form);
+  if (!next.fund_id) { setText('fundAllocationStatus', 'Select a fund.'); return; }
+  const existing = currentFundAllocations()
+    .filter(row => row.fund_id !== next.fund_id)
+    .map(row => ({
+      fund_id: row.fund_id,
+      hours: Number(row.hours || 0),
+      mileage_miles: Number(row.mileage_miles || 0),
+      mileage_amount: Number(row.mileage_amount || 0),
+      rentals_amount: Number(row.rentals_amount || 0),
+      meals_amount: Number(row.meals_amount || 0),
+      hotel_amount: Number(row.hotel_amount || 0),
+      miscellaneous_amount: Number(row.miscellaneous_amount || 0),
+      notes: row.notes || '',
+    }));
+  try {
+    await saveFundAllocations([...existing, next]);
+    setText('fundAllocationStatus', 'Fund allocation saved');
+    form.reset();
+  } catch (err) { setText('fundAllocationStatus', err.message); }
 });
 bind('mileageEntrySelect', 'change', event => {
   selectedEntryId = event.target.value || null;
@@ -3000,6 +3325,43 @@ bind('demoFeedbackForm', 'submit', async event => {
   } catch (err) {
     setText('demoFeedbackStatus', err.message);
   }
+});
+bind('fundForm', 'submit', async event => {
+  event.preventDefault();
+  const data = Object.fromEntries(new FormData(event.target).entries());
+  try {
+    await api('/pay/api/funds', { method: 'POST', body: JSON.stringify(data) });
+    setText('fundStatus', 'Fund saved');
+    event.target.reset();
+    await loadContext();
+  } catch (err) { setText('fundStatus', err.message); }
+});
+bind('fundLedgerForm', 'submit', async event => {
+  event.preventDefault();
+  const data = Object.fromEntries(new FormData(event.target).entries());
+  const fundId = data.fund_id || '';
+  if (!fundId) { setText('fundStatus', 'Select a fund.'); return; }
+  data.amount = Number(data.amount || 0);
+  try {
+    await api(`/pay/api/funds/${encodeURIComponent(fundId)}/ledger`, { method: 'POST', body: JSON.stringify(data) });
+    setText('fundStatus', 'Ledger entry saved');
+    event.target.reset();
+    await loadContext();
+  } catch (err) { setText('fundStatus', err.message); }
+});
+bind('fundPacketForm', 'submit', async event => {
+  event.preventDefault();
+  const data = Object.fromEntries(new FormData(event.target).entries());
+  const fundId = data.fund_id || '';
+  if (!fundId) { setText('fundPacketStatus', 'Select a fund.'); return; }
+  try {
+    const packet = await api(`/pay/api/funds/${encodeURIComponent(fundId)}/packets`, {
+      method: 'POST',
+      body: JSON.stringify({ period_start: data.period_start, period_end: data.period_end }),
+    });
+    setText('fundPacketStatus', `Packet generated: ${currency(packet.total_amount)} (${packet.support_document_count || 0} support docs)`);
+    await loadContext();
+  } catch (err) { setText('fundPacketStatus', err.message); }
 });
 bind('payUserForm', 'submit', async event => {
   event.preventDefault();
@@ -3485,6 +3847,14 @@ async def pay_context(request: Request):
     attachments = await list_attachments(db, period_id=str(period["id"]), actor=actor)
     compensation_stubs = await list_compensation_stubs(db, actor=actor)
     settings = await _pay_settings_for_request(request)
+    funds = await list_pay_funds(
+        db,
+        include_inactive=actor.can_lock,
+        include_financials=actor.can_lock,
+        fica_rate=fund_fica_rate_from_settings(settings),
+    )
+    fund_allocations = await list_pay_fund_allocations(db, actor=actor, period_id=str(period["id"]))
+    fund_attachment_links = await list_pay_fund_attachment_links(db, actor=actor, period_id=str(period["id"]))
     current_profile = await pay_profile_by_email(db, email=actor.email, active_only=True)
     return {
         "actor": {
@@ -3503,6 +3873,10 @@ async def pay_context(request: Request):
         "entries": entries,
         "attachments": attachments,
         "compensation_stubs": compensation_stubs,
+        "funds": funds,
+        "fund_allocations": fund_allocations,
+        "fund_attachment_links": fund_attachment_links,
+        "fund_packets": await list_pay_fund_packets(db) if actor.can_lock else [],
         "settings": settings,
         "demo_settings": await pay_demo_settings(db),
         "pay_profile": current_profile,
@@ -3546,6 +3920,10 @@ async def pay_demo_context(request: Request):
         "entries": [],
         "attachments": [],
         "compensation_stubs": [],
+        "funds": [],
+        "fund_allocations": [],
+        "fund_attachment_links": [],
+        "fund_packets": [],
         "settings": settings,
         "demo_settings": demo_settings,
         "pay_profile": None,
@@ -3564,6 +3942,129 @@ async def pay_demo_context(request: Request):
 async def pay_directory_users(request: Request, search: str = "", limit: int = 10):
     await _require_treasurer(request)
     return await search_directory_users_for_request(request, search=search, limit=limit)
+
+
+@router.get("/pay/api/funds")
+async def pay_funds(request: Request):
+    await _require_treasurer(request)
+    db: Db = request.app.state.db
+    settings = await _pay_settings_for_request(request)
+    return {
+        "rows": await list_pay_funds(
+            db,
+            include_inactive=True,
+            include_financials=True,
+            fica_rate=fund_fica_rate_from_settings(settings),
+        )
+    }
+
+
+@router.post("/pay/api/funds")
+async def save_pay_fund(body: PayFundUpsertRequest, request: Request):
+    actor = await _require_treasurer(request)
+    try:
+        return await upsert_pay_fund(
+            request.app.state.db,
+            fund_id=body.id,
+            fund_type=body.fund_type,
+            name=body.name,
+            status=body.status,
+            local_number=body.local_number,
+            description=body.description,
+            actor_email=actor.email,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/pay/api/funds/{fund_id}/ledger")
+async def save_pay_fund_ledger_entry(fund_id: str, body: PayFundLedgerEntryRequest, request: Request):
+    actor = await _require_treasurer(request)
+    try:
+        return await add_pay_fund_ledger_entry(
+            request.app.state.db,
+            fund_id=fund_id,
+            ledger_type=body.ledger_type,
+            amount=body.amount,
+            effective_date=body.effective_date,
+            reference=body.reference,
+            notes=body.notes,
+            actor_email=actor.email,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/pay/api/funds/{fund_id}/packets")
+async def generate_pay_fund_packet_route(fund_id: str, body: PayFundPacketRequest, request: Request):
+    actor = await _require_treasurer(request)
+    try:
+        return await generate_pay_fund_packet(
+            request.app.state.db,
+            cfg=request.app.state.cfg,
+            fund_id=fund_id,
+            actor=actor,
+            period_start=body.period_start,
+            period_end=body.period_end,
+            graph=getattr(request.app.state, "graph", None),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/pay/api/funds/packets/{packet_id}/workbook")
+async def download_pay_fund_packet_workbook(packet_id: str, request: Request):
+    await _require_treasurer(request)
+    try:
+        packet = await pay_fund_packet_by_id(request.app.state.db, packet_id=packet_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    workbook_path = str(packet.get("workbook_path") or "")
+    if not workbook_path:
+        raise HTTPException(status_code=404, detail="fund packet workbook not found")
+    return FileResponse(
+        workbook_path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=Path(workbook_path).name,
+    )
+
+
+@router.post("/pay/api/entries/{entry_id}/fund-allocations")
+async def save_pay_entry_fund_allocations(entry_id: str, body: PayFundAllocationsRequest, request: Request):
+    actor = await _require_pay_actor(request)
+    try:
+        return {
+            "rows": await save_pay_fund_allocations_for_entry(
+                request.app.state.db,
+                entry_id=entry_id,
+                actor=actor,
+                allocations=[row.model_dump() for row in body.allocations],
+            )
+        }
+    except PermissionError as exc:
+        raise _forbidden(str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/pay/api/attachments/{attachment_id}/fund-links")
+async def save_pay_attachment_fund_link(attachment_id: str, body: PayFundAttachmentLinkRequest, request: Request):
+    actor = await _require_pay_actor(request)
+    try:
+        return await link_pay_attachment_to_fund(
+            request.app.state.db,
+            attachment_id=attachment_id,
+            fund_id=body.fund_id,
+            allocation_id=body.allocation_id,
+            notes=body.notes,
+            actor=actor,
+        )
+    except PermissionError as exc:
+        raise _forbidden(str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/pay/api/profiles")
