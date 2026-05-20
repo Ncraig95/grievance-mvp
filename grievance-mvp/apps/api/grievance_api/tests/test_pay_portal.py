@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import random
 import tempfile
 import time
@@ -17,6 +18,7 @@ from fastapi import HTTPException
 from grievance_api.db.db import Db
 from grievance_api.db.migrate import migrate
 from grievance_api.services import pay_portal
+from grievance_api.services.docuseal_client import DocuSealClient
 from grievance_api.services.pay_portal import (
     PayActor,
     approve_irs_rate_candidate,
@@ -27,6 +29,7 @@ from grievance_api.services.pay_portal import (
     create_revision,
     handle_pay_docuseal_completion,
     list_irs_rate_candidates,
+    list_pay_profile_change_requests,
     lock_period_and_send_packet,
     parse_irs_mileage_rate_candidates,
     pay_profile_by_email,
@@ -47,12 +50,15 @@ from grievance_api.web.routes_pay import (
     InternalRoleAssignmentRequest,
     PayEntryCorrectionRequest,
     PayEntryReviewRequest,
+    PayEntryUpsertRequest,
     PayInternalUserImportRequest,
     PayDemoArtifactRequest,
     PayDemoFeedbackStatusRequest,
     PayDemoFeedbackRequest,
     PayDemoSettingsUpdateRequest,
+    PayProfileChangeReviewRequest,
     PayProfileUpsertRequest,
+    _record_pay_lock_failure,
     approve_pay_irs_rate,
     create_pay_entry_correction_route,
     create_pay_profile,
@@ -61,6 +67,7 @@ from grievance_api.web.routes_pay import (
     remove_pay_profile,
     download_pay_attachment,
     review_pay_entry_route,
+    review_pay_profile_change,
     generate_pay_demo_output_files,
     import_pay_internal_users,
     pay_context,
@@ -70,6 +77,7 @@ from grievance_api.web.routes_pay import (
     pay_start_page,
     pay_view_page,
     remove_pay_internal_role,
+    save_pay_entry,
     save_pay_internal_role,
     submit_pay_demo_feedback,
     update_pay_demo_feedback,
@@ -121,6 +129,42 @@ class _FakeDocuSeal:
         with zipfile.ZipFile(buf, "w") as zf:
             zf.writestr("signed.pdf", b"%PDF-1.4\nsigned packet\n")
         return {"completed_zip_bytes": buf.getvalue(), "submission": {}}
+
+
+class _FakeDocuSealDirectSignedPdf(_FakeDocuSeal):
+    def download_completed_artifacts(self, *, submission_id: str):
+        self.download_calls.append(submission_id)
+        return {
+            "completed_zip_bytes": None,
+            "signed_pdf_bytes": b"%PDF-1.4\ndirect signed packet\n",
+            "submission": {},
+        }
+
+
+class _FakeDocuSealMissingArtifacts(_FakeDocuSeal):
+    def download_completed_artifacts(self, *, submission_id: str):
+        self.download_calls.append(submission_id)
+        return {"completed_zip_bytes": None, "signed_pdf_bytes": None, "submission": {}}
+
+
+class _DocuSealHttpResponse:
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        content: bytes = b"",
+        text: str = "",
+        json_payload: object | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.content = content
+        self.text = text
+        self._json_payload = json_payload
+
+    def json(self):  # noqa: ANN201
+        if isinstance(self._json_payload, BaseException):
+            raise self._json_payload
+        return self._json_payload
 
 
 class _FakeMailer:
@@ -309,7 +353,12 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
             pay_portal=SimpleNamespace(
                 enabled=True,
                 voucher_template_path=str(Path(self.tmpdir.name) / "voucher.docx"),
-                sharepoint_root_folder="Pay Portal",
+                sharepoint_root_folder="Local3106/Pay Portal",
+                sharepoint_library="",
+                sharepoint_site_hostname="",
+                sharepoint_site_path="",
+                docx_pdf_graph_temp_folder="Local3106/Pay Portal/_docx_pdf_convert",
+                mileage_legacy_sharepoint_folder="Local3106/Mileage",
                 receipt_max_file_bytes=1_000_000,
                 receipt_max_entry_bytes=5_000_000,
                 clamav_host="clamav",
@@ -409,6 +458,17 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
             pay_cfg=self._cfg().pay_portal,
         )
         return str(period["id"]), str(entry["id"])
+
+    async def _approve_period_entries(self, period_id: str, *, exclude_ids: set[str] | None = None) -> None:
+        exclude_ids = exclude_ids or set()
+        if exclude_ids:
+            placeholders = ",".join("?" for _ in exclude_ids)
+            await self.db.exec(
+                f"UPDATE pay_entries SET review_status='approved' WHERE period_id=? AND id NOT IN ({placeholders})",
+                (period_id, *exclude_ids),
+            )
+        else:
+            await self.db.exec("UPDATE pay_entries SET review_status='approved' WHERE period_id=?", (period_id,))
 
     async def test_pay_settings_falls_back_to_configured_mileage_defaults(self) -> None:
         cfg = SimpleNamespace(
@@ -592,6 +652,49 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mileage["mileage_amount"], 10.88)
         self.assertTrue(mileage["can_remove"])
 
+    async def test_mileage_attachment_copies_pdf_to_legacy_officers_folder(self) -> None:
+        period_id, entry_id = await self._open_period_and_entry()
+        actor = PayActor(
+            email="officer@example.org",
+            display_name="Officer Example",
+            role="officer",
+            can_view_all=True,
+            can_edit_all=False,
+            can_lock=False,
+        )
+        graph = _FakeGraph()
+
+        with patch(
+            "grievance_api.services.pay_portal.build_mileage_pdf",
+            return_value=(b"%PDF-1.4\nmileage\n", pay_portal.Decimal("10.88"), pay_portal.Decimal("15.00")),
+        ):
+            result = await create_mileage_attachment(
+                db=self.db,
+                cfg=self._cfg(),
+                period_id=period_id,
+                entry_id=entry_id,
+                actor=actor,
+                name="test test",
+                local_number="3106",
+                date_str="2026-05-09",
+                description="Union business",
+                locations=["Union Hall", "Worksite"],
+                rate_text="0.725",
+                graph=graph,
+            )
+
+        self.assertEqual(graph.calls[0]["library"], "Documents")
+        self.assertEqual(graph.calls[0]["folder_path"], "Local3106/Mileage/2026/05 - May")
+        self.assertEqual(graph.calls[0]["filename"], "20260509 test test.pdf")
+        self.assertEqual(
+            result["legacy_sharepoint_path"],
+            "Local3106/Mileage/2026/05 - May/20260509 test test.pdf",
+        )
+        event = await self.db.fetchone(
+            "SELECT event_type FROM pay_events WHERE event_type='mileage_legacy_sharepoint_uploaded'"
+        )
+        self.assertEqual(event[0], "mileage_legacy_sharepoint_uploaded")
+
     async def test_mileage_report_download_and_remove_are_permissioned(self) -> None:
         period_id, entry_id = await self._open_period_and_entry()
         actor = PayActor(
@@ -648,6 +751,137 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row[2], 0.0)
         visible = await pay_portal.list_attachments(self.db, period_id=period_id, actor=actor)
         self.assertEqual([row for row in visible if row["attachment_type"] == "mileage_pdf"], [])
+
+    async def test_pay_context_privacy_and_pay_viewer_file_access(self) -> None:
+        cfg = self._cfg()
+        cfg.officer_auth.enabled = True
+        admin_request = _Request(state=SimpleNamespace(cfg=cfg, db=self.db), session=self._staff_session("admin"))
+        await save_pay_internal_role(
+            InternalRoleAssignmentRequest(
+                principal_email="viewer@example.org",
+                principal_display_name="Pay Viewer",
+                role="pay_viewer",
+            ),
+            admin_request,
+        )
+        period = await pay_portal.ensure_pay_period(self.db)
+        period_id = str(period["id"])
+        officer_actor = PayActor("officer@example.org", "Officer", "officer", False, False, False)
+        other_actor = PayActor("other@example.org", "Other", "officer", False, False, False)
+        await self._save_profile(email=officer_actor.email, display_name=officer_actor.display_name)
+        await self._save_profile(email=other_actor.email, display_name=other_actor.display_name)
+        own_entry = await upsert_entry(
+            self.db,
+            period_id=period_id,
+            actor=officer_actor,
+            data={"entry_date": str(period["period_start"]), "hours": 2, "notes": "own"},
+            pay_cfg=cfg.pay_portal,
+        )
+        other_entry_date = (date.fromisoformat(str(period["period_start"])) + pay_portal.timedelta(days=1)).isoformat()
+        other_entry = await upsert_entry(
+            self.db,
+            period_id=period_id,
+            actor=other_actor,
+            data={"entry_date": other_entry_date, "hours": 3, "notes": "other"},
+            pay_cfg=cfg.pay_portal,
+        )
+        own_attachment = await store_attachment(
+            self.db,
+            cfg=cfg,
+            period_id=period_id,
+            entry_id=str(own_entry["id"]),
+            actor=officer_actor,
+            attachment_type="receipt",
+            filename="own.pdf",
+            content_type="application/pdf",
+            content=b"%PDF-1.4\nown\n",
+            scan=False,
+        )
+        other_attachment = await store_attachment(
+            self.db,
+            cfg=cfg,
+            period_id=period_id,
+            entry_id=str(other_entry["id"]),
+            actor=other_actor,
+            attachment_type="mileage_pdf",
+            filename="other-mileage.pdf",
+            content_type="application/pdf",
+            content=b"%PDF-1.4\nother\n",
+            scan=False,
+            mileage_miles=10,
+            mileage_rate=0.725,
+            mileage_amount=7.25,
+        )
+        await store_compensation_stub(
+            self.db,
+            cfg=cfg,
+            actor=officer_actor,
+            user_email=officer_actor.email,
+            base_wage_input_type="hourly",
+            base_wage_amount=45,
+            weekly_basis_hours=40,
+            commission_month_1_amount=0,
+            commission_month_2_amount=0,
+            commission_month_3_amount=0,
+            filename="own-stub.pdf",
+            content_type="application/pdf",
+            content=b"%PDF-1.4\nown-stub\n",
+            scan=False,
+        )
+        await store_compensation_stub(
+            self.db,
+            cfg=cfg,
+            actor=other_actor,
+            user_email=other_actor.email,
+            base_wage_input_type="hourly",
+            base_wage_amount=46,
+            weekly_basis_hours=40,
+            commission_month_1_amount=0,
+            commission_month_2_amount=0,
+            commission_month_3_amount=0,
+            filename="other-stub.pdf",
+            content_type="application/pdf",
+            content=b"%PDF-1.4\nother-stub\n",
+            scan=False,
+        )
+
+        officer_request = _Request(
+            state=SimpleNamespace(cfg=cfg, db=self.db),
+            session=self._staff_session("officer", email="officer@example.org"),
+        )
+        officer_context = await pay_context(officer_request)
+        self.assertEqual([row["user_email"] for row in officer_context["entries"]], ["officer@example.org"])
+        self.assertEqual([row["filename"] for row in officer_context["attachments"]], ["own.pdf"])
+        self.assertEqual([row["user_email"] for row in officer_context["compensation_stubs"]], ["officer@example.org"])
+        officer_period = next(row for row in officer_context["periods"] if row["id"] == period_id)
+        self.assertEqual(officer_period["entry_count"], 1)
+        with self.assertRaises(HTTPException) as denied_download:
+            await download_pay_attachment(str(other_attachment["id"]), officer_request)
+        self.assertEqual(denied_download.exception.status_code, 403)
+
+        viewer_request = _Request(
+            state=SimpleNamespace(cfg=cfg, db=self.db),
+            session=self._staff_session("officer", email="viewer@example.org"),
+        )
+        viewer_context = await pay_context(viewer_request)
+        self.assertEqual(viewer_context["actor"]["role"], "pay_viewer")
+        self.assertTrue(viewer_context["actor"]["can_view_all"])
+        self.assertFalse(viewer_context["actor"]["can_lock"])
+        self.assertEqual({row["user_email"] for row in viewer_context["entries"]}, {"officer@example.org", "other@example.org"})
+        self.assertEqual({row["filename"] for row in viewer_context["attachments"]}, {"own.pdf", "other-mileage.pdf"})
+        self.assertEqual(
+            {row["user_email"] for row in viewer_context["compensation_stubs"]},
+            {"officer@example.org", "other@example.org"},
+        )
+        viewer_period = next(row for row in viewer_context["periods"] if row["id"] == period_id)
+        self.assertEqual(viewer_period["entry_count"], 2)
+        download = await download_pay_attachment(str(other_attachment["id"]), viewer_request)
+        self.assertEqual(download.filename, "other-mileage.pdf")
+        viewer_attachment = next(row for row in viewer_context["attachments"] if row["filename"] == "other-mileage.pdf")
+        self.assertFalse(viewer_attachment["can_remove"])
+        with self.assertRaises(HTTPException) as denied_remove:
+            await delete_pay_attachment(str(other_attachment["id"]), viewer_request)
+        self.assertEqual(denied_remove.exception.status_code, 403)
 
     async def test_mileage_report_remove_denies_locked_and_unsafe_legacy_reports(self) -> None:
         period_id, entry_id = await self._open_period_and_entry()
@@ -932,6 +1166,7 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
             rng=random.Random("president-demo"),
         )
         self.assertGreater(float(president_entries[0]["president_diff_hours"]), 0)
+        self.assertNotEqual(float(president_entries[0]["president_diff_hours"]), float(president_entries[0]["hours"]))
         self.assertEqual(float(president_entries[0]["lost_wage_hourly_rate"]), 62.0)
         self.assertEqual(float(president_entries[0]["president_diff_rate"]), 17.0)
         self.assertGreater(float(president_entries[0]["president_diff_amount"]), 0)
@@ -1049,6 +1284,10 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
             session=self._staff_session("officer", email="officer@example.org"),
         )
 
+        admin_request = _Request(
+            state=SimpleNamespace(cfg=cfg, db=self.db),
+            session=self._staff_session("admin", email="admin@example.org"),
+        )
         profile = await create_pay_profile(
             PayProfileUpsertRequest(
                 principal_email="officer@example.org",
@@ -1058,7 +1297,7 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
                 base_wage_amount=42,
                 default_address="123 Union Way, Jacksonville, FL",
             ),
-            request,
+            admin_request,
         )
         period = await pay_portal.ensure_pay_period(self.db, for_date=date.fromisoformat("2026-05-17"))
         entry = await upsert_entry(
@@ -1178,27 +1417,55 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["entry"]["hours"], 2.0)
         self.assertEqual(result["entry"]["correction_count"], 1)
 
-    async def test_packet_excludes_rejected_and_needs_fix_entries(self) -> None:
+    async def test_packet_includes_pending_and_approved_but_excludes_rejected_and_needs_fix_entries(self) -> None:
         cfg = self._cfg()
         cfg.pay_portal.president_email = "president@example.org"
         Path(cfg.pay_portal.voucher_template_path).write_text("template", encoding="utf-8")
         actor = PayActor("treasurer@example.org", "Treasurer", "treasurer", True, True, True)
-        officer = PayActor("officer@example.org", "Officer Example", "officer", True, False, False)
+        officer = PayActor("officer@example.org", "Officer Example", "officer", False, False, False)
         await self._save_profile(email=officer.email, display_name=officer.display_name)
         period = await pay_portal.ensure_pay_period(self.db, for_date=date.fromisoformat("2026-05-17"))
-        included = await upsert_entry(
+        pending = await upsert_entry(
             self.db,
             period_id=str(period["id"]),
             actor=officer,
-            data={"entry_date": "2026-05-17", "hours": 1, "notes": "include"},
+            data={"entry_date": "2026-05-17", "hours": 1, "notes": "pending include"},
+            pay_cfg=cfg.pay_portal,
+        )
+        approved = await upsert_entry(
+            self.db,
+            period_id=str(period["id"]),
+            actor=officer,
+            data={"entry_date": "2026-05-18", "hours": 1, "notes": "approved include"},
+            pay_cfg=cfg.pay_portal,
+        )
+        needs_fix = await upsert_entry(
+            self.db,
+            period_id=str(period["id"]),
+            actor=officer,
+            data={"entry_date": "2026-05-19", "hours": 1, "notes": "fix"},
             pay_cfg=cfg.pay_portal,
         )
         rejected = await upsert_entry(
             self.db,
             period_id=str(period["id"]),
             actor=officer,
-            data={"entry_date": "2026-05-18", "hours": 1, "notes": "reject"},
+            data={"entry_date": "2026-05-20", "hours": 1, "notes": "reject"},
             pay_cfg=cfg.pay_portal,
+        )
+        await pay_portal.review_pay_entry(
+            self.db,
+            entry_id=str(approved["id"]),
+            actor=actor,
+            review_status="approved",
+            review_note="Ready",
+        )
+        await pay_portal.review_pay_entry(
+            self.db,
+            entry_id=str(needs_fix["id"]),
+            actor=actor,
+            review_status="needs_fix",
+            review_note="Need receipt",
         )
         await pay_portal.review_pay_entry(
             self.db,
@@ -1228,8 +1495,81 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertIn("2026-05-17", filled_dates)
-        self.assertNotIn("2026-05-18", filled_dates)
-        self.assertEqual(result["excluded_entries"][0]["entry_date"], "2026-05-18")
+        self.assertIn("2026-05-18", filled_dates)
+        self.assertNotIn("2026-05-19", filled_dates)
+        self.assertNotIn("2026-05-20", filled_dates)
+        self.assertEqual(
+            {(row["entry_date"], row["review_status"]) for row in result["excluded_entries"]},
+            {("2026-05-19", "needs_fix"), ("2026-05-20", "rejected")},
+        )
+        locked_rows = await self.db.fetchall(
+            "SELECT entry_date, locked_at_utc FROM pay_entries WHERE id IN (?, ?, ?, ?) ORDER BY entry_date",
+            (pending["id"], approved["id"], needs_fix["id"], rejected["id"]),
+        )
+        self.assertTrue(locked_rows[0][1])
+        self.assertTrue(locked_rows[1][1])
+        self.assertIsNone(locked_rows[2][1])
+        self.assertIsNone(locked_rows[3][1])
+
+    async def test_lock_period_fails_clearly_when_no_includable_entries(self) -> None:
+        cfg = self._cfg()
+        cfg.pay_portal.president_email = "president@example.org"
+        actor = PayActor("treasurer@example.org", "Treasurer", "treasurer", True, True, True)
+        officer = PayActor("officer@example.org", "Officer Example", "officer", False, False, False)
+        await self._save_profile(email=officer.email, display_name=officer.display_name)
+        period = await pay_portal.ensure_pay_period(self.db, for_date=date.fromisoformat("2026-05-17"))
+        entry = await upsert_entry(
+            self.db,
+            period_id=str(period["id"]),
+            actor=officer,
+            data={"entry_date": "2026-05-17", "hours": 1, "notes": "bad"},
+            pay_cfg=cfg.pay_portal,
+        )
+        await pay_portal.review_pay_entry(
+            self.db,
+            entry_id=str(entry["id"]),
+            actor=actor,
+            review_status="needs_fix",
+            review_note="Need receipt",
+        )
+
+        with self.assertLogs("grievance_api.pay_portal", level="INFO") as logs:
+            with self.assertRaisesRegex(ValueError, "no pending or approved entries"):
+                await lock_period_and_send_packet(
+                    db=self.db,
+                    cfg=cfg,
+                    graph=_FakeGraph(),
+                    docuseal=_FakeDocuSeal(),
+                    period_id=str(period["id"]),
+                    actor=actor,
+                    president_signer_email="president@example.org",
+                    docx_to_pdf_func=_fake_docx_to_pdf,
+                )
+        self.assertTrue(any("stage=entries_loaded" in line and "includable_entries=0" in line for line in logs.output))
+        self.assertTrue(any("stage=no_includable_entries" in line for line in logs.output))
+
+    async def test_pay_lock_failure_records_debug_event(self) -> None:
+        actor = PayActor("treasurer@example.org", "Treasurer", "treasurer", True, True, True)
+        request = _Request(state=SimpleNamespace(db=self.db))
+        with self.assertLogs("grievance_api.pay_portal.routes", level="ERROR") as logs:
+            await _record_pay_lock_failure(
+                request,
+                period_id="pay-debug-period",
+                actor=actor,
+                exc=RuntimeError("docuseal failed"),
+                status_code=502,
+            )
+
+        self.assertTrue(any("pay_lock_send_failed" in line for line in logs.output))
+        event = await self.db.fetchone(
+            "SELECT event_type, actor, details_json FROM pay_events WHERE period_id=?",
+            ("pay-debug-period",),
+        )
+        self.assertIsNotNone(event)
+        self.assertEqual(event[0], "period_lock_send_failed")
+        self.assertEqual(event[1], "treasurer@example.org")
+        self.assertIn("docuseal failed", event[2])
+        self.assertIn("502", event[2])
 
     async def test_pay_workspace_pages_are_role_focused(self) -> None:
         cfg = self._cfg()
@@ -1285,7 +1625,7 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('href="/pay/mileage"', entry_html)
         self.assertIn('href="/pay/demo"', entry_html)
         self.assertNotIn('href="/pay/president"', entry_html)
-        self.assertIn('href="/pay/treasurer"', entry_html)
+        self.assertNotIn('href="/pay/treasurer"', entry_html)
         self.assertNotIn("Pay User Allowlist", entry_html)
 
         president_redirect = await pay_view_page("president", officer_request)
@@ -1326,6 +1666,8 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Addresses updated from Google route results", mileage_html)
         self.assertIn("Generate Mileage PDF", mileage_html)
         self.assertIn("Mileage report breakdown", mileage_html)
+        self.assertIn("appendMileageMetric", mileage_html)
+        self.assertNotIn("detailsCell.innerHTML = `<div", mileage_html)
         self.assertIn("IRS Standard Mileage Rate", mileage_html)
         self.assertIn("Total Distance", mileage_html)
         self.assertIn("Total Reimbursement", mileage_html)
@@ -1349,18 +1691,14 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/pay/api/demo/artifacts", demo_html)
         self.assertIn("/pay/api/demo/feedback", demo_html)
         self.assertIn("Signed off in Pay Portal", demo_html)
+        self.assertIn("president worked 5 union hours", demo_html)
         self.assertIn("president-only packet signing", demo_html)
         self.assertIn("Confirm only the president signs the packet", demo_html)
         self.assertNotIn("Lock And Send For Signature", demo_html)
 
-        treasurer_html = (await pay_view_page("treasurer", officer_request)).body.decode("utf-8")
-        self.assertIn("Review, Lock, and Send", treasurer_html)
-        self.assertIn("Voucher Packet", treasurer_html)
-        self.assertIn("Read-only review access", treasurer_html)
-        self.assertNotIn("Lock And Send For Signature", treasurer_html)
-        self.assertNotIn('id="correctionForm"', treasurer_html)
-        self.assertNotIn("First-Time Wage Setup", treasurer_html)
-        self.assertNotIn("Pay User Allowlist", treasurer_html)
+        with self.assertRaises(HTTPException) as treasurer_denied:
+            await pay_view_page("treasurer", officer_request)
+        self.assertEqual(treasurer_denied.exception.status_code, 403)
 
         with self.assertRaises(HTTPException) as denied:
             await pay_view_page("admin", officer_request)
@@ -1387,6 +1725,29 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Edit Voucher", treasurer_admin_html)
         self.assertIn("openCorrectionForEntry(row)", treasurer_admin_html)
 
+        await save_pay_internal_role(
+            InternalRoleAssignmentRequest(
+                principal_email="viewer@example.org",
+                principal_display_name="Pay Viewer",
+                role="pay_viewer",
+            ),
+            admin_request,
+        )
+        viewer_request = _Request(
+            state=SimpleNamespace(cfg=cfg, db=self.db),
+            session=self._staff_session("officer", email="viewer@example.org"),
+        )
+        viewer_redirect = await pay_page(viewer_request)
+        self.assertEqual(viewer_redirect.headers["location"], "/pay/treasurer")
+        viewer_html = (await pay_view_page("treasurer", viewer_request)).body.decode("utf-8")
+        self.assertIn("Review, Lock, and Send", viewer_html)
+        self.assertIn("Read-only review access", viewer_html)
+        self.assertNotIn("Lock And Send For Signature", viewer_html)
+        self.assertNotIn('id="correctionForm"', viewer_html)
+        with self.assertRaises(HTTPException) as viewer_admin_denied:
+            await pay_view_page("admin", viewer_request)
+        self.assertEqual(viewer_admin_denied.exception.status_code, 403)
+
         admin_html = (await pay_view_page("admin", admin_request)).body.decode("utf-8")
         self.assertIn("Pay User Allowlist", admin_html)
         self.assertIn("Microsoft People", admin_html)
@@ -1398,6 +1759,8 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Remove Person", admin_html)
         self.assertIn("removePayProfile", admin_html)
         self.assertIn("mergedPayProfileRows", admin_html)
+        self.assertIn("Set Pay Viewer", admin_html)
+        self.assertIn("Pay Viewer role", admin_html)
         self.assertIn("Demo Mode", admin_html)
         self.assertIn('id="demoSettingsForm"', admin_html)
         self.assertIn("/pay/api/demo/settings", admin_html)
@@ -1486,7 +1849,12 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
             updated_by="admin@example.org",
         )
 
-        result = await import_pay_internal_users(PayInternalUserImportRequest(limit=50), request)
+        preview = await import_pay_internal_users(PayInternalUserImportRequest(limit=50), request)
+        self.assertEqual(preview["preview"], True)
+        self.assertEqual(preview["candidate_count"], 1)
+        self.assertIsNone(await pay_profile_by_email(self.db, email="paid.user@cwa3106.com"))
+
+        result = await import_pay_internal_users(PayInternalUserImportRequest(limit=50, confirm=True), request)
 
         self.assertEqual(graph.last_import_limit, 50)
         self.assertEqual(result["imported_count"], 1)
@@ -1526,13 +1894,26 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
             ),
             admin_request,
         )
+        viewer = await save_pay_internal_role(
+            InternalRoleAssignmentRequest(
+                principal_id="oid-viewer-1",
+                principal_email="viewer@cwa3106.com",
+                principal_display_name="Val Viewer",
+                role="pay_viewer",
+            ),
+            admin_request,
+        )
 
         settings = await pay_settings(self.db, pay_cfg=cfg.pay_portal)
         self.assertEqual(settings["president_email"], "president@cwa3106.com")
         context = await pay_context(admin_request)
         self.assertEqual(
             {(row["principal_email"], row["role"]) for row in context["internal_roles"]},
-            {("president@cwa3106.com", "president"), ("treasurer@cwa3106.com", "treasurer")},
+            {
+                ("president@cwa3106.com", "president"),
+                ("treasurer@cwa3106.com", "treasurer"),
+                ("viewer@cwa3106.com", "pay_viewer"),
+            },
         )
         profile = await create_pay_profile(
             PayProfileUpsertRequest(
@@ -1561,11 +1942,23 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         redirect = await pay_page(treasurer_request)
         self.assertEqual(redirect.headers["location"], "/pay/treasurer")
 
+        viewer_request = _Request(
+            state=SimpleNamespace(cfg=cfg, db=self.db),
+            session=self._staff_session("officer", email="viewer@cwa3106.com"),
+        )
+        viewer_redirect = await pay_page(viewer_request)
+        self.assertEqual(viewer_redirect.headers["location"], "/pay/treasurer")
+        viewer_context = await pay_context(viewer_request)
+        self.assertEqual(viewer_context["actor"]["role"], "pay_viewer")
+        self.assertTrue(viewer_context["actor"]["can_view_all"])
+        self.assertFalse(viewer_context["actor"]["can_lock"])
+
         deleted = await remove_pay_internal_role(int(president["assignment_id"]), admin_request)
         self.assertEqual(deleted["role"], "president")
         settings_after_delete = await pay_settings(self.db, pay_cfg=cfg.pay_portal)
         self.assertEqual(settings_after_delete["president_email"], "")
         self.assertEqual(treasurer["role"], "treasurer")
+        self.assertEqual(viewer["role"], "pay_viewer")
 
     async def test_treasurer_can_remove_pay_profile_from_people_roster(self) -> None:
         cfg = self._cfg()
@@ -1598,7 +1991,10 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         removed = await remove_pay_profile("remove.me@example.org", admin_request)
 
         self.assertEqual(removed["removed"]["principal_email"], "remove.me@example.org")
-        self.assertIsNone(await pay_profile_by_email(self.db, email="remove.me@example.org"))
+        disabled = await pay_profile_by_email(self.db, email="remove.me@example.org")
+        self.assertIsNotNone(disabled)
+        self.assertEqual(disabled["status"], "disabled")
+        self.assertIsNone(await pay_profile_by_email(self.db, email="remove.me@example.org", active_only=True))
         with self.assertRaises(HTTPException) as denied:
             await remove_pay_profile("remove.me@example.org", officer_request)
         self.assertEqual(denied.exception.status_code, 403)
@@ -1617,7 +2013,7 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
                 principal_display_name="Member Example",
                 pay_basis="hourly",
                 base_wage_input_type="weekly",
-                base_wage_amount=2000,
+                base_wage_amount=45,
                 weekly_basis_hours=40,
             ),
             admin_request,
@@ -1628,7 +2024,7 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
                 principal_display_name="Member Example",
                 pay_basis="weekly",
                 base_wage_input_type="hourly",
-                base_wage_amount=55,
+                base_wage_amount=2000,
                 weekly_basis_hours=40,
             ),
             admin_request,
@@ -1646,17 +2042,16 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(hourly["pay_basis"], "hourly")
-        self.assertEqual(hourly["base_wage_input_type"], "weekly")
-        self.assertEqual(hourly["base_wage_amount"], 2000.0)
-        self.assertEqual(hourly["calculated_hourly_rate"], 50.0)
+        self.assertEqual(hourly["base_wage_input_type"], "hourly")
+        self.assertEqual(hourly["calculated_hourly_rate"], 45.0)
         self.assertEqual(weekly["pay_basis"], "weekly")
-        self.assertEqual(weekly["base_wage_input_type"], "hourly")
-        self.assertEqual(weekly["base_wage_amount"], 55.0)
-        self.assertEqual(weekly["calculated_hourly_rate"], 55.0)
+        self.assertEqual(weekly["base_wage_input_type"], "weekly")
+        self.assertEqual(weekly["base_wage_amount"], 2000.0)
+        self.assertEqual(weekly["calculated_hourly_rate"], 50.0)
         self.assertEqual(hourly_again["pay_basis"], "hourly")
-        self.assertEqual(hourly_again["base_wage_input_type"], "weekly")
+        self.assertEqual(hourly_again["base_wage_input_type"], "hourly")
         self.assertEqual(hourly_again["base_wage_amount"], 55.0)
-        self.assertEqual(hourly_again["calculated_hourly_rate"], 1.38)
+        self.assertEqual(hourly_again["calculated_hourly_rate"], 55.0)
 
     async def test_pay_profile_self_service_permissions(self) -> None:
         cfg = self._cfg()
@@ -1679,9 +2074,26 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
             officer_request,
         )
         self.assertEqual(own_profile["principal_email"], "officer@example.org")
-        self.assertEqual(own_profile["pay_basis"], "hourly")
+        self.assertEqual(own_profile["pay_basis"], "expense_only")
         self.assertEqual(own_profile["status"], "active")
         self.assertEqual(own_profile["updated_by"], "officer@example.org")
+        self.assertTrue(own_profile["pending_wage_approval"])
+        self.assertEqual(own_profile["pending_profile_change"]["pay_basis"], "hourly")
+        pending_rows = await list_pay_profile_change_requests(self.db, email="officer@example.org", pending_only=True)
+        self.assertEqual(len(pending_rows), 1)
+        admin_request = _Request(
+            state=SimpleNamespace(cfg=cfg, db=self.db),
+            session=self._staff_session("admin", email="admin@example.org"),
+        )
+        approved_change = await review_pay_profile_change(
+            str(own_profile["pending_profile_change"]["id"]),
+            PayProfileChangeReviewRequest(approved=True),
+            admin_request,
+        )
+        self.assertEqual(approved_change["status"], "approved")
+        active_self_profile = await pay_profile_by_email(self.db, email="officer@example.org", active_only=True)
+        self.assertEqual(active_self_profile["pay_basis"], "hourly")
+        self.assertEqual(active_self_profile["calculated_hourly_rate"], 42.0)
 
         cfg.external_steward_auth.enabled = True
         now = pay_portal.utcnow()
@@ -1742,8 +2154,10 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
             external_request,
         )
         self.assertEqual(external_profile["principal_email"], "guest@example.org")
-        self.assertEqual(external_profile["pay_basis"], "commission")
+        self.assertEqual(external_profile["pay_basis"], "expense_only")
         self.assertEqual(external_profile["updated_by"], "guest@example.org")
+        self.assertTrue(external_profile["pending_wage_approval"])
+        self.assertEqual(external_profile["pending_profile_change"]["pay_basis"], "commission")
 
         with self.assertRaises(HTTPException) as other_denied:
             await create_pay_profile(
@@ -1771,10 +2185,6 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(president_denied.exception.status_code, 403)
 
-        admin_request = _Request(
-            state=SimpleNamespace(cfg=cfg, db=self.db),
-            session=self._staff_session("admin", email="admin@example.org"),
-        )
         president_profile = await create_pay_profile(
             PayProfileUpsertRequest(
                 principal_email="president@example.org",
@@ -1806,8 +2216,10 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
             president_request,
         )
         self.assertEqual(updated_president_profile["pay_basis"], "president")
-        self.assertEqual(updated_president_profile["base_wage_amount"], 47.0)
+        self.assertEqual(updated_president_profile["base_wage_amount"], 45.0)
         self.assertEqual(updated_president_profile["updated_by"], "president@example.org")
+        self.assertTrue(updated_president_profile["pending_wage_approval"])
+        self.assertEqual(updated_president_profile["pending_profile_change"]["base_wage_amount"], 47.0)
 
     async def test_irs_rate_parser_detects_official_business_rate(self) -> None:
         candidates = parse_irs_mileage_rate_candidates(
@@ -2070,6 +2482,61 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(grey_totals[4].text, "$ 22.50")
         self.assertEqual(grey_totals[6].text, "$ 10.00")
         self.assertEqual(grey_totals[7].text, "$ 360.05")
+
+    def test_voucher_signature_lines_use_submitter_name_and_president_approval_anchor(self) -> None:
+        template_path = Path(self.tmpdir.name) / "signature-template.docx"
+        visible_path = Path(self.tmpdir.name) / "signature-visible.docx"
+        anchor_path = Path(self.tmpdir.name) / "signature-anchor.docx"
+        doc = Document()
+        for text in ("Local #", "Name", "Address", "Hourly Rate"):
+            doc.add_paragraph(text)
+        doc.add_paragraph("Signature\t Signature\t Paid by")
+        doc.add_paragraph("Expense Incurred By\tApproved By\tCheck No.")
+        doc.save(template_path)
+        entries = [
+            {
+                "entry_date": "2026-05-04",
+                "display_name": "Nick Craig",
+                "user_email": "nick@example.org",
+                "local_number": "3106",
+                "hours": 2.0,
+                "lost_wage_hourly_rate": 52.25,
+            }
+        ]
+
+        pay_portal.fill_pay_voucher_docx(
+            template_path=str(template_path),
+            output_path=str(visible_path),
+            period_start="2026-05-03",
+            period_end="2026-05-16",
+            entries=entries,
+            include_signature_placeholders=False,
+        )
+        visible = Document(visible_path)
+        visible_signature = [paragraph.text for paragraph in visible.paragraphs if "Paid by" in paragraph.text][0]
+
+        self.assertEqual(visible_signature, "Nick Craig\tSignature\tPaid by")
+
+        pay_portal.fill_pay_voucher_docx(
+            template_path=str(template_path),
+            output_path=str(anchor_path),
+            period_start="2026-05-03",
+            period_end="2026-05-16",
+            entries=entries,
+            include_signature_placeholders=True,
+            paid_by_signer_index=1,
+        )
+        anchor_doc = Document(anchor_path)
+        anchor_signature = [paragraph.text for paragraph in anchor_doc.paragraphs if "Paid by" in paragraph.text][0]
+        signature_fields = anchor_signature.split("\t")
+
+        self.assertEqual(signature_fields[0], "Nick Craig")
+        self.assertIn("{{Sig_es_:signer1:signer1_signature}}", signature_fields[1])
+        self.assertIn("{{Dte_es_:signer1:signer1_date}}", signature_fields[1])
+        self.assertEqual(signature_fields[2], "Paid by")
+        self.assertNotIn("Submitted electronically", anchor_signature)
+        placeholder_run = next(run for run in anchor_doc.paragraphs[4].runs if "{{Sig_es_" in run.text)
+        self.assertEqual(round(float(placeholder_run.font.size.pt), 1), 4.0)
 
     def test_voucher_narrative_line_splits_date_label_for_back_page(self) -> None:
         label, narrative = pay_portal._split_narrative_line(  # noqa: SLF001
@@ -2368,7 +2835,7 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
             data={
                 "entry_date": "2026-05-10",
                 "display_name": "President",
-                "hours": 1,
+                "hours": 5,
                 "president_diff_hours": 3,
             },
             pay_cfg=self._cfg().pay_portal,
@@ -2380,6 +2847,7 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry["hourly_rate"], 62.0)
         self.assertEqual(entry["president_diff_hours"], 3.0)
         self.assertEqual(entry["president_diff_amount"], 51.0)
+        self.assertEqual(entry["hours"] + entry["president_diff_hours"], 8.0)
         treasurer_entry = await upsert_entry(
             self.db,
             period_id=str(period["id"]),
@@ -2388,7 +2856,7 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
                 "user_email": "president@example.org",
                 "entry_date": "2026-05-11",
                 "display_name": "President",
-                "hours": 1,
+                "hours": 6,
                 "president_diff_hours": 2,
             },
             pay_cfg=self._cfg().pay_portal,
@@ -2396,6 +2864,7 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(treasurer_entry["lost_wage_hourly_rate"], 62.0)
         self.assertEqual(treasurer_entry["president_diff_hours"], 2.0)
         self.assertEqual(treasurer_entry["president_diff_amount"], 34.0)
+        self.assertEqual(treasurer_entry["hours"] + treasurer_entry["president_diff_hours"], 8.0)
         president_actor_entry = await upsert_entry(
             self.db,
             period_id=str(period["id"]),
@@ -2411,7 +2880,7 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
             data={
                 "entry_date": "2026-05-12",
                 "display_name": "President",
-                "hours": 1,
+                "hours": 5.5,
                 "president_diff_hours": 2.5,
             },
             pay_cfg=self._cfg().pay_portal,
@@ -2419,6 +2888,7 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(president_actor_entry["lost_wage_hourly_rate"], 62.0)
         self.assertEqual(president_actor_entry["president_diff_hours"], 2.5)
         self.assertEqual(president_actor_entry["president_diff_amount"], 42.5)
+        self.assertEqual(president_actor_entry["hours"] + president_actor_entry["president_diff_hours"], 8.0)
 
     async def test_president_scheduled_hours_cap_includes_union_and_differential_hours(self) -> None:
         await upsert_wage_scale(
@@ -2456,18 +2926,82 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
             self.db,
             period_id=str(period["id"]),
             actor=actor,
-            data={"entry_date": "2026-05-11", "hours": 30, "president_diff_hours": 2},
+            data={"entry_date": "2026-05-11", "hours": 8, "president_diff_hours": 0},
             pay_cfg=self._cfg().pay_portal,
         )
-        self.assertEqual(fills_week["hours"], 30.0)
-        self.assertEqual(fills_week["president_diff_hours"], 2.0)
+        self.assertEqual(fills_week["hours"], 8.0)
+        self.assertEqual(fills_week["president_diff_hours"], 0.0)
+
+        for index in range(2, 5):
+            fill_day = await upsert_entry(
+                self.db,
+                period_id=str(period["id"]),
+                actor=actor,
+                data={"entry_date": f"2026-05-{10 + index}", "hours": 8, "president_diff_hours": 0},
+                pay_cfg=self._cfg().pay_portal,
+            )
+            self.assertEqual(fill_day["hours"] + fill_day["president_diff_hours"], 8.0)
 
         with self.assertRaisesRegex(ValueError, "cannot exceed 40"):
             await upsert_entry(
                 self.db,
                 period_id=str(period["id"]),
                 actor=actor,
-                data={"entry_date": "2026-05-12", "hours": 0, "president_diff_hours": 0.25},
+                data={"entry_date": "2026-05-15", "hours": 0, "president_diff_hours": 8},
+                pay_cfg=self._cfg().pay_portal,
+            )
+
+    async def test_president_daily_hours_are_forced_to_eight_when_used(self) -> None:
+        await upsert_wage_scale(
+            self.db,
+            effective_date="2026-01-01",
+            weekly_basis_hours=40,
+            target_weekly_amount=2065.50,
+            actual_weekly_amount=None,
+            target_multiplier=1.20,
+            target_scale="36",
+            actual_scale="base",
+            notes=None,
+            updated_by="test",
+        )
+        period = await pay_portal.ensure_pay_period(self.db, for_date=date.fromisoformat("2026-05-10"))
+        actor = PayActor("president@example.org", "President", "president", True, False, False, is_president=True)
+        await self._save_profile(
+            email="president@example.org",
+            display_name="President",
+            pay_basis="president",
+            base_wage_input_type="hourly",
+            base_wage_amount=45,
+        )
+
+        corrected = await upsert_entry(
+            self.db,
+            period_id=str(period["id"]),
+            actor=actor,
+            data={"entry_date": "2026-05-10", "hours": 5, "president_diff_hours": 1},
+            pay_cfg=self._cfg().pay_portal,
+        )
+        diff_only = await upsert_entry(
+            self.db,
+            period_id=str(period["id"]),
+            actor=actor,
+            data={"entry_date": "2026-05-11", "hours": 0, "president_diff_hours": 2},
+            pay_cfg=self._cfg().pay_portal,
+        )
+
+        self.assertEqual(corrected["hours"], 5.0)
+        self.assertEqual(corrected["president_diff_hours"], 3.0)
+        self.assertEqual(corrected["hours"] + corrected["president_diff_hours"], 8.0)
+        self.assertEqual(diff_only["hours"], 0.0)
+        self.assertEqual(diff_only["president_diff_hours"], 8.0)
+        self.assertEqual(diff_only["hours"] + diff_only["president_diff_hours"], 8.0)
+
+        with self.assertRaisesRegex(ValueError, "cannot exceed 8"):
+            await upsert_entry(
+                self.db,
+                period_id=str(period["id"]),
+                actor=actor,
+                data={"entry_date": "2026-05-12", "hours": 8.25, "president_diff_hours": 0},
                 pay_cfg=self._cfg().pay_portal,
             )
 
@@ -2715,6 +3249,43 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry["submitter_certified_by"], "member@example.org")
         self.assertEqual(entry["submitter_certification_text"], "I certify this entry.")
 
+    async def test_entry_api_requires_submitter_certification(self) -> None:
+        cfg = self._cfg()
+        cfg.officer_auth.enabled = True
+        request = _Request(
+            state=SimpleNamespace(cfg=cfg, db=self.db),
+            session=self._staff_session("officer", email="member@example.org"),
+        )
+        period = await pay_portal.ensure_pay_period(self.db, for_date=date.fromisoformat("2026-05-10"))
+
+        with self.assertRaises(HTTPException) as denied:
+            await save_pay_entry(
+                PayEntryUpsertRequest(
+                    period_id=str(period["id"]),
+                    entry_date="2026-05-10",
+                    mileage_miles=2,
+                    mileage_rate=0.725,
+                    mileage_amount=1.45,
+                ),
+                request,
+            )
+
+        self.assertEqual(denied.exception.status_code, 400)
+        self.assertIn("submitter certification", str(denied.exception.detail))
+
+        saved = await save_pay_entry(
+            PayEntryUpsertRequest(
+                period_id=str(period["id"]),
+                entry_date="2026-05-10",
+                mileage_miles=2,
+                mileage_rate=0.725,
+                mileage_amount=1.45,
+                submitter_certified=True,
+            ),
+            request,
+        )
+        self.assertEqual(saved["submitter_certified_by"], "member@example.org")
+
     async def test_pay_packet_signer_order_routes_only_to_president(self) -> None:
         signers, president_index = pay_packet_signer_order(
             grouped_entry_emails=["member@example.org", "President@Example.Org", "other@example.org"],
@@ -2863,6 +3434,7 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
             review_status="rejected",
             review_note="wrong period",
         )
+        await self._approve_period_entries(str(period["id"]), exclude_ids={str(rejected["id"])})
 
         voucher_fill_calls: list[tuple[str, list[str]]] = []
 
@@ -2907,6 +3479,27 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(packet_text.index("02-Vicky Goll.pdf"), packet_text.index("vicky-receipt.pdf"))
         self.assertNotIn("nick-rejected.pdf", packet_text)
 
+    async def test_pay_upload_uses_pay_portal_sharepoint_site_override(self) -> None:
+        cfg = self._cfg()
+        cfg.pay_portal.sharepoint_site_hostname = "cwa3106.sharepoint.com"
+        cfg.pay_portal.sharepoint_site_path = "/sites/OfficerEboardcommittee"
+        local_file = Path(self.tmpdir.name) / "packet.pdf"
+        local_file.write_bytes(b"%PDF-1.4\npay packet\n")
+        graph = _FakeGraph()
+
+        web_url, sp_path = await pay_portal._upload_if_configured(  # noqa: SLF001
+            cfg=cfg,
+            graph=graph,
+            folder_path="Local3106/Pay Portal/2026/test",
+            filename="packet.pdf",
+            local_path=str(local_file),
+        )
+
+        self.assertTrue(web_url)
+        self.assertEqual(sp_path, "Local3106/Pay Portal/2026/test/packet.pdf")
+        self.assertEqual(graph.calls[0]["site_hostname"], "cwa3106.sharepoint.com")
+        self.assertEqual(graph.calls[0]["site_path"], "/sites/OfficerEboardcommittee")
+
     async def test_lock_period_builds_voucher_first_packet_and_sends_docuseal(self) -> None:
         cfg = self._cfg()
         await pay_portal.save_pay_settings(
@@ -2916,8 +3509,10 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         )
         actor = PayActor("treasurer@example.org", "Treasurer", "treasurer", True, True, True)
         period_id, _ = await self._open_period_and_entry(actor=actor)
+        await self._approve_period_entries(period_id)
         graph = _FakeGraph()
         docuseal = _FakeDocuSeal()
+        mailer = _FakeMailer()
         with patch("grievance_api.services.pay_portal.fill_pay_voucher_docx", _fake_fill_docx), patch(
             "grievance_api.services.pay_portal.merge_pdfs",
             _fake_merge,
@@ -2931,12 +3526,24 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
                 actor=actor,
                 president_signer_email=None,
                 docx_to_pdf_func=_fake_docx_to_pdf,
-        )
+                mailer=mailer,
+            )
 
         self.assertEqual(result["status"], "awaiting_signature")
+        self.assertTrue(graph.calls)
+        self.assertTrue(
+            all(call["library"] == "Documents" for call in graph.calls)
+        )
+        self.assertTrue(
+            all(str(call["folder_path"]).startswith("Local3106/Pay Portal/") for call in graph.calls)
+        )
         self.assertEqual(docuseal.create_calls[0]["signers"], ["president@example.org"])
         self.assertEqual(result["signer_order"], ["president@example.org"])
         self.assertEqual(result["signing_link"], "https://docuseal.local/sign/1")
+        self.assertTrue(result["president_email_sent"])
+        self.assertEqual(mailer.calls[0]["to_recipients"], ["president@example.org"])
+        self.assertIn("https://docuseal.local/sign/1", mailer.calls[0]["text_body"])
+        self.assertIn("Pay packet ready for signature", mailer.calls[0]["subject"])
         self.assertEqual(docuseal.create_calls[0]["metadata"]["president_signer_email"], "president@example.org")
         self.assertIn(b".pdf", docuseal.create_calls[0]["pdf_bytes"])
         packet_row = await self.db.fetchone("SELECT status, docuseal_submission_id FROM pay_packets WHERE period_id=?", (period_id,))
@@ -2951,7 +3558,7 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         unsigned = packet_dir / "unsigned.pdf"
         unsigned.write_bytes(b"%PDF-1.4\nunsigned\n")
         await self.db.exec(
-            "UPDATE pay_periods SET status='awaiting_signature', sharepoint_folder_path='Pay Portal/2026/test' WHERE id=?",
+            "UPDATE pay_periods SET status='awaiting_signature', sharepoint_folder_path='Local3106/Pay Portal/2026/test' WHERE id=?",
             (period_id,),
         )
         await self.db.exec(
@@ -2992,6 +3599,134 @@ class PayPortalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(packet_row[0], "completed")
         self.assertTrue(Path(packet_row[1]).exists())
         self.assertEqual(mailer.calls[0]["to_recipients"], ["treasurer@example.org"])
+
+    async def test_pay_docuseal_completion_saves_direct_signed_pdf_artifact(self) -> None:
+        cfg = self._cfg()
+        period_id, _ = await self._open_period_and_entry()
+        packet_dir = Path(self.data_root) / "pay" / period_id / "packet" / "packet-1"
+        packet_dir.mkdir(parents=True)
+        unsigned = packet_dir / "unsigned.pdf"
+        unsigned.write_bytes(b"%PDF-1.4\nunsigned\n")
+        await self.db.exec(
+            "UPDATE pay_periods SET status='awaiting_signature', sharepoint_folder_path='Local3106/Pay Portal/2026/test' WHERE id=?",
+            (period_id,),
+        )
+        await self.db.exec(
+            """INSERT INTO pay_packets(
+                 id, period_id, revision, status, voucher_paths_json, voucher_pdf_paths_json,
+                 unsigned_packet_path, unsigned_packet_sha256, docuseal_submission_id,
+                 created_at_utc, updated_at_utc
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "packet-1",
+                period_id,
+                1,
+                "awaiting_signature",
+                "[]",
+                "[]",
+                str(unsigned),
+                "sha",
+                "pay-ds-1",
+                "now",
+                "now",
+            ),
+        )
+
+        result = await handle_pay_docuseal_completion(
+            db=self.db,
+            cfg=cfg,
+            graph=_FakeGraph(),
+            mailer=_FakeMailer(),
+            docuseal=_FakeDocuSealDirectSignedPdf(),
+            submission_id="pay-ds-1",
+            payload={"event_type": "completed"},
+        )
+
+        self.assertEqual(result["handled"], True)
+        packet_row = await self.db.fetchone("SELECT status, signed_packet_path, audit_zip_path FROM pay_packets WHERE id='packet-1'")
+        self.assertEqual(packet_row[0], "completed")
+        self.assertTrue(str(packet_row[1]).endswith("_signed.pdf"))
+        self.assertEqual(Path(packet_row[1]).read_bytes(), b"%PDF-1.4\ndirect signed packet\n")
+        self.assertIsNone(packet_row[2])
+
+    async def test_pay_docuseal_completion_does_not_record_unsigned_packet_as_signed(self) -> None:
+        cfg = self._cfg()
+        period_id, _ = await self._open_period_and_entry()
+        packet_dir = Path(self.data_root) / "pay" / period_id / "packet" / "packet-1"
+        packet_dir.mkdir(parents=True)
+        unsigned = packet_dir / "unsigned.pdf"
+        unsigned.write_bytes(b"%PDF-1.4\nunsigned\n")
+        await self.db.exec(
+            "UPDATE pay_periods SET status='awaiting_signature', sharepoint_folder_path='Local3106/Pay Portal/2026/test' WHERE id=?",
+            (period_id,),
+        )
+        await self.db.exec(
+            """INSERT INTO pay_packets(
+                 id, period_id, revision, status, voucher_paths_json, voucher_pdf_paths_json,
+                 unsigned_packet_path, unsigned_packet_sha256, docuseal_submission_id,
+                 created_at_utc, updated_at_utc
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "packet-1",
+                period_id,
+                1,
+                "awaiting_signature",
+                "[]",
+                "[]",
+                str(unsigned),
+                "sha",
+                "pay-ds-1",
+                "now",
+                "now",
+            ),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "signed pay packet PDF"):
+            await handle_pay_docuseal_completion(
+                db=self.db,
+                cfg=cfg,
+                graph=_FakeGraph(),
+                mailer=_FakeMailer(),
+                docuseal=_FakeDocuSealMissingArtifacts(),
+                submission_id="pay-ds-1",
+                payload={"event_type": "completed"},
+            )
+
+        packet_row = await self.db.fetchone("SELECT status, signed_packet_path FROM pay_packets WHERE id='packet-1'")
+        self.assertEqual(packet_row[0], "awaiting_signature")
+        self.assertIsNone(packet_row[1])
+        event = await self.db.fetchone(
+            "SELECT event_type, details_json FROM pay_events WHERE packet_id='packet-1' ORDER BY ts_utc DESC LIMIT 1"
+        )
+        self.assertEqual(event[0], "docuseal_completion_missing_signed_artifact")
+        self.assertEqual(json.loads(event[1])["docuseal_submission_id"], "pay-ds-1")
+
+    def test_docuseal_completed_artifacts_falls_back_to_documents_endpoint(self) -> None:
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        def fake_get(url: str, **kwargs):  # noqa: ANN001, ANN003
+            calls.append((url, dict(kwargs)))
+            if url.endswith("/completed.zip") or url.endswith("/download"):
+                return _DocuSealHttpResponse(status_code=404, text="not found")
+            if url.endswith("/documents"):
+                return _DocuSealHttpResponse(
+                    json_payload={"documents": [{"url": "/rails/active_storage/blobs/signed-packet.pdf"}]}
+                )
+            if url.endswith("/rails/active_storage/blobs/signed-packet.pdf"):
+                return _DocuSealHttpResponse(content=b"%PDF-1.4\nsigned via documents\n")
+            if url.endswith("/api/submissions/pay-ds-1"):
+                return _DocuSealHttpResponse(json_payload={"id": "pay-ds-1"})
+            raise AssertionError(f"unexpected URL {url}")
+
+        with patch("grievance_api.services.docuseal_client.requests.get", side_effect=fake_get):
+            artifacts = DocuSealClient("https://docuseal.local", "token").download_completed_artifacts(
+                submission_id="pay-ds-1"
+            )
+
+        self.assertIsNone(artifacts["completed_zip_bytes"])
+        self.assertEqual(artifacts["signed_pdf_bytes"], b"%PDF-1.4\nsigned via documents\n")
+        documents_call = next(call for call in calls if call[0].endswith("/documents"))
+        self.assertEqual(documents_call[1]["params"], {"merge": "true"})
 
     async def test_create_revision_opens_new_period_revision(self) -> None:
         period_id, _ = await self._open_period_and_entry()

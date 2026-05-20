@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 
 from fastapi import FastAPI
@@ -19,6 +21,7 @@ from .services.notification_service import NotificationService
 from .services.outreach_service import OutreachService
 from .services.referral_service import ReferralService
 from .services.sharepoint_graph import GraphUploader
+from .services.statement_auto_sign import run_statement_auto_sign_worker, statement_auto_sign_enabled
 from .web.routes_approval import router as approval_router
 from .web.routes_health import router as health_router
 from .web.routes_hosted_forms import router as hosted_forms_router
@@ -160,8 +163,26 @@ def create_app() -> FastAPI:
     )
 
     @app.on_event("startup")
-    async def _seed_outreach_data() -> None:
+    async def _startup_services() -> None:
         await app.state.outreach.ensure_seed_data()
+        app.state.statement_auto_sign_worker = None
+        if statement_auto_sign_enabled(cfg):
+            app.state.statement_auto_sign_worker = asyncio.create_task(
+                run_statement_auto_sign_worker(
+                    cfg=cfg,
+                    db=app.state.db,
+                    docuseal=app.state.docuseal,
+                    logger=app.state.logger,
+                )
+            )
+
+    @app.on_event("shutdown")
+    async def _shutdown_services() -> None:
+        worker = getattr(app.state, "statement_auto_sign_worker", None)
+        if worker:
+            worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await worker
 
     app.include_router(health_router)
     app.include_router(officer_auth_router)

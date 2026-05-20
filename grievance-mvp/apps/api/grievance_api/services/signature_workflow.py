@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from ..db.db import Db
 from .notification_service import NotificationService
+from .statement_auto_sign import maybe_enqueue_statement_auto_sign_job
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ async def send_document_for_signature(
     signer_order: list[str],
     correlation_id: str,
     idempotency_prefix: str,
+    signature_attestation: dict[str, object] | None = None,
 ) -> SignatureDispatchOutcome:
     normalized_signers = normalize_signers(signer_order, fallback_email=None)
     if not normalized_signers:
@@ -118,7 +120,7 @@ async def send_document_for_signature(
             signer_links_by_email = docuseal.extract_signing_links_by_email(submission.raw)
         except Exception:
             signer_links_by_email = {}
-        if not signer_links_by_email:
+        if not signer_links_by_email and not (len(normalized_signers) == 1 and signing_link):
             try:
                 signer_links_by_email = docuseal.fetch_signing_links_by_email(submission_id=submission.submission_id)
             except Exception:
@@ -153,6 +155,29 @@ async def send_document_for_signature(
             "sent_for_signature",
             {"submission_id": submission.submission_id, "doc_type": doc_type},
         )
+        try:
+            await maybe_enqueue_statement_auto_sign_job(
+                cfg=cfg,
+                db=db,
+                case_id=case_id,
+                document_id=document_id,
+                doc_type=doc_type,
+                template_key=template_key,
+                submission_id=submission.submission_id,
+                signer_order=normalized_signers,
+                attestation=signature_attestation,
+            )
+        except Exception as exc:
+            await db.add_event(
+                case_id,
+                document_id,
+                "statement_auto_sign_enqueue_failed",
+                {"error": str(exc), "submission_id": submission.submission_id},
+            )
+            logger.exception(
+                "statement_auto_sign_enqueue_failed",
+                extra={"correlation_id": correlation_id, "document_id": document_id},
+            )
 
         if cfg.email.enabled and (signing_link or signer_links_by_email):
             for signer in normalized_signers:

@@ -85,6 +85,36 @@ def migrate(db_path: str) -> None:
 
         con.execute(
             """
+            CREATE TABLE IF NOT EXISTS statement_auto_sign_jobs (
+              id TEXT PRIMARY KEY,
+              case_id TEXT NOT NULL,
+              document_id TEXT NOT NULL,
+              docuseal_submission_id TEXT NOT NULL,
+              signer_email TEXT NOT NULL,
+              signer_name TEXT NOT NULL,
+              run_after_utc TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'pending',
+              attempts INTEGER NOT NULL DEFAULT 0,
+              locked_at_utc TEXT,
+              locked_by TEXT,
+              completed_at_utc TEXT,
+              failed_at_utc TEXT,
+              last_error TEXT,
+              created_at_utc TEXT NOT NULL,
+              updated_at_utc TEXT NOT NULL,
+              UNIQUE(document_id)
+            )
+            """
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_statement_auto_sign_jobs_due ON statement_auto_sign_jobs(status, run_after_utc)"
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_statement_auto_sign_jobs_submission ON statement_auto_sign_jobs(docuseal_submission_id)"
+        )
+
+        con.execute(
+            """
             CREATE TABLE IF NOT EXISTS internal_role_assignments (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               principal_id TEXT,
@@ -342,6 +372,44 @@ def migrate(db_path: str) -> None:
         _ensure_column(con, "pay_profiles", "created_at_utc", "TEXT")
         _ensure_column(con, "pay_profiles", "updated_at_utc", "TEXT")
         _ensure_column(con, "pay_profiles", "updated_by", "TEXT")
+
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pay_profile_change_requests (
+              id TEXT PRIMARY KEY,
+              principal_id TEXT,
+              principal_email TEXT NOT NULL,
+              principal_display_name TEXT,
+              pay_basis TEXT NOT NULL DEFAULT 'expense_only',
+              base_wage_input_type TEXT NOT NULL DEFAULT 'hourly',
+              base_wage_amount REAL NOT NULL DEFAULT 0,
+              weekly_basis_hours REAL NOT NULL DEFAULT 40,
+              commission_month_1_amount REAL NOT NULL DEFAULT 0,
+              commission_month_2_amount REAL NOT NULL DEFAULT 0,
+              commission_month_3_amount REAL NOT NULL DEFAULT 0,
+              commission_average_monthly REAL NOT NULL DEFAULT 0,
+              commission_hourly_rate REAL NOT NULL DEFAULT 0,
+              calculated_hourly_rate REAL NOT NULL DEFAULT 0,
+              default_address TEXT,
+              profile_status TEXT NOT NULL DEFAULT 'active',
+              notes TEXT,
+              requested_by TEXT NOT NULL,
+              requested_at_utc TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'pending',
+              reviewed_by TEXT,
+              reviewed_at_utc TEXT,
+              review_note TEXT,
+              current_profile_json TEXT NOT NULL DEFAULT '{}',
+              requested_profile_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pay_profile_change_requests_email_status ON pay_profile_change_requests(principal_email, status)"
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pay_profile_change_requests_status ON pay_profile_change_requests(status, requested_at_utc)"
+        )
 
         _ensure_column(con, "pay_entries", "review_status", "TEXT NOT NULL DEFAULT 'pending'")
         _ensure_column(con, "pay_entries", "review_note", "TEXT")

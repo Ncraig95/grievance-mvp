@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..core.hmac_auth import compute_signature
 from ..db.db import Db, utcnow
+from ..services.statement_auto_sign import statement_auto_sign_delay_seconds, statement_auto_sign_enabled
 from .admin_common import parse_json_safely
 from .hosted_forms_registry import (
     HostedFormDefinition,
@@ -347,7 +348,7 @@ def _public_metadata(definition: HostedFormDefinition) -> tuple[tuple[str, str],
     return tuple(item for item in definition.metadata if item[0] == "Contract")
 
 
-def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: str) -> str:
+def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: str, cfg) -> str:  # noqa: ANN001
     title = escape(definition.title)
     description = escape(definition.description)
     fields_json = json.dumps(_field_payload(definition.fields), ensure_ascii=False)
@@ -367,7 +368,11 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
     )
     submit_path_js = json.dumps(submit_path)
     form_key_js = json.dumps(definition.form_key)
-    requires_attestation_js = json.dumps(_requires_signature_attestation(definition.form_key))
+    requires_attestation = _requires_signature_attestation(definition.form_key)
+    requires_attestation_js = json.dumps(requires_attestation)
+    auto_sign_enabled_js = json.dumps(bool(requires_attestation and statement_auto_sign_enabled(cfg)))
+    auto_sign_delay_js = json.dumps(statement_auto_sign_delay_seconds(cfg))
+    submit_label = "Submit and open signature" if requires_attestation else "Submit"
     return f"""<!doctype html>
 <html>
 <head>
@@ -591,6 +596,38 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
       color: #24313a;
       font-size: 13px;
     }}
+    .busy-overlay {{
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      background: rgba(18, 28, 35, 0.58);
+    }}
+    .busy-dialog {{
+      width: min(460px, 100%);
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: 0 28px 70px rgba(0, 0, 0, 0.22);
+      padding: 24px;
+      text-align: center;
+    }}
+    .busy-spinner {{
+      width: 44px;
+      height: 44px;
+      margin: 0 auto 14px;
+      border: 4px solid #d5e5e8;
+      border-top-color: var(--forms-green);
+      border-radius: 50%;
+      animation: spin 0.85s linear infinite;
+    }}
+    .busy-dialog h2 {{ margin: 0 0 8px; font-size: 21px; }}
+    .busy-dialog p {{ margin: 0; color: var(--muted); }}
+    .busy-detail {{ margin-top: 10px; font-size: 13px; color: var(--muted); }}
+    @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
     .hidden {{ display: none; }}
     .status pre:empty {{ display: none; }}
     @media (max-width: 620px) {{
@@ -611,10 +648,10 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
     </header>
     {metadata_block}
 
-    <form id="hostedForm">
+    <form id="hostedForm" data-document-command="{escape(definition.form_key, quote=True)}" data-document-command-label="document command">
       <div id="questions"></div>
       <div class="actions">
-        <button id="submitBtn" type="submit">Submit</button>
+        <button id="submitBtn" type="submit">{submit_label}</button>
         <button class="secondary" id="resetBtn" type="button">Clear form</button>
         <span id="savingText" class="hint hidden">Submitting...</span>
       </div>
@@ -628,10 +665,21 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
 
   </main>
 
+  <div id="waitOverlay" class="busy-overlay hidden" role="alertdialog" aria-modal="true" aria-labelledby="waitTitle" aria-describedby="waitMessage" tabindex="-1">
+    <div class="busy-dialog">
+      <div class="busy-spinner" aria-hidden="true"></div>
+      <h2 id="waitTitle">Preparing signature page</h2>
+      <p id="waitMessage">Please wait while the Statement of Occurrence is generated and DocuSeal is opened.</p>
+      <p id="waitDetail" class="busy-detail">Do not close or refresh this page.</p>
+    </div>
+  </div>
+
   <script>
     const FORM_KEY = {form_key_js};
     const FORM_ENDPOINT = {submit_path_js};
     const REQUIRES_SIGNATURE_ATTESTATION = {requires_attestation_js};
+    const AUTO_SIGN_FALLBACK_ENABLED = {auto_sign_enabled_js};
+    const AUTO_SIGN_DELAY_SECONDS = {auto_sign_delay_js};
     const fields = {fields_json};
     const fieldSections = {sections_json};
 
@@ -644,6 +692,11 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
     const statusTitle = document.getElementById('statusTitle');
     const statusMessage = document.getElementById('statusMessage');
     const statusDetails = document.getElementById('statusDetails');
+    const waitOverlay = document.getElementById('waitOverlay');
+    const waitTitle = document.getElementById('waitTitle');
+    const waitMessage = document.getElementById('waitMessage');
+    const waitDetail = document.getElementById('waitDetail');
+    let isSubmitting = false;
 
     function esc(value) {{
       return String(value == null ? '' : value)
@@ -777,6 +830,43 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
       statusDetails.textContent = details || '';
     }}
 
+    function statementWaitDetail() {{
+      if (REQUIRES_SIGNATURE_ATTESTATION && AUTO_SIGN_FALLBACK_ENABLED) {{
+        return `DocuSeal will open as soon as it is ready. If you do not finish signing there within ${{AUTO_SIGN_DELAY_SECONDS}} seconds, your checked consent authorizes a typed-signature fallback.`;
+      }}
+      return 'DocuSeal will open as soon as it is ready. Do not close or refresh this page.';
+    }}
+
+    function showWait(title, message, detail) {{
+      waitTitle.textContent = title || 'Preparing signature page';
+      waitMessage.textContent = message || 'Please wait while the document is generated.';
+      waitDetail.textContent = detail || statementWaitDetail();
+      waitOverlay.classList.remove('hidden');
+      waitOverlay.focus();
+    }}
+
+    function hideWait() {{
+      waitOverlay.classList.add('hidden');
+    }}
+
+    function setSubmitting(active, title, message, detail) {{
+      isSubmitting = Boolean(active);
+      submitBtn.disabled = isSubmitting;
+      resetBtn.disabled = isSubmitting;
+      savingText.classList.toggle('hidden', !isSubmitting);
+      if (isSubmitting) {{
+        showWait(title, message, detail);
+      }} else {{
+        hideWait();
+      }}
+    }}
+
+    window.addEventListener('beforeunload', (event) => {{
+      if (!isSubmitting) return;
+      event.preventDefault();
+      event.returnValue = '';
+    }});
+
     function collectPayload() {{
       const data = new FormData(form);
       const payload = {{ request_id: responseId() }};
@@ -841,10 +931,18 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
 
     async function submitForm(event) {{
       event.preventDefault();
+      if (isSubmitting) return;
       if (!validateChoiceButtons()) return;
       if (!form.reportValidity()) return;
-      submitBtn.disabled = true;
-      savingText.classList.remove('hidden');
+      let redirecting = false;
+      setSubmitting(
+        true,
+        REQUIRES_SIGNATURE_ATTESTATION ? 'Preparing signature page' : 'Submitting form',
+        REQUIRES_SIGNATURE_ATTESTATION
+          ? 'Please wait while the Statement of Occurrence is generated and DocuSeal is prepared.'
+          : 'Please wait while the form is submitted.',
+        statementWaitDetail()
+      );
       setStatus('', 'Processing', 'The form is being submitted. Any next step will open when it is ready.', null);
       try {{
         const response = await fetch(FORM_ENDPOINT, {{
@@ -858,19 +956,23 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
         if (!response.ok) throw {{ status: response.status, data }};
         const redirect = redirectInfo(data);
         if (redirect && redirect.url) {{
+          redirecting = true;
           setStatus('success', 'Ready to sign', 'Opening the signature page now.', '');
+          showWait('Opening DocuSeal', 'Your signature page is ready and will open now.', statementWaitDetail());
           window.setTimeout(() => {{
+            isSubmitting = false;
             window.location.assign(redirect.url);
-          }}, 650);
+          }}, 350);
         }} else {{
           setStatus('success', 'Submitted', successMessage(data), '');
+          form.reset();
         }}
-        form.reset();
       }} catch (error) {{
         setStatus('error', 'Submission failed', failureMessage(error), '');
       }} finally {{
-        submitBtn.disabled = false;
-        savingText.classList.add('hidden');
+        if (!redirecting) {{
+          setSubmitting(false);
+        }}
       }}
     }}
 
@@ -887,6 +989,7 @@ def _render_hosted_form_page(definition: HostedFormDefinition, *, submit_path: s
     }});
     form.addEventListener('submit', (event) => {{ void submitForm(event); }});
     resetBtn.addEventListener('click', () => {{
+      if (isSubmitting) return;
       form.reset();
       questions.querySelectorAll('[data-custom-choice-for]').forEach((input) => {{ input.value = ''; }});
       questions.querySelectorAll('input[type="hidden"]').forEach(syncChoiceButtons);
@@ -1513,7 +1616,7 @@ async def render_hosted_form_alias_page(
     )
     if isinstance(gate, RedirectResponse):
         return gate
-    return HTMLResponse(_render_hosted_form_page(definition, submit_path=submit_path))
+    return HTMLResponse(_render_hosted_form_page(definition, submit_path=submit_path, cfg=request.app.state.cfg))
 
 
 def _admin_row(definition: HostedFormDefinition, settings: HostedFormRuntimeSettings) -> HostedFormAdminRow:

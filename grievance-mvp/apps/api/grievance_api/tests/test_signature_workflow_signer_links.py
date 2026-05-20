@@ -49,6 +49,7 @@ class _FakeDocuSeal:
         self.fallback_link = fallback_link
         self.fetched_links = fetched_links or {}
         self.create_calls: list[dict] = []
+        self.fetch_calls: list[str] = []
 
     def create_submission(self, **kwargs):  # noqa: ANN003
         self.create_calls.append(kwargs)
@@ -68,7 +69,7 @@ class _FakeDocuSeal:
         return dict(self.per_signer_links)
 
     def fetch_signing_links_by_email(self, *, submission_id: str) -> dict[str, str]:
-        _ = submission_id
+        self.fetch_calls.append(submission_id)
         return dict(self.fetched_links)
 
 
@@ -208,6 +209,42 @@ class SignatureWorkflowSignerLinksTests(unittest.IsolatedAsyncioTestCase):
             by_recipient["grievant@example.org"]["context"]["docuseal_signing_url"],
             "https://docuseal.local/s/f-grievant",
         )
+
+    async def test_single_signer_shared_link_skips_extra_fetch(self) -> None:
+        db = _FakeDb()
+        notifications = _FakeNotifications()
+        docuseal = _FakeDocuSeal(
+            per_signer_links={},
+            fallback_link="https://docuseal.local/s/fallback",
+        )
+        cfg = SimpleNamespace(
+            email=SimpleNamespace(enabled=False),
+            docuseal=SimpleNamespace(template_ids={}, strict_template_ids=False, default_template_id=None),
+            document_policies={},
+        )
+
+        out = await send_document_for_signature(
+            cfg=cfg,
+            db=db,
+            logger=logging.getLogger("test.signature_workflow"),
+            docuseal=docuseal,
+            notifications=notifications,
+            case_id="C1",
+            grievance_id="2026001",
+            document_id="D1",
+            doc_type="statement_of_occurrence",
+            template_key="statement_of_occurrence",
+            pdf_bytes=b"%PDF",
+            alignment_pdf_bytes=None,
+            signer_order=["grievant@example.org"],
+            correlation_id="C1",
+            idempotency_prefix="intake:C1:D1",
+        )
+
+        self.assertEqual(out.status, "sent_for_signature")
+        self.assertEqual(out.signing_link, "https://docuseal.local/s/fallback")
+        self.assertEqual(docuseal.fetch_calls, [])
+
 
 
 if __name__ == "__main__":

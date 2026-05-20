@@ -5,14 +5,14 @@ from typing import Any
 from ..db.db import Db, utcnow
 
 
-INTERNAL_ROLE_VALUES = {"president", "treasurer"}
+INTERNAL_ROLE_VALUES = {"president", "treasurer", "pay_viewer"}
 INTERNAL_ROLE_STATUSES = {"active", "disabled"}
 
 
 def normalize_internal_role(value: object) -> str:
     role = str(value or "").strip().lower()
     if role not in INTERNAL_ROLE_VALUES:
-        raise ValueError("role must be president or treasurer")
+        raise ValueError("role must be president, treasurer, or pay_viewer")
     return role
 
 

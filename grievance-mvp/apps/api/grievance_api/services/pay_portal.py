@@ -7,6 +7,7 @@ import hashlib
 import html
 import io
 import json
+import logging
 import os
 import random
 import re
@@ -24,6 +25,7 @@ from uuid import uuid4
 
 import requests
 from docx import Document
+from docx.shared import Pt
 from PIL import Image
 
 from ..db.db import Db, utcnow
@@ -39,6 +41,7 @@ _MILES = Decimal("0.01")
 _METERS_PER_MILE = Decimal("1609.344")
 _COMMISSION_HOUR_DIVISOR = Decimal("160")
 _PAY_FORM_KEY = "pay_portal_packet"
+_PAY_PORTAL_LOGGER = logging.getLogger("grievance_api.pay_portal")
 _IRS_RATE_QUANT = Decimal("0.001")
 _GOOGLE_LEG_CACHE_LOCK = threading.Lock()
 _GOOGLE_LEG_CACHE: dict[tuple[str, str], dict[str, object]] = {}
@@ -55,6 +58,25 @@ _RECEIPT_CONTENT_TYPES = {
 }
 _PAY_PROFILE_BASIS_VALUES = {"hourly", "weekly", "commission", "president", "expense_only"}
 _PAY_PROFILE_STATUS_VALUES = {"active", "disabled"}
+
+
+def _pay_lock_log(stage: str, **fields: object) -> None:
+    safe_fields: dict[str, object] = {"stage": stage}
+    parts = [f"stage={stage}"]
+    for key, value in fields.items():
+        if value is None or isinstance(value, (str, int, float, bool)):
+            rendered: object = value
+        else:
+            rendered = str(value)
+        safe_fields[key] = rendered
+        parts.append(f"{key}={rendered!r}")
+    _PAY_PORTAL_LOGGER.info(
+        "pay_lock_send_stage %s",
+        " ".join(parts),
+        extra={"pay_portal": safe_fields},
+    )
+
+
 _DEFAULT_COMMON_PLACES: tuple[dict[str, str], ...] = (
     {"label": "Union Hall", "address": "4076 Union Hall Pl, Jacksonville, FL 32205, USA"},
     {"label": "Cumberland Industrial", "address": "350 Cumberland Industrial Ct, St. Augustine, FL 32095, USA"},
@@ -462,6 +484,18 @@ def pay_period_folder_path(*, root_folder: str, period_start: str, period_end: s
     return "/".join(part.strip("/") for part in (root_folder, year, label) if part.strip("/"))
 
 
+def mileage_legacy_report_folder_path(*, root_folder: str, report_date: str) -> str:
+    if not str(root_folder or "").strip():
+        return ""
+    parsed = datetime.strptime(str(report_date), "%Y-%m-%d").date()
+    month_folder = f"{parsed.month:02d} - {parsed.strftime('%B')}"
+    return "/".join(
+        part.strip("/")
+        for part in (root_folder, str(parsed.year), month_folder)
+        if part.strip("/")
+    )
+
+
 async def add_pay_event(
     db: Db,
     *,
@@ -730,6 +764,24 @@ def write_common_places_cache(*, data_root: str, places: object, source: str = "
     return path
 
 
+def _pay_graph_site(*, cfg: Any | None = None, graph_cfg: Any | None = None, pay_cfg: Any | None = None) -> tuple[str, str]:
+    if cfg is not None:
+        graph_cfg = getattr(cfg, "graph", graph_cfg)
+        pay_cfg = getattr(cfg, "pay_portal", pay_cfg)
+    hostname = str(getattr(pay_cfg, "sharepoint_site_hostname", "") or "").strip()
+    site_path = str(getattr(pay_cfg, "sharepoint_site_path", "") or "").strip()
+    if not hostname:
+        hostname = str(getattr(graph_cfg, "site_hostname", "") or "").strip()
+    if not site_path:
+        site_path = str(getattr(graph_cfg, "site_path", "") or "").strip()
+    return hostname, site_path
+
+
+def _pay_docx_pdf_graph_temp_folder(*, cfg: Any) -> str:
+    folder = str(getattr(getattr(cfg, "pay_portal", None), "docx_pdf_graph_temp_folder", "") or "").strip()
+    return folder or str(getattr(cfg, "docx_pdf_graph_temp_folder", "") or "").strip()
+
+
 def _sharepoint_place_config_targets(*, graph_cfg: Any, pay_cfg: Any) -> list[tuple[str, str]]:
     raw_folder_path = str(getattr(pay_cfg, "common_places_sharepoint_folder", "") or "").strip()
     if not raw_folder_path:
@@ -790,9 +842,10 @@ def load_sharepoint_common_places(
     last_error: Exception | None = None
     for library, folder_path in targets:
         try:
+            site_hostname, site_path = _pay_graph_site(graph_cfg=graph_cfg, pay_cfg=pay_cfg)
             files = list_files(
-                site_hostname=str(getattr(graph_cfg, "site_hostname", "") or ""),
-                site_path=str(getattr(graph_cfg, "site_path", "") or ""),
+                site_hostname=site_hostname,
+                site_path=site_path,
                 library=library,
                 folder_path=folder_path,
                 recursive=True,
@@ -1113,12 +1166,18 @@ def _demo_entries_for_packet(
         base_miles = Decimal("24.00")
     for entry_index, day_offset in enumerate(day_offsets, start=1):
         has_receipt = demo_step >= 3 and entry_index == len(day_offsets)
-        hours = Decimal(str(rng.choice(["2.00", "2.50", "3.00", "4.00", "6.00", "8.00"])))
+        if person.get("role") == "president":
+            hours = Decimal(str(rng.choice(["2.00", "3.00", "5.00", "6.00"])))
+        else:
+            hours = Decimal(str(rng.choice(["2.00", "2.50", "3.00", "4.00", "6.00", "8.00"])))
         misc_amount = Decimal(str(rng.choice(["12.50", "18.75", "24.00", "31.25"]))) if has_receipt else Decimal("0")
         meals_amount = Decimal(str(rng.choice(["15.00", "22.50", "28.00"]))) if has_receipt and entry_index % 2 == 0 else Decimal("0")
         normal_hourly_rate = Decimal("45.00") if person.get("role") == "president" else hourly_rate
         presidential_hourly_rate = Decimal("62.00") if person.get("role") == "president" else normal_hourly_rate
-        president_diff_hours = hours if person.get("role") == "president" and demo_step >= 3 else Decimal("0")
+        scheduled_hours = Decimal("8.00")
+        president_diff_hours = _quantity(scheduled_hours - hours) if person.get("role") == "president" and demo_step >= 3 else Decimal("0")
+        if president_diff_hours < 0:
+            president_diff_hours = Decimal("0")
         president_diff_rate = (presidential_hourly_rate - normal_hourly_rate).quantize(_CURRENCY, rounding=ROUND_HALF_UP) if president_diff_hours > 0 else Decimal("0")
         if president_diff_rate < 0:
             president_diff_rate = Decimal("0")
@@ -1126,6 +1185,8 @@ def _demo_entries_for_packet(
         note = rng.choice(_DEMO_NARRATIVE_PHRASES)
         if entry_index == 1:
             note = "reviewed route mileage, receipts, and pay profile rate for officer practice"
+        if person.get("role") == "president" and president_diff_hours > 0:
+            note = f"president demo split {hours:f} union hours from {president_diff_hours:f} scheduled employer-work differential hours"
         miles_multiplier = Decimal(str(rng.choice(["0.70", "0.85", "1.00", "1.15", "1.30"])))
         entry_miles = (base_miles * miles_multiplier).quantize(_MILES, rounding=ROUND_HALF_UP)
         entry_mileage_amount = (entry_miles * mileage_rate).quantize(_CURRENCY, rounding=ROUND_HALF_UP)
@@ -1370,10 +1431,10 @@ def generate_pay_demo_artifacts(
                 int(getattr(cfg, "libreoffice_timeout_seconds", 45) or 45),
                 engine=getattr(cfg, "docx_pdf_engine", "libreoffice"),
                 graph_uploader=graph,
-                graph_site_hostname=getattr(cfg.graph, "site_hostname", ""),
-                graph_site_path=getattr(cfg.graph, "site_path", ""),
+                graph_site_hostname=_pay_graph_site(cfg=cfg)[0],
+                graph_site_path=_pay_graph_site(cfg=cfg)[1],
                 graph_library=getattr(cfg.graph, "document_library", ""),
-                graph_temp_folder_path=getattr(cfg, "docx_pdf_graph_temp_folder", ""),
+                graph_temp_folder_path=_pay_docx_pdf_graph_temp_folder(cfg=cfg),
             )
         )
         packet_pdf_paths.extend([str(voucher_pdf_path), str(mileage_pdf_path)])
@@ -1896,6 +1957,7 @@ async def delete_pay_profile(
     db: Db,
     *,
     email: str,
+    actor: str | None = None,
 ) -> dict[str, object]:
     normalized_email = normalize_email(email)
     if not normalized_email:
@@ -1903,8 +1965,262 @@ async def delete_pay_profile(
     existing = await pay_profile_by_email(db, email=normalized_email)
     if not existing:
         raise ValueError("pay profile not found")
-    await db.exec("DELETE FROM pay_profiles WHERE principal_email=?", (normalized_email,))
-    return existing
+    now = utcnow()
+    await db.exec(
+        "UPDATE pay_profiles SET status='disabled', updated_at_utc=?, updated_by=? WHERE principal_email=?",
+        (now, actor, normalized_email),
+    )
+    await add_pay_event(
+        db,
+        period_id=None,
+        event_type="pay_profile_disabled",
+        actor=actor,
+        details={"principal_email": normalized_email, "previous_status": existing.get("status")},
+    )
+    disabled = await pay_profile_by_email(db, email=normalized_email)
+    return disabled or {**existing, "status": "disabled", "updated_at_utc": now, "updated_by": actor}
+
+
+def _pay_profile_wage_fields(profile: dict[str, object] | None) -> dict[str, object]:
+    profile = profile or {}
+    return {
+        "pay_basis": str(profile.get("pay_basis") or "expense_only"),
+        "base_wage_input_type": str(profile.get("base_wage_input_type") or "hourly"),
+        "base_wage_amount": float(_money(profile.get("base_wage_amount"))),
+        "weekly_basis_hours": float(_quantity(profile.get("weekly_basis_hours") or 40)),
+        "commission_month_1_amount": float(_money(profile.get("commission_month_1_amount"))),
+        "commission_month_2_amount": float(_money(profile.get("commission_month_2_amount"))),
+        "commission_month_3_amount": float(_money(profile.get("commission_month_3_amount"))),
+    }
+
+
+def pay_profile_wage_fields_changed(existing: dict[str, object] | None, requested: dict[str, object]) -> bool:
+    return _pay_profile_wage_fields(existing) != _pay_profile_wage_fields(requested)
+
+
+def _profile_change_request_from_row(row: Any) -> dict[str, object]:
+    return {
+        "id": row[0],
+        "principal_id": row[1],
+        "principal_email": row[2],
+        "principal_display_name": row[3],
+        "pay_basis": row[4],
+        "base_wage_input_type": row[5],
+        "base_wage_amount": row[6],
+        "weekly_basis_hours": row[7],
+        "commission_month_1_amount": row[8],
+        "commission_month_2_amount": row[9],
+        "commission_month_3_amount": row[10],
+        "commission_average_monthly": row[11],
+        "commission_hourly_rate": row[12],
+        "calculated_hourly_rate": row[13],
+        "default_address": row[14],
+        "profile_status": row[15],
+        "notes": row[16],
+        "requested_by": row[17],
+        "requested_at_utc": row[18],
+        "status": row[19],
+        "reviewed_by": row[20],
+        "reviewed_at_utc": row[21],
+        "review_note": row[22],
+        "current_profile": json.loads(row[23] or "{}"),
+        "requested_profile": json.loads(row[24] or "{}"),
+    }
+
+
+_PAY_PROFILE_CHANGE_SELECT = """
+    SELECT id, principal_id, principal_email, principal_display_name, pay_basis,
+           base_wage_input_type, base_wage_amount, weekly_basis_hours,
+           commission_month_1_amount, commission_month_2_amount, commission_month_3_amount,
+           commission_average_monthly, commission_hourly_rate, calculated_hourly_rate,
+           default_address, profile_status, notes, requested_by, requested_at_utc, status,
+           reviewed_by, reviewed_at_utc, review_note, current_profile_json, requested_profile_json
+    FROM pay_profile_change_requests
+"""
+
+
+async def list_pay_profile_change_requests(
+    db: Db,
+    *,
+    email: str | None = None,
+    pending_only: bool = False,
+) -> list[dict[str, object]]:
+    where: list[str] = []
+    params: list[object] = []
+    normalized_email = normalize_email(email) if email else ""
+    if normalized_email:
+        where.append("principal_email=?")
+        params.append(normalized_email)
+    if pending_only:
+        where.append("status='pending'")
+    sql = _PAY_PROFILE_CHANGE_SELECT
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY requested_at_utc DESC"
+    rows = await db.fetchall(sql, tuple(params))
+    return [_profile_change_request_from_row(row) for row in rows]
+
+
+async def request_pay_profile_change(
+    db: Db,
+    *,
+    principal_id: str | None,
+    principal_email: str,
+    principal_display_name: str | None,
+    pay_basis: str,
+    base_wage_input_type: str,
+    base_wage_amount: float,
+    weekly_basis_hours: float,
+    commission_month_1_amount: float,
+    commission_month_2_amount: float,
+    commission_month_3_amount: float,
+    status: str,
+    notes: str | None,
+    requested_by: str,
+    default_address: str | None = None,
+) -> dict[str, object]:
+    normalized_email = normalize_email(principal_email)
+    if not normalized_email:
+        raise ValueError("principal_email is required")
+    normalized_status = normalize_pay_profile_status(status)
+    snapshot = calculate_pay_profile_snapshot(
+        pay_basis=pay_basis,
+        base_wage_input_type=base_wage_input_type,
+        base_wage_amount=base_wage_amount,
+        weekly_basis_hours=weekly_basis_hours,
+        commission_month_1_amount=commission_month_1_amount,
+        commission_month_2_amount=commission_month_2_amount,
+        commission_month_3_amount=commission_month_3_amount,
+    )
+    if snapshot["pay_basis"] != "expense_only" and Decimal(str(snapshot["calculated_hourly_rate"])) <= 0:
+        raise ValueError("base wage amount is required for this pay profile")
+    existing = await pay_profile_by_email(db, email=normalized_email)
+    request_id = f"pay-profile-change-{uuid4().hex}"
+    now = utcnow()
+    requested_profile = {
+        "principal_id": str(principal_id or "").strip() or None,
+        "principal_email": normalized_email,
+        "principal_display_name": str(principal_display_name or "").strip() or None,
+        "pay_basis": snapshot["pay_basis"],
+        "base_wage_input_type": snapshot["base_wage_input_type"],
+        "base_wage_amount": float(snapshot["base_wage_amount"]),
+        "weekly_basis_hours": float(snapshot["weekly_basis_hours"]),
+        "commission_month_1_amount": float(snapshot["commission_month_1_amount"]),
+        "commission_month_2_amount": float(snapshot["commission_month_2_amount"]),
+        "commission_month_3_amount": float(snapshot["commission_month_3_amount"]),
+        "commission_average_monthly": float(snapshot["commission_average_monthly"]),
+        "commission_hourly_rate": float(snapshot["commission_hourly_rate"]),
+        "calculated_hourly_rate": float(snapshot["calculated_hourly_rate"]),
+        "default_address": str(default_address or "").strip() or None,
+        "status": normalized_status,
+        "notes": str(notes or "").strip() or None,
+    }
+    await db.exec(
+        """UPDATE pay_profile_change_requests
+              SET status='superseded', reviewed_by=?, reviewed_at_utc=?, review_note=?
+            WHERE principal_email=? AND status='pending'""",
+        (requested_by, now, "Replaced by a newer wage change request.", normalized_email),
+    )
+    await db.exec(
+        """INSERT INTO pay_profile_change_requests(
+             id, principal_id, principal_email, principal_display_name, pay_basis,
+             base_wage_input_type, base_wage_amount, weekly_basis_hours,
+             commission_month_1_amount, commission_month_2_amount, commission_month_3_amount,
+             commission_average_monthly, commission_hourly_rate, calculated_hourly_rate,
+             default_address, profile_status, notes, requested_by, requested_at_utc, status,
+             current_profile_json, requested_profile_json
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            request_id,
+            requested_profile["principal_id"],
+            normalized_email,
+            requested_profile["principal_display_name"],
+            requested_profile["pay_basis"],
+            requested_profile["base_wage_input_type"],
+            requested_profile["base_wage_amount"],
+            requested_profile["weekly_basis_hours"],
+            requested_profile["commission_month_1_amount"],
+            requested_profile["commission_month_2_amount"],
+            requested_profile["commission_month_3_amount"],
+            requested_profile["commission_average_monthly"],
+            requested_profile["commission_hourly_rate"],
+            requested_profile["calculated_hourly_rate"],
+            requested_profile["default_address"],
+            requested_profile["status"],
+            requested_profile["notes"],
+            requested_by,
+            now,
+            "pending",
+            json.dumps(existing or {}, ensure_ascii=False),
+            json.dumps(requested_profile, ensure_ascii=False),
+        ),
+    )
+    await add_pay_event(
+        db,
+        period_id=None,
+        event_type="pay_profile_change_requested",
+        actor=requested_by,
+        details={"request_id": request_id, "principal_email": normalized_email},
+    )
+    rows = await list_pay_profile_change_requests(db, email=normalized_email, pending_only=True)
+    return next(row for row in rows if row["id"] == request_id)
+
+
+async def review_pay_profile_change_request(
+    db: Db,
+    *,
+    request_id: str,
+    actor: str,
+    approved: bool,
+    review_note: str | None = None,
+) -> dict[str, object]:
+    row = await db.fetchone(f"{_PAY_PROFILE_CHANGE_SELECT} WHERE id=?", (request_id,))
+    if not row:
+        raise ValueError("pay profile change request not found")
+    request = _profile_change_request_from_row(row)
+    if str(request.get("status") or "") != "pending":
+        raise ValueError("pay profile change request is not pending")
+    now = utcnow()
+    if approved:
+        saved = await upsert_pay_profile(
+            db,
+            principal_id=str(request.get("principal_id") or "").strip() or None,
+            principal_email=str(request["principal_email"]),
+            principal_display_name=str(request.get("principal_display_name") or "").strip() or None,
+            pay_basis=str(request["pay_basis"]),
+            base_wage_input_type=str(request["base_wage_input_type"]),
+            base_wage_amount=float(request.get("base_wage_amount") or 0),
+            weekly_basis_hours=float(request.get("weekly_basis_hours") or 40),
+            commission_month_1_amount=float(request.get("commission_month_1_amount") or 0),
+            commission_month_2_amount=float(request.get("commission_month_2_amount") or 0),
+            commission_month_3_amount=float(request.get("commission_month_3_amount") or 0),
+            status=str(request.get("profile_status") or "active"),
+            notes=request.get("notes"),
+            updated_by=actor,
+            default_address=request.get("default_address"),
+        )
+        status_value = "approved"
+    else:
+        saved = None
+        status_value = "rejected"
+    await db.exec(
+        """UPDATE pay_profile_change_requests
+              SET status=?, reviewed_by=?, reviewed_at_utc=?, review_note=?
+            WHERE id=?""",
+        (status_value, actor, now, str(review_note or "").strip() or None, request_id),
+    )
+    await add_pay_event(
+        db,
+        period_id=None,
+        event_type="pay_profile_change_approved" if approved else "pay_profile_change_rejected",
+        actor=actor,
+        details={"request_id": request_id, "principal_email": request["principal_email"], "review_note": review_note or ""},
+    )
+    updated_row = await db.fetchone(f"{_PAY_PROFILE_CHANGE_SELECT} WHERE id=?", (request_id,))
+    result = _profile_change_request_from_row(updated_row)
+    if saved is not None:
+        result["saved_profile"] = saved
+    return result
 
 
 async def upsert_pay_profile(
@@ -2183,6 +2499,17 @@ async def president_week_scheduled_hours(
     return _quantity(row[0] if row else 0)
 
 
+def president_daily_differential_hours(*, union_hours: Decimal, requested_diff_hours: Decimal) -> Decimal:
+    daily_cap = Decimal("8.00")
+    if union_hours < 0 or requested_diff_hours < 0:
+        raise ValueError("president hours cannot be negative")
+    if union_hours == 0 and requested_diff_hours == 0:
+        return Decimal("0.00")
+    if union_hours > daily_cap:
+        raise ValueError("president union hours cannot exceed 8 scheduled hours in a day")
+    return _quantity(daily_cap - union_hours)
+
+
 def validate_president_week_scheduled_hours(
     *,
     existing_week_hours: Decimal,
@@ -2190,14 +2517,13 @@ def validate_president_week_scheduled_hours(
     requested_diff_hours: Decimal,
 ) -> Decimal:
     cap = Decimal("40.00")
-    if existing_week_hours + union_hours > cap:
+    diff_hours = president_daily_differential_hours(
+        union_hours=union_hours,
+        requested_diff_hours=requested_diff_hours,
+    )
+    if existing_week_hours + union_hours + diff_hours > cap:
         raise ValueError("president scheduled lost-wage hours cannot exceed 40 hours in a week")
-    if requested_diff_hours <= 0:
-        return Decimal("0.00")
-    available = cap - existing_week_hours - union_hours
-    if requested_diff_hours > available:
-        raise ValueError("president differential plus union lost-wage hours cannot exceed 40 scheduled hours in a week")
-    return requested_diff_hours
+    return diff_hours
 
 
 async def calculate_president_differential(
@@ -2352,6 +2678,7 @@ async def upsert_entry(
     actor: PayActor,
     data: dict[str, object],
     pay_cfg: Any,
+    require_submitter_certification: bool = False,
 ) -> dict[str, object]:
     period = await get_pay_period(db, period_id)
     if not period:
@@ -2474,6 +2801,8 @@ async def upsert_entry(
         data.get("submitter_certification_text")
         or "I certify that this daily lost-wage and expense entry is accurate and was submitted by me."
     ).strip()
+    if require_submitter_certification and not submitter_certified and not actor.can_lock:
+        raise ValueError("submitter certification is required before saving a pay entry")
     certified_at = now if submitter_certified else None
     certified_by = actor.email if submitter_certified else None
 
@@ -2643,10 +2972,21 @@ async def delete_pay_entry(
         "attachment_count": int(row[17] or 0),
         "correction_count": int(row[18] or 0),
     }
+    attachment_rows = await db.fetchall("SELECT id, local_path FROM pay_attachments WHERE entry_id=?", (entry_id,))
     await db.exec("UPDATE pay_events SET entry_id=NULL WHERE entry_id=?", (entry_id,))
     await db.exec("DELETE FROM pay_entry_corrections WHERE entry_id=?", (entry_id,))
     await db.exec("DELETE FROM pay_attachments WHERE entry_id=?", (entry_id,))
     await db.exec("DELETE FROM pay_entries WHERE id=?", (entry_id,))
+    removed_files: list[str] = []
+    for attachment_id, local_path in attachment_rows:
+        try:
+            path = Path(str(local_path or ""))
+            if path.exists() and path.is_file():
+                path.unlink()
+                removed_files.append(str(path))
+        except OSError:
+            pass
+    snapshot["removed_attachment_files"] = removed_files
     await add_pay_event(
         db,
         period_id=str(row[1]),
@@ -3137,9 +3477,15 @@ async def list_attachments(db: Db, *, period_id: str, actor: PayActor) -> list[d
         fallback_rate = row[22] if row[22] is not None else row[13]
         fallback_amount = row[23] if row[23] is not None else row[14]
         legacy_totals_available = is_mileage and fallback_amount is not None and _money(fallback_amount) > 0
-        can_remove = is_mileage and not entry_locked and (has_summary or active_mileage_count == 1 or legacy_totals_available)
+        owner_email = normalize_email(row[10])
+        actor_can_remove = actor.can_edit_all or actor.can_lock or owner_email == actor.email
+        can_remove = is_mileage and not entry_locked and actor_can_remove and (
+            has_summary or active_mileage_count == 1 or legacy_totals_available
+        )
         remove_reason = ""
-        if is_mileage and entry_locked:
+        if is_mileage and not actor_can_remove:
+            remove_reason = "Only the submitter or treasurer can remove this report."
+        elif is_mileage and entry_locked:
             remove_reason = "Entry is locked."
         elif is_mileage and not can_remove:
             remove_reason = "This older report cannot be safely removed automatically."
@@ -3197,7 +3543,7 @@ async def attachment_for_actor(
     )
     if not row:
         raise ValueError("attachment not found")
-    if not (actor.can_edit_all or actor.can_lock) and normalize_email(row[14]) != actor.email:
+    if not (actor.can_view_all or actor.can_edit_all or actor.can_lock) and normalize_email(row[14]) != actor.email:
         raise PermissionError("cannot access another user's attachment")
     return {
         "id": row[0],
@@ -3233,6 +3579,9 @@ async def remove_mileage_attachment(
     reason: str | None = None,
 ) -> dict[str, object]:
     attachment = await attachment_for_actor(db, attachment_id=attachment_id, actor=actor)
+    owner_email = normalize_email(attachment.get("user_email"))
+    if not (actor.can_edit_all or actor.can_lock or owner_email == actor.email):
+        raise PermissionError("cannot remove another user's mileage report")
     if str(attachment["attachment_type"] or "") != "mileage_pdf":
         raise ValueError("only mileage reports can be removed here")
     if attachment.get("locked_at_utc") or str(attachment.get("period_status") or "") != "open":
@@ -3332,6 +3681,43 @@ def _set_paragraph_if_prefix(doc: Document, prefix: str, value: str) -> None:
         if paragraph.text.strip().startswith(prefix):
             paragraph.text = value
             return
+
+
+def _set_voucher_signature_line(
+    doc: Document,
+    *,
+    submitter_name: str,
+    approved_by_text: str,
+) -> None:
+    submitter_text = str(submitter_name or "Submitted electronically").strip() or "Submitted electronically"
+    for paragraph in doc.paragraphs:
+        if not paragraph.text.strip().startswith("Signature"):
+            continue
+        signature_replacements = [submitter_text, approved_by_text]
+        replacement_index = 0
+        if "\t" in paragraph.text and len(paragraph.runs) > 1:
+            for run in paragraph.runs:
+                if replacement_index >= len(signature_replacements):
+                    break
+                if run.text.strip() != "Signature":
+                    continue
+                replacement = signature_replacements[replacement_index]
+                leading = run.text[: len(run.text) - len(run.text.lstrip())]
+                trailing = run.text[len(run.text.rstrip()) :]
+                run.text = f"{leading}{replacement}{trailing}"
+                if "{{" in replacement:
+                    run.font.size = Pt(4)
+                replacement_index += 1
+            if replacement_index == len(signature_replacements):
+                return
+        paragraph.clear()
+        paragraph.add_run(submitter_text)
+        paragraph.add_run("\t")
+        approved_run = paragraph.add_run(approved_by_text)
+        if "{{" in approved_by_text:
+            approved_run.font.size = Pt(4)
+        paragraph.add_run("\tPaid by")
+        return
 
 
 def _entry_amounts(row: dict[str, object]) -> dict[str, Decimal]:
@@ -3540,14 +3926,13 @@ def fill_pay_voucher_docx(
 
     if include_signature_placeholders:
         paid_by_index = max(1, int(paid_by_signer_index or 1))
-        for paragraph in doc.paragraphs:
-            if paragraph.text.strip().startswith("Signature"):
-                paragraph.text = (
-                    "Signature\tSubmitted electronically in Pay Portal\tPaid by "
-                    f"{{{{Sig_es_:signer{paid_by_index}:signer{paid_by_index}_signature}}}}    "
-                    f"{{{{Dte_es_:signer{paid_by_index}:signer{paid_by_index}_date}}}}"
-                )
-                break
+        approved_by_text = (
+            f"{{{{Sig_es_:signer{paid_by_index}:signer{paid_by_index}_signature}}}}    "
+            f"{{{{Dte_es_:signer{paid_by_index}:signer{paid_by_index}_date}}}}"
+        )
+    else:
+        approved_by_text = "Signature"
+    _set_voucher_signature_line(doc, submitter_name=display_name, approved_by_text=approved_by_text)
 
     _write_daily_narrative(
         doc,
@@ -3661,6 +4046,22 @@ async def _compensation_stubs_for_packet(db: Db, period_id: str) -> list[dict[st
     ]
 
 
+def _pay_sharepoint_upload_target(*, cfg: Any, folder_path: str) -> tuple[str, str]:
+    path_parts = [part.strip() for part in str(folder_path or "").replace("\\", "/").split("/") if part.strip()]
+    inferred_library = ""
+    inferred_folder = ""
+    for index, part in enumerate(path_parts):
+        lowered = part.lower()
+        if lowered == "documents" or lowered.endswith(" - documents"):
+            inferred_library = part
+            inferred_folder = "/".join(path_parts[index + 1 :])
+            break
+    folder = inferred_folder or "/".join(path_parts)
+    configured_library = str(getattr(cfg.pay_portal, "sharepoint_library", "") or "").strip()
+    default_library = str(getattr(cfg.graph, "document_library", "") or "").strip()
+    return inferred_library or configured_library or default_library, folder
+
+
 async def _upload_if_configured(
     *,
     cfg: Any,
@@ -3669,17 +4070,33 @@ async def _upload_if_configured(
     filename: str,
     local_path: str,
 ) -> tuple[str | None, str | None]:
-    if not (cfg.graph.site_hostname and cfg.graph.site_path and cfg.graph.document_library):
+    library, upload_folder_path = _pay_sharepoint_upload_target(cfg=cfg, folder_path=folder_path)
+    site_hostname, site_path = _pay_graph_site(cfg=cfg)
+    if not (graph and site_hostname and site_path and library and upload_folder_path):
         return None, None
-    uploaded = graph.upload_local_file_to_folder_path(
-        site_hostname=cfg.graph.site_hostname,
-        site_path=cfg.graph.site_path,
-        library=cfg.graph.document_library,
-        folder_path=folder_path,
-        filename=filename,
-        local_path=local_path,
-    )
-    return uploaded.web_url, uploaded.path
+    libraries = [library]
+    default_library = str(getattr(cfg.graph, "document_library", "") or "").strip()
+    if default_library and default_library not in libraries:
+        libraries.append(default_library)
+    last_error: Exception | None = None
+    for candidate_library in libraries:
+        try:
+            uploaded = graph.upload_local_file_to_folder_path(
+                site_hostname=site_hostname,
+                site_path=site_path,
+                library=candidate_library,
+                folder_path=upload_folder_path,
+                filename=filename,
+                local_path=local_path,
+            )
+            return uploaded.web_url, uploaded.path
+        except RuntimeError as exc:
+            last_error = exc
+            if "Could not find document library drive named" not in str(exc):
+                raise
+    if last_error:
+        raise last_error
+    return None, None
 
 
 def pay_packet_signer_order(*, grouped_entry_emails: list[str], president_signer_email: str) -> tuple[list[str], int]:
@@ -3688,6 +4105,53 @@ def pay_packet_signer_order(*, grouped_entry_emails: list[str], president_signer
     if not president:
         raise ValueError("president signer email is required")
     return [president], 1
+
+
+def _send_president_signature_email(
+    *,
+    cfg: Any,
+    mailer: Any | None,
+    president_email: str,
+    period_start: str,
+    period_end: str,
+    signing_link: str | None,
+    sharepoint_unsigned_url: str | None,
+    folder_path: str,
+    packet_id: str,
+) -> dict[str, object] | None:
+    if mailer is None or not bool(getattr(cfg.email, "enabled", False)):
+        return None
+    link = str(signing_link or "").strip()
+    if not link:
+        raise RuntimeError("DocuSeal did not return a president signing link")
+    subject = f"Pay packet ready for signature: {period_start} to {period_end}"
+    text_body = (
+        f"The Local 3106 pay packet for {period_start} to {period_end} is ready for your signature.\n\n"
+        f"Sign here: {link}\n"
+        f"SharePoint packet folder: {folder_path}\n"
+    )
+    if sharepoint_unsigned_url:
+        text_body += f"Unsigned packet: {sharepoint_unsigned_url}\n"
+    html_body = (
+        f"<p>The Local 3106 pay packet for <strong>{html.escape(period_start)} to {html.escape(period_end)}</strong> "
+        "is ready for your signature.</p>"
+        f'<p><a href="{html.escape(link, quote=True)}">Open DocuSeal signing link</a></p>'
+        f"<p>SharePoint packet folder: {html.escape(folder_path)}</p>"
+    )
+    if sharepoint_unsigned_url:
+        html_body += f'<p>Unsigned packet: <a href="{html.escape(sharepoint_unsigned_url, quote=True)}">Open packet</a></p>'
+    sent = mailer.send_mail(
+        to_recipients=[president_email],
+        subject=subject,
+        text_body=text_body,
+        html_body=html_body,
+        custom_headers={"X-CWA3106-Pay-Packet-ID": packet_id},
+    )
+    return {
+        "sent": True,
+        "graph_message_id": getattr(sent, "graph_message_id", ""),
+        "internet_message_id": getattr(sent, "internet_message_id", None),
+    }
 
 
 async def lock_period_and_send_packet(
@@ -3700,28 +4164,57 @@ async def lock_period_and_send_packet(
     actor: PayActor,
     president_signer_email: str | None,
     docx_to_pdf_func: Any,
+    mailer: Any | None = None,
 ) -> dict[str, object]:
+    _pay_lock_log("started", period_id=period_id, actor=actor.email)
     if not actor.can_lock:
+        _pay_lock_log("permission_denied", period_id=period_id, actor=actor.email)
         raise PermissionError("treasurer access required")
+    _pay_lock_log("load_period", period_id=period_id)
     period = await get_pay_period(db, period_id)
     if not period:
+        _pay_lock_log("period_missing", period_id=period_id)
         raise ValueError("pay period not found")
+    _pay_lock_log(
+        "period_loaded",
+        period_id=period_id,
+        status=str(period["status"]),
+        revision=int(period["revision"]),
+    )
     if str(period["status"]) not in {"open", "locked"}:
+        _pay_lock_log("period_not_open", period_id=period_id, status=str(period["status"]))
         raise ValueError("pay period is already sent or completed")
+    _pay_lock_log("list_entries", period_id=period_id)
     entries = await list_entries(
         db,
         period_id=period_id,
         actor=PayActor(actor.email, actor.display_name, actor.role, True, True, True),
     )
-    excluded_entries = [entry for entry in entries if str(entry.get("review_status") or "pending") in {"needs_fix", "rejected"}]
-    entries = [entry for entry in entries if str(entry.get("review_status") or "pending") in {"pending", "approved"}]
+    all_entries = entries
+    includable_statuses = {"pending", "approved"}
+    excluded_entries = [
+        entry for entry in all_entries if str(entry.get("review_status") or "pending") not in includable_statuses
+    ]
+    entries = [entry for entry in all_entries if str(entry.get("review_status") or "pending") in includable_statuses]
+    _pay_lock_log(
+        "entries_loaded",
+        period_id=period_id,
+        total_entries=len(all_entries),
+        includable_entries=len(entries),
+        excluded_entries=len(excluded_entries),
+    )
     if not entries:
-        raise ValueError("cannot lock a pay period with no includable entries")
+        _pay_lock_log("no_includable_entries", period_id=period_id)
+        raise ValueError("cannot lock a pay period with no pending or approved entries")
+    _pay_lock_log("resolve_president_signer", period_id=period_id, explicit=bool(president_signer_email))
     president_signer = await president_email(db, explicit=president_signer_email, pay_cfg=cfg.pay_portal)
     if not president_signer:
+        _pay_lock_log("president_signer_missing", period_id=period_id)
         raise ValueError("president signer email is required")
+    _pay_lock_log("president_signer_resolved", period_id=period_id, president_signer=president_signer)
 
     packet_id = f"pay-packet-{uuid4().hex}"
+    _pay_lock_log("packet_id_created", period_id=period_id, packet_id=packet_id)
     packet_dir = Path(cfg.data_root) / "pay" / period_id / "packet" / packet_id
     voucher_dir = packet_dir / "vouchers"
     support_dir = packet_dir / "support"
@@ -3738,6 +4231,14 @@ async def lock_period_and_send_packet(
         grouped_entry_emails=[email for email, _ in ordered_groups],
         president_signer_email=president_signer,
     )
+    _pay_lock_log(
+        "entries_grouped",
+        period_id=period_id,
+        packet_id=packet_id,
+        person_count=len(ordered_groups),
+        signer_count=len(signer_order),
+        president_signer_index=president_signer_index,
+    )
 
     voucher_paths: list[str] = []
     voucher_pdf_paths: list[str] = []
@@ -3745,7 +4246,15 @@ async def lock_period_and_send_packet(
     packet_pdf_paths: list[str] = []
     alignment_pdf_paths: list[str] = []
     support_pdf_paths_by_user: dict[str, list[str]] = {}
-    for attachment in await _attachments_for_packet(db, period_id):
+    _pay_lock_log("collect_support_documents", period_id=period_id, packet_id=packet_id)
+    packet_attachments = await _attachments_for_packet(db, period_id)
+    _pay_lock_log(
+        "support_documents_loaded",
+        period_id=period_id,
+        packet_id=packet_id,
+        attachment_count=len(packet_attachments),
+    )
+    for attachment in packet_attachments:
         source = Path(str(attachment["local_path"]))
         if not source.exists():
             continue
@@ -3758,6 +4267,14 @@ async def lock_period_and_send_packet(
         support_pdf_paths_by_user.setdefault(user_email, []).append(str(target))
 
     for index, (email, rows) in enumerate(ordered_groups, start=1):
+        _pay_lock_log(
+            "generate_person_voucher",
+            period_id=period_id,
+            packet_id=packet_id,
+            user_email=email,
+            ordinal=index,
+            entry_count=len(rows),
+        )
         label = safe_filename(rows[0].get("display_name") or email, fallback=f"voucher-{index}")
         docx_path = voucher_dir / f"{index:02d}-{label}.docx"
         anchor_docx_path = voucher_dir / f"{index:02d}-{label}.anchor.docx"
@@ -3786,10 +4303,10 @@ async def lock_period_and_send_packet(
             cfg.libreoffice_timeout_seconds,
             engine=cfg.docx_pdf_engine,
             graph_uploader=graph,
-            graph_site_hostname=cfg.graph.site_hostname,
-            graph_site_path=cfg.graph.site_path,
+            graph_site_hostname=_pay_graph_site(cfg=cfg)[0],
+            graph_site_path=_pay_graph_site(cfg=cfg)[1],
             graph_library=cfg.graph.document_library,
-            graph_temp_folder_path=cfg.docx_pdf_graph_temp_folder,
+            graph_temp_folder_path=_pay_docx_pdf_graph_temp_folder(cfg=cfg),
         )
         anchor_pdf = docx_to_pdf_func(
             str(anchor_docx_path),
@@ -3797,10 +4314,10 @@ async def lock_period_and_send_packet(
             cfg.libreoffice_timeout_seconds,
             engine=cfg.docx_pdf_engine,
             graph_uploader=graph,
-            graph_site_hostname=cfg.graph.site_hostname,
-            graph_site_path=cfg.graph.site_path,
+            graph_site_hostname=_pay_graph_site(cfg=cfg)[0],
+            graph_site_path=_pay_graph_site(cfg=cfg)[1],
             graph_library=cfg.graph.document_library,
-            graph_temp_folder_path=cfg.docx_pdf_graph_temp_folder,
+            graph_temp_folder_path=_pay_docx_pdf_graph_temp_folder(cfg=cfg),
         )
         voucher_paths.append(str(docx_path))
         voucher_pdf_paths.append(voucher_pdf)
@@ -3808,7 +4325,21 @@ async def lock_period_and_send_packet(
         support_pdf_paths = support_pdf_paths_by_user.get(normalize_email(email), [])
         packet_pdf_paths.extend([voucher_pdf, *support_pdf_paths])
         alignment_pdf_paths.extend([anchor_pdf, *support_pdf_paths])
+        _pay_lock_log(
+            "person_voucher_generated",
+            period_id=period_id,
+            packet_id=packet_id,
+            user_email=email,
+            support_pdf_count=len(support_pdf_paths),
+        )
 
+    _pay_lock_log(
+        "merge_packet",
+        period_id=period_id,
+        packet_id=packet_id,
+        packet_pdf_count=len(packet_pdf_paths),
+        alignment_pdf_count=len(alignment_pdf_paths),
+    )
     unsigned_packet_path = str(packet_dir / f"{period_start}_to_{period_end}_packet.pdf")
     alignment_packet_path = str(packet_dir / f"{period_start}_to_{period_end}_alignment.pdf")
     merge_pdfs(packet_pdf_paths, unsigned_packet_path)
@@ -3816,11 +4347,24 @@ async def lock_period_and_send_packet(
     packet_bytes = Path(unsigned_packet_path).read_bytes()
     alignment_bytes = Path(alignment_packet_path).read_bytes()
     sha = hashlib.sha256(packet_bytes).hexdigest()
+    _pay_lock_log(
+        "packet_merged",
+        period_id=period_id,
+        packet_id=packet_id,
+        packet_bytes=len(packet_bytes),
+        alignment_bytes=len(alignment_bytes),
+    )
 
     folder_path = pay_period_folder_path(
         root_folder=cfg.pay_portal.sharepoint_root_folder,
         period_start=period_start,
         period_end=period_end,
+    )
+    _pay_lock_log(
+        "upload_unsigned_packet",
+        period_id=period_id,
+        packet_id=packet_id,
+        folder_path=folder_path,
     )
     sharepoint_unsigned_url, _ = await _upload_if_configured(
         cfg=cfg,
@@ -3828,6 +4372,18 @@ async def lock_period_and_send_packet(
         folder_path=folder_path,
         filename=Path(unsigned_packet_path).name,
         local_path=unsigned_packet_path,
+    )
+    _pay_lock_log(
+        "unsigned_packet_uploaded",
+        period_id=period_id,
+        packet_id=packet_id,
+        uploaded=bool(sharepoint_unsigned_url),
+    )
+    _pay_lock_log(
+        "upload_generated_vouchers",
+        period_id=period_id,
+        packet_id=packet_id,
+        voucher_count=len(voucher_paths),
     )
     for path in voucher_paths:
         await _upload_if_configured(
@@ -3837,7 +4393,14 @@ async def lock_period_and_send_packet(
             filename=Path(path).name,
             local_path=path,
         )
-    for attachment in await _attachments_for_packet(db, period_id):
+    _pay_lock_log("generated_vouchers_uploaded", period_id=period_id, packet_id=packet_id)
+    _pay_lock_log(
+        "upload_receipts_and_mileage",
+        period_id=period_id,
+        packet_id=packet_id,
+        attachment_count=len(packet_attachments),
+    )
+    for attachment in packet_attachments:
         web_url, sp_path = await _upload_if_configured(
             cfg=cfg,
             graph=graph,
@@ -3851,7 +4414,15 @@ async def lock_period_and_send_packet(
                 (web_url, sp_path, attachment["id"]),
             )
 
-    for stub in await _compensation_stubs_for_packet(db, period_id):
+    _pay_lock_log("receipts_and_mileage_uploaded", period_id=period_id, packet_id=packet_id)
+    compensation_stubs = await _compensation_stubs_for_packet(db, period_id)
+    _pay_lock_log(
+        "upload_lost_wage_proof",
+        period_id=period_id,
+        packet_id=packet_id,
+        stub_count=len(compensation_stubs),
+    )
+    for stub in compensation_stubs:
         web_url, sp_path = await _upload_if_configured(
             cfg=cfg,
             graph=graph,
@@ -3865,6 +4436,13 @@ async def lock_period_and_send_packet(
                 (web_url, sp_path, stub["id"]),
             )
 
+    _pay_lock_log("lost_wage_proof_uploaded", period_id=period_id, packet_id=packet_id)
+    _pay_lock_log(
+        "docuseal_create_submission",
+        period_id=period_id,
+        packet_id=packet_id,
+        signer_count=len(signer_order),
+    )
     submission = docuseal.create_submission(
         pdf_bytes=packet_bytes,
         alignment_pdf_bytes=alignment_bytes,
@@ -3880,7 +4458,14 @@ async def lock_period_and_send_packet(
         template_id=resolve_docuseal_template_id(cfg, template_key=_PAY_FORM_KEY, doc_type=_PAY_FORM_KEY),
         form_key=_PAY_FORM_KEY,
     )
+    _pay_lock_log(
+        "docuseal_submission_created",
+        period_id=period_id,
+        packet_id=packet_id,
+        docuseal_submission_id=submission.submission_id,
+    )
     signer_links_by_email: dict[str, str] = {}
+    _pay_lock_log("docuseal_resolve_signing_links", period_id=period_id, packet_id=packet_id)
     try:
         signer_links_by_email = docuseal.extract_signing_links_by_email(submission.raw)
     except Exception:
@@ -3892,8 +4477,16 @@ async def lock_period_and_send_packet(
             signer_links_by_email = {}
     first_signer = signer_order[0]
     signing_link = signer_links_by_email.get(first_signer.lower()) or submission.signing_link
+    _pay_lock_log(
+        "docuseal_signing_link_resolved",
+        period_id=period_id,
+        packet_id=packet_id,
+        first_signer=first_signer,
+        has_signing_link=bool(signing_link),
+    )
 
     now = utcnow()
+    _pay_lock_log("record_packet", period_id=period_id, packet_id=packet_id)
     await db.exec(
         """INSERT INTO pay_packets(
              id, period_id, revision, status, voucher_paths_json, voucher_pdf_paths_json,
@@ -3924,8 +4517,36 @@ async def lock_period_and_send_packet(
         (actor.email, now, president_signer, folder_path, now, period_id),
     )
     await db.exec(
-        "UPDATE pay_entries SET locked_at_utc=? WHERE period_id=? AND locked_at_utc IS NULL",
+        """UPDATE pay_entries
+              SET locked_at_utc=?
+            WHERE period_id=? AND locked_at_utc IS NULL
+              AND COALESCE(review_status, 'pending') IN ('pending', 'approved')""",
         (now, period_id),
+    )
+    _pay_lock_log("packet_recorded", period_id=period_id, packet_id=packet_id)
+    _pay_lock_log(
+        "email_president",
+        period_id=period_id,
+        packet_id=packet_id,
+        president_signer=president_signer,
+        email_enabled=bool(getattr(cfg.email, "enabled", False)),
+    )
+    president_email_delivery = _send_president_signature_email(
+        cfg=cfg,
+        mailer=mailer,
+        president_email=president_signer,
+        period_start=period_start,
+        period_end=period_end,
+        signing_link=signing_link,
+        sharepoint_unsigned_url=sharepoint_unsigned_url,
+        folder_path=folder_path,
+        packet_id=packet_id,
+    )
+    _pay_lock_log(
+        "president_email_finished",
+        period_id=period_id,
+        packet_id=packet_id,
+        sent=bool(president_email_delivery),
     )
     await add_pay_event(
         db,
@@ -3939,7 +4560,15 @@ async def lock_period_and_send_packet(
             "president_signer_email": president_signer,
             "signer_order": signer_order,
             "excluded_entries": excluded_entries,
+            "president_email_delivery": president_email_delivery,
         },
+    )
+    _pay_lock_log(
+        "complete",
+        period_id=period_id,
+        packet_id=packet_id,
+        docuseal_submission_id=submission.submission_id,
+        president_email_sent=bool(president_email_delivery),
     )
     return {
         "packet_id": packet_id,
@@ -3950,6 +4579,8 @@ async def lock_period_and_send_packet(
         "signer_order": signer_order,
         "sharepoint_unsigned_url": sharepoint_unsigned_url,
         "excluded_entries": excluded_entries,
+        "president_email_sent": bool(president_email_delivery),
+        "president_email_delivery": president_email_delivery,
     }
 
 
@@ -4014,14 +4645,27 @@ async def handle_pay_docuseal_completion(
         audit_path = str(packet_dir / "docuseal_completed.zip")
         Path(audit_path).write_bytes(bytes(zip_bytes))
         signed_bytes = _extract_first_pdf(bytes(zip_bytes))
+    if not signed_bytes:
+        direct_pdf_bytes = artifacts.get("signed_pdf_bytes")
+        if isinstance(direct_pdf_bytes, (bytes, bytearray)) and direct_pdf_bytes:
+            signed_bytes = bytes(direct_pdf_bytes)
     if signed_bytes:
         signed_path = str(packet_dir / f"{period_start}_to_{period_end}_signed.pdf")
         Path(signed_path).write_bytes(signed_bytes)
     else:
-        unsigned_row = await db.fetchone("SELECT unsigned_packet_path FROM pay_packets WHERE id=?", (packet_id,))
-        if unsigned_row and unsigned_row[0] and Path(str(unsigned_row[0])).exists():
-            signed_path = str(unsigned_row[0])
-            signed_bytes = Path(signed_path).read_bytes()
+        await add_pay_event(
+            db,
+            period_id=period_id,
+            packet_id=packet_id,
+            event_type="docuseal_completion_missing_signed_artifact",
+            actor="docuseal",
+            details={
+                "docuseal_submission_id": submission_id,
+                "completed_zip_present": isinstance(zip_bytes, (bytes, bytearray)) and bool(zip_bytes),
+                "signed_pdf_present": False,
+            },
+        )
+        raise RuntimeError("DocuSeal completion did not include a signed pay packet PDF")
 
     target_folder = str(folder_path or "").strip() or pay_period_folder_path(
         root_folder=cfg.pay_portal.sharepoint_root_folder,
@@ -4400,6 +5044,7 @@ async def create_mileage_attachment(
     description: str,
     locations: list[str],
     rate_text: str | None,
+    graph: Any | None = None,
 ) -> dict[str, object]:
     settings = await pay_settings(db, pay_cfg=cfg.pay_portal)
     name = str(name or "").strip() or str(actor.display_name or actor.email or "Pay User").strip()
@@ -4432,6 +5077,43 @@ async def create_mileage_attachment(
         mileage_rate=rate,
         mileage_amount=reimbursement,
     )
+    legacy_sharepoint: dict[str, str | None] = {}
+    legacy_root = str(getattr(cfg.pay_portal, "mileage_legacy_sharepoint_folder", "") or "").strip()
+    if graph is not None and legacy_root:
+        stored = await db.fetchone("SELECT local_path FROM pay_attachments WHERE id=?", (attachment["id"],))
+        local_path = str(stored[0]) if stored else ""
+        if local_path:
+            legacy_folder_path = mileage_legacy_report_folder_path(root_folder=legacy_root, report_date=date_str)
+            try:
+                web_url, sp_path = await _upload_if_configured(
+                    cfg=cfg,
+                    graph=graph,
+                    folder_path=legacy_folder_path,
+                    filename=filename,
+                    local_path=local_path,
+                )
+                if web_url or sp_path:
+                    legacy_sharepoint = {
+                        "legacy_sharepoint_url": web_url,
+                        "legacy_sharepoint_path": sp_path,
+                    }
+                    await add_pay_event(
+                        db,
+                        period_id=period_id,
+                        entry_id=entry_id,
+                        event_type="mileage_legacy_sharepoint_uploaded",
+                        actor=actor.email,
+                        details={"filename": filename, "sharepoint_path": sp_path},
+                    )
+            except Exception as exc:  # noqa: BLE001 - mileage generation should survive legacy copy failures.
+                await add_pay_event(
+                    db,
+                    period_id=period_id,
+                    entry_id=entry_id,
+                    event_type="mileage_legacy_sharepoint_upload_failed",
+                    actor=actor.email,
+                    details={"filename": filename, "error": str(exc)[:500]},
+                )
     row = await db.fetchone(
         "SELECT mileage_miles, mileage_amount FROM pay_entries WHERE id=? AND period_id=?",
         (entry_id, period_id),
@@ -4451,4 +5133,11 @@ async def create_mileage_attachment(
             period_id,
         ),
     )
-    return {**attachment, "mileage_miles": float(total_miles), "mileage_rate": float(rate), "mileage_amount": float(reimbursement), "reimbursement": float(reimbursement)}
+    return {
+        **attachment,
+        **legacy_sharepoint,
+        "mileage_miles": float(total_miles),
+        "mileage_rate": float(rate),
+        "mileage_amount": float(reimbursement),
+        "reimbursement": float(reimbursement),
+    }

@@ -112,7 +112,12 @@ class ReferralConfig:
 @dataclass(frozen=True)
 class PayPortalConfig:
     enabled: bool = True
-    sharepoint_root_folder: str = "Pay Portal"
+    sharepoint_root_folder: str = "Local3106/Pay Portal"
+    sharepoint_library: str = ""
+    sharepoint_site_hostname: str = ""
+    sharepoint_site_path: str = ""
+    docx_pdf_graph_temp_folder: str = "Local3106/Pay Portal/_docx_pdf_convert"
+    mileage_legacy_sharepoint_folder: str = "Local3106/Mileage"
     voucher_template_path: str = "/app/templates/docx/Local 3106 Pay - Expense Voucher.docx"
     receipt_max_file_bytes: int = 10_000_000
     receipt_max_entry_bytes: int = 50_000_000
@@ -168,6 +173,8 @@ class DocumentPolicyConfig:
     store_all_stage_artifacts: bool = False
     input_source: str = ""
     signature_dispatch_timing: str = "default"
+    attested_auto_sign_enabled: bool = False
+    attested_auto_sign_delay_seconds: int = 60
 
 
 @dataclass(frozen=True)
@@ -772,6 +779,11 @@ def load_config(path: str) -> AppConfig:
                 signature_dispatch_timing=_normalize_signature_dispatch_timing(
                     raw_policy.get("signature_dispatch_timing")
                 ),
+                attested_auto_sign_enabled=bool(raw_policy.get("attested_auto_sign_enabled", False)),
+                attested_auto_sign_delay_seconds=max(
+                    30,
+                    int(raw_policy.get("attested_auto_sign_delay_seconds") or 60),
+                ),
             )
 
     return AppConfig(
@@ -908,8 +920,56 @@ def load_config(path: str) -> AppConfig:
         pay_portal=PayPortalConfig(
             enabled=_as_bool(pay_portal_raw.get("enabled"), True),
             sharepoint_root_folder=(
-                str(pay_portal_raw.get("sharepoint_root_folder", "Pay Portal")).strip()
-                or "Pay Portal"
+                str(
+                    pay_portal_raw.get(
+                        "sharepoint_root_folder",
+                        PayPortalConfig().sharepoint_root_folder,
+                    )
+                ).strip()
+                or PayPortalConfig().sharepoint_root_folder
+            ),
+            sharepoint_library=(
+                str(
+                    pay_portal_raw.get(
+                        "sharepoint_library",
+                        PayPortalConfig().sharepoint_library,
+                    )
+                ).strip()
+                or PayPortalConfig().sharepoint_library
+            ),
+            sharepoint_site_hostname=(
+                str(
+                    pay_portal_raw.get(
+                        "sharepoint_site_hostname",
+                        PayPortalConfig().sharepoint_site_hostname,
+                    )
+                ).strip()
+            ),
+            sharepoint_site_path=(
+                str(
+                    pay_portal_raw.get(
+                        "sharepoint_site_path",
+                        PayPortalConfig().sharepoint_site_path,
+                    )
+                ).strip()
+            ),
+            docx_pdf_graph_temp_folder=(
+                str(
+                    pay_portal_raw.get(
+                        "docx_pdf_graph_temp_folder",
+                        PayPortalConfig().docx_pdf_graph_temp_folder,
+                    )
+                ).strip()
+                or PayPortalConfig().docx_pdf_graph_temp_folder
+            ),
+            mileage_legacy_sharepoint_folder=(
+                str(
+                    pay_portal_raw.get(
+                        "mileage_legacy_sharepoint_folder",
+                        PayPortalConfig().mileage_legacy_sharepoint_folder,
+                    )
+                ).strip()
+                or PayPortalConfig().mileage_legacy_sharepoint_folder
             ),
             voucher_template_path=(
                 str(

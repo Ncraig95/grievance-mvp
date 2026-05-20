@@ -2245,6 +2245,7 @@ async def intake(request: Request):
                     signer_order=signer_order,
                     correlation_id=correlation_id,
                     idempotency_prefix=f"intake:{case_id}:{document_id}",
+                    signature_attestation=attestation_details,
                 )
                 status = outcome.status
                 signing_link = outcome.signing_link

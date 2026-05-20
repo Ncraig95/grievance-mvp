@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +16,7 @@ from pydantic import BaseModel, Field
 from ..db.db import Db
 from ..services.pay_portal import (
     PayActor,
+    add_pay_event,
     approve_irs_rate_candidate,
     create_pay_demo_feedback,
     attachment_for_actor,
@@ -34,6 +36,7 @@ from ..services.pay_portal import (
     list_pay_demo_feedback,
     list_irs_rate_candidates,
     list_pay_profiles,
+    list_pay_profile_change_requests,
     list_pay_users,
     list_wage_scales,
     load_common_places_cache,
@@ -44,9 +47,12 @@ from ..services.pay_portal import (
     pay_demo_settings,
     pay_demo_artifact_path,
     pay_profile_by_email,
+    pay_profile_wage_fields_changed,
     pay_settings,
     remove_mileage_attachment,
+    request_pay_profile_change,
     review_pay_entry,
+    review_pay_profile_change_request,
     save_pay_demo_settings,
     save_pay_settings,
     store_attachment,
@@ -79,9 +85,51 @@ from .routes_officers import search_directory_users_for_request
 
 
 router = APIRouter()
+_PAY_ROUTE_LOGGER = logging.getLogger("grievance_api.pay_portal.routes")
 _DEMO_JOB_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 _DEMO_JOBS_LOCK = threading.Lock()
 _DEMO_JOBS: dict[str, dict[str, Any]] = {}
+
+
+async def _record_pay_lock_failure(
+    request: Request,
+    *,
+    period_id: str,
+    actor: PayActor,
+    exc: Exception,
+    status_code: int,
+) -> None:
+    _PAY_ROUTE_LOGGER.error(
+        "pay_lock_send_failed period_id=%s actor=%s status_code=%s error_type=%s error=%s",
+        period_id,
+        actor.email,
+        status_code,
+        type(exc).__name__,
+        str(exc),
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    try:
+        await add_pay_event(
+            request.app.state.db,
+            period_id=period_id,
+            event_type="period_lock_send_failed",
+            actor=actor.email,
+            details={
+                "status_code": status_code,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "route": f"/pay/api/periods/{period_id}/lock",
+            },
+        )
+    except Exception as audit_exc:
+        _PAY_ROUTE_LOGGER.error(
+            "pay_lock_send_failure_audit_failed period_id=%s actor=%s error_type=%s error=%s",
+            period_id,
+            actor.email,
+            type(audit_exc).__name__,
+            str(audit_exc),
+            exc_info=(type(audit_exc), audit_exc, audit_exc.__traceback__),
+        )
 
 
 class PayEntryUpsertRequest(BaseModel):
@@ -216,6 +264,12 @@ class InternalRoleAssignmentRequest(BaseModel):
 
 class PayInternalUserImportRequest(BaseModel):
     limit: int = Field(default=999, ge=1, le=999)
+    confirm: bool = False
+
+
+class PayProfileChangeReviewRequest(BaseModel):
+    approved: bool
+    review_note: str | None = None
 
 
 class PayProfileUpsertRequest(BaseModel):
@@ -337,12 +391,23 @@ def _actor_from_officer(
     role_set = {str(value or "").strip().lower() for value in internal_roles}
     is_treasurer = bool(treasurer or is_admin or "treasurer" in role_set)
     is_president = bool(president or "president" in role_set)
-    actor_role = "admin" if is_admin else "treasurer" if is_treasurer else "president" if is_president else "officer"
+    is_pay_viewer = bool("pay_viewer" in role_set)
+    actor_role = (
+        "admin"
+        if is_admin
+        else "treasurer"
+        if is_treasurer
+        else "president"
+        if is_president
+        else "pay_viewer"
+        if is_pay_viewer
+        else "officer"
+    )
     return PayActor(
         email=normalize_email(getattr(user, "email", "")),
         display_name=getattr(user, "display_name", None),
         role=actor_role,
-        can_view_all=True,
+        can_view_all=bool(is_treasurer or is_pay_viewer),
         can_edit_all=is_treasurer,
         can_lock=is_treasurer,
         is_guest=False,
@@ -684,6 +749,7 @@ async function approveIrsRate(candidateId) {
 }
 document.getElementById('entryForm').addEventListener('submit', async event => {
   event.preventDefault();
+  balancePresidentDailyHours();
   const data = Object.fromEntries(new FormData(event.target).entries());
   data.period_id = context.period.id;
   data.display_name = data.display_name || (context.actor && (context.actor.display_name || context.actor.email)) || '';
@@ -1248,6 +1314,10 @@ def _pay_view_content(view: str, *, actor: PayActor) -> str:
             <div class="toolbar"><button type="submit" class="secondary">Save Pay Profile</button></div>
           </form>
           <div class="table-wrap compact-table"><table><thead><tr><th>Source</th><th>Name</th><th>Email</th><th>Pay Basis</th><th>Base</th><th>Commission Hr</th><th>Total Hr</th><th>Status</th><th></th></tr></thead><tbody id="payProfilesBody"></tbody></table></div>
+          <div class="subpanel form-stack">
+            <div><h3>Pending Wage Changes</h3><p class="muted">Submitter wage changes do not affect reimbursements until treasurer/admin approval.</p></div>
+            <div class="table-wrap compact-table"><table><thead><tr><th>Requested</th><th>Name</th><th>Email</th><th>Basis</th><th>Base</th><th>Total Hr</th><th>Note</th><th></th></tr></thead><tbody id="profileChangeRequestsBody"></tbody></table></div>
+          </div>
           <div class="table-wrap compact-table"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th></th></tr></thead><tbody id="internalRolesBody"></tbody></table></div>
         </section>
         <section class="panel">
@@ -1528,15 +1598,15 @@ function demoRowsForStep() {
       offset: 3,
       entry_date: addDaysText(start, 3),
       display_name: 'Demo President',
-      hours: 4,
+      hours: 5,
       rate: 62,
       normal_rate: 45,
       mileage: 0,
       other: 18.75,
-      president_diff_hours: 4,
+      president_diff_hours: 3,
       president_diff_rate: 17,
       signed_off: true,
-      notes: 'DEMO TRAINING - president normal wage is $45.00/hr, presidential wage is $62.00/hr, and employer-work differential is $17.00/hr.',
+      notes: 'DEMO TRAINING - president worked 5 union hours at $62.00/hr and 3 scheduled employer hours at the $17.00/hr differential.',
     },
     {
       offset: 6,
@@ -2061,6 +2131,16 @@ function addCommonPlaceToLocations(value) {
   }
   addMileageLocationField(value);
 }
+function appendMileageMetric(parent, value, label) {
+  const item = document.createElement('div');
+  const span = document.createElement('span');
+  span.textContent = value || '';
+  const strong = document.createElement('strong');
+  strong.textContent = label || '';
+  item.appendChild(span);
+  item.appendChild(strong);
+  parent.appendChild(item);
+}
 function renderMileageForms() {
   const body = byId('mileageFormsBody');
   if (!body || !context) return;
@@ -2109,7 +2189,24 @@ function renderMileageForms() {
     details.className = 'hidden';
     const detailsCell = document.createElement('td');
     detailsCell.colSpan = 9;
-    detailsCell.innerHTML = `<div class="subpanel"><strong>Mileage report breakdown</strong><div class="metric-row"><div><span>${row.display_name || row.user_email || ''}</span><strong>Name</strong></div><div><span>${row.local_number || ''}</span><strong>Local</strong></div><div><span>${row.entry_date || ''}</span><strong>Date</strong></div><div><span>${row.description || ''}</span><strong>Description</strong></div><div><span>${rateCurrency(row.mileage_rate, 3)} per mile</span><strong>IRS Standard Mileage Rate</strong></div><div><span>${money(row.mileage_miles)} miles</span><strong>Total Distance</strong></div><div><span>${currency(row.mileage_amount)}</span><strong>Total Reimbursement</strong></div><div><span>${row.filename || ''}</span><strong>PDF</strong></div><div><span>${row.scan_status || 'generated'}</span><strong>Status</strong></div></div></div>`;
+    const panel = document.createElement('div');
+    panel.className = 'subpanel';
+    const title = document.createElement('strong');
+    title.textContent = 'Mileage report breakdown';
+    const metrics = document.createElement('div');
+    metrics.className = 'metric-row';
+    appendMileageMetric(metrics, row.display_name || row.user_email || '', 'Name');
+    appendMileageMetric(metrics, row.local_number || '', 'Local');
+    appendMileageMetric(metrics, row.entry_date || '', 'Date');
+    appendMileageMetric(metrics, row.description || '', 'Description');
+    appendMileageMetric(metrics, `${rateCurrency(row.mileage_rate, 3)} per mile`, 'IRS Standard Mileage Rate');
+    appendMileageMetric(metrics, `${money(row.mileage_miles)} miles`, 'Total Distance');
+    appendMileageMetric(metrics, currency(row.mileage_amount), 'Total Reimbursement');
+    appendMileageMetric(metrics, row.filename || '', 'PDF');
+    appendMileageMetric(metrics, row.scan_status || 'generated', 'Status');
+    panel.appendChild(title);
+    panel.appendChild(metrics);
+    detailsCell.appendChild(panel);
     details.appendChild(detailsCell);
     toggle.addEventListener('click', () => details.classList.toggle('hidden'));
     body.appendChild(tr);
@@ -2236,7 +2333,9 @@ function fillMyPayProfileForm() {
   normalizeProfileWageInputType(form);
   const entryForm = byId('entryForm');
   if (entryForm && entryForm.address && !entryForm.address.value) entryForm.address.value = row.default_address || '';
-  setText('myPayProfileSummary', row.calculated_hourly_rate ? `Current hourly rate $${money(row.calculated_hourly_rate)}` : 'No saved pay profile yet');
+  const pending = (context.pay_profile_change_requests || []).find(item => item.status === 'pending' && String(item.principal_email || '').toLowerCase() === String(actor.email || '').toLowerCase());
+  const baseSummary = row.calculated_hourly_rate ? `Current hourly rate $${money(row.calculated_hourly_rate)}` : 'No saved pay profile yet';
+  setText('myPayProfileSummary', pending ? `${baseSummary}; wage change pending treasurer approval` : baseSummary);
   syncPayProfileVisibility();
 }
 function previousPayrollMonthFor(value) {
@@ -2257,6 +2356,31 @@ function activePayBasis() {
   const form = byId('myPayProfileForm');
   if (form && form.pay_basis) return form.pay_basis.value || 'hourly';
   return (context && context.pay_profile && context.pay_profile.pay_basis) || 'hourly';
+}
+function isPresidentDifferentialEnabled() {
+  const input = document.querySelector('#presidentDifferentialPanel input[name="president_diff_hours"]');
+  return !!input && !input.disabled;
+}
+function balancePresidentDailyHours(changedName) {
+  const form = byId('entryForm');
+  if (!form || !isPresidentDifferentialEnabled()) return;
+  const hoursInput = form.elements.namedItem('hours');
+  const diffInput = form.elements.namedItem('president_diff_hours');
+  if (!hoursInput || !diffInput) return;
+  const rawHours = Number(hoursInput.value || 0);
+  const rawDiff = Number(diffInput.value || 0);
+  if (changedName === 'president_diff_hours') {
+    const boundedDiff = Math.max(0, Math.min(8, rawDiff));
+    diffInput.value = boundedDiff ? boundedDiff.toFixed(2).replace(/[.]00$/, '') : '';
+    hoursInput.value = Math.max(0, 8 - boundedDiff).toFixed(2).replace(/[.]00$/, '');
+    return;
+  }
+  if (changedName === 'hours' || rawHours || rawDiff) {
+    const boundedHours = Math.max(0, Math.min(8, rawHours));
+    hoursInput.value = boundedHours ? boundedHours.toFixed(2).replace(/[.]00$/, '') : '';
+    const diff = boundedHours || rawDiff ? Math.max(0, 8 - boundedHours) : 0;
+    diffInput.value = diff ? diff.toFixed(2).replace(/[.]00$/, '') : '';
+  }
 }
 function syncPayProfileVisibility() {
   normalizeProfileWageInputType(byId('myPayProfileForm'));
@@ -2301,7 +2425,7 @@ function mergedPayProfileRows() {
   }
   for (const row of context.internal_roles || []) {
     mergeRow(row.principal_email, {
-      source: row.role === 'president' ? 'President role' : row.role === 'treasurer' ? 'Treasurer role' : 'Internal role',
+      source: row.role === 'president' ? 'President role' : row.role === 'treasurer' ? 'Treasurer role' : row.role === 'pay_viewer' ? 'Pay Viewer role' : 'Internal role',
       principal_id: row.principal_id,
       principal_email: row.principal_email,
       principal_display_name: row.principal_display_name,
@@ -2353,6 +2477,46 @@ function renderPayProfiles() {
     body.appendChild(tr);
   }
 }
+function renderProfileChangeRequests() {
+  const body = byId('profileChangeRequestsBody');
+  if (!body || !context) return;
+  body.innerHTML = '';
+  const rows = (context.pay_profile_change_requests || []).filter(row => row.status === 'pending');
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 8;
+    td.textContent = 'No pending wage changes.';
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  for (const row of rows) {
+    const tr = document.createElement('tr');
+    addCell(tr, row.requested_at_utc);
+    addCell(tr, row.principal_display_name);
+    addCell(tr, row.principal_email);
+    addCell(tr, row.pay_basis);
+    addCell(tr, `${row.base_wage_input_type} ${currency(row.base_wage_amount)}`);
+    addCell(tr, currency(row.calculated_hourly_rate));
+    addCell(tr, row.notes || row.review_note || '');
+    const actionCell = document.createElement('td');
+    const approve = document.createElement('button');
+    approve.type = 'button';
+    approve.className = 'secondary';
+    approve.textContent = 'Approve';
+    approve.addEventListener('click', () => reviewProfileChange(row.id, true));
+    const reject = document.createElement('button');
+    reject.type = 'button';
+    reject.className = 'danger';
+    reject.textContent = 'Reject';
+    reject.addEventListener('click', () => reviewProfileChange(row.id, false));
+    actionCell.appendChild(approve);
+    actionCell.appendChild(reject);
+    tr.appendChild(actionCell);
+    body.appendChild(tr);
+  }
+}
 function renderInternalRoleSearch(rows) {
   const body = byId('internalRoleSearchBody');
   if (!body) return;
@@ -2379,11 +2543,11 @@ function renderInternalRoleSearch(rows) {
     useButton.textContent = 'Use';
     useButton.addEventListener('click', () => fillPayProfileForm(row));
     actionCell.appendChild(useButton);
-    for (const role of ['president', 'treasurer']) {
+    for (const role of ['president', 'treasurer', 'pay_viewer']) {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'secondary';
-      button.textContent = role === 'president' ? 'Set President' : 'Set Treasurer';
+      button.textContent = role === 'president' ? 'Set President' : role === 'treasurer' ? 'Set Treasurer' : 'Set Pay Viewer';
       button.addEventListener('click', () => assignInternalRole(index, role));
       actionCell.appendChild(button);
     }
@@ -2499,10 +2663,16 @@ bind('entryForm', 'submit', async event => {
   try { await api('/pay/api/entries', { method: 'POST', body: JSON.stringify(data) }); setText('entryStatus', 'Signed off and saved'); await loadContext(); }
   catch (err) { setText('entryStatus', err.message); }
 });
-bind('entryForm', 'change', () => {
+bind('entryForm', 'change', event => {
   const stubForm = byId('stubForm');
   if (stubForm && activePayBasis() === 'commission') stubForm.payroll_month.value = previousPayrollMonthFor(currentEntryDateValue());
+  balancePresidentDailyHours(event.target && event.target.name);
   syncPayProfileVisibility();
+});
+bind('entryForm', 'input', event => {
+  if (event.target && (event.target.name === 'hours' || event.target.name === 'president_diff_hours')) {
+    balancePresidentDailyHours(event.target.name);
+  }
 });
 bind('stubForm', 'submit', async event => {
   event.preventDefault();
@@ -2642,6 +2812,7 @@ function openEntryForEdit(row) {
   setFormValue(form, 'local_number', row.local_number || '3106');
   setFormValue(form, 'address', row.address || '');
   setFormValue(form, 'president_diff_hours', row.president_diff_hours || '');
+  balancePresidentDailyHours();
   setFormValue(form, 'notes', row.notes || '');
   const certify = form.querySelector('input[name="submitter_certified"]');
   if (certify) certify.checked = !!row.submitter_certified_at_utc;
@@ -2710,9 +2881,41 @@ bind('cancelCorrectionBtn', 'click', () => {
   if (form) form.reset();
   hideCorrectionPanel();
 });
-bind('lockBtn', 'click', async () => {
-  try { const result = await api(`/pay/api/periods/${context.period.id}/lock`, { method: 'POST', body: JSON.stringify({}) }); setText('treasurerStatus', result.signing_link || 'Sent'); await loadContext(); }
-  catch (err) { setText('treasurerStatus', err.message); }
+function renderLockSendResult(result) {
+  const node = byId('treasurerStatus');
+  if (!node) return;
+  node.textContent = '';
+  const status = document.createElement('span');
+  status.textContent = result.signing_link ? 'Packet sent. President signing link: ' : 'Packet sent.';
+  node.appendChild(status);
+  if (result.signing_link) {
+    const link = document.createElement('a');
+    link.href = result.signing_link;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = 'Open DocuSeal';
+    node.appendChild(document.createTextNode(' '));
+    node.appendChild(link);
+  }
+  const excluded = result.excluded_entries || [];
+  if (excluded.length) {
+    const warning = document.createElement('span');
+    warning.textContent = ` | ${excluded.length} needs-fix/rejected entr${excluded.length === 1 ? 'y was' : 'ies were'} excluded.`;
+    node.appendChild(warning);
+  }
+}
+bind('lockBtn', 'click', async event => {
+  const button = event.currentTarget;
+  const originalLabel = button ? button.textContent : 'Lock And Send';
+  try {
+    if (button) { button.disabled = true; button.textContent = 'Sending...'; }
+    setText('treasurerStatus', 'Building packet and sending to DocuSeal...');
+    const result = await api(`/pay/api/periods/${context.period.id}/lock`, { method: 'POST', body: JSON.stringify({}) });
+    renderLockSendResult(result);
+    await loadContext();
+  }
+  catch (err) { setText('treasurerStatus', `Lock/send failed: ${err.message}`); }
+  finally { if (button) { button.disabled = false; button.textContent = originalLabel; } }
 });
 bind('revisionBtn', 'click', async () => {
   try { await api(`/pay/api/periods/${context.period.id}/revision`, { method: 'POST', body: JSON.stringify({}) }); setText('treasurerStatus', 'Revision opened'); await loadContext(); }
@@ -2813,7 +3016,7 @@ bind('myPayProfileForm', 'submit', async event => {
   data.status = 'active';
   try {
     await api('/pay/api/profiles', { method: 'POST', body: JSON.stringify(data) });
-    setText('myPayProfileStatus', 'Saved');
+    setText('myPayProfileStatus', data.pending_wage_approval ? 'Address saved; wage change pending treasurer approval' : 'Saved');
     await loadContext();
   } catch (err) {
     setText('myPayProfileStatus', err.message);
@@ -2832,6 +3035,20 @@ bind('payProfileForm', 'submit', async event => {
     setText('payProfileStatus', err.message);
   }
 });
+async function reviewProfileChange(requestId, approved) {
+  if (!requestId) return;
+  const reviewNote = approved ? '' : prompt('Reason for rejecting this wage change?') || '';
+  try {
+    await api(`/pay/api/profiles/changes/${encodeURIComponent(requestId)}/review`, {
+      method: 'POST',
+      body: JSON.stringify({ approved, review_note: reviewNote }),
+    });
+    setText('payProfileStatus', approved ? 'Wage change approved' : 'Wage change rejected');
+    await loadContext();
+  } catch (err) {
+    setText('payProfileStatus', err.message);
+  }
+}
 async function removePayProfile(email, name) {
   if (!email) return;
   const label = name || email;
@@ -2860,9 +3077,20 @@ bind('commonPlaceForm', 'submit', async event => {
 });
 bind('importLicensedUsersBtn', 'click', async () => {
   try {
-    const result = await api('/pay/api/internal-users/import', { method: 'POST', body: JSON.stringify({ limit: 999 }) });
-    const skipped = Number(result.skipped_count || 0);
-    setText('internalRoleStatus', `Imported ${result.imported_count || 0} paid Microsoft user${result.imported_count === 1 ? '' : 's'}${skipped ? `, skipped ${skipped}` : ''}`);
+    const preview = await api('/pay/api/internal-users/import', { method: 'POST', body: JSON.stringify({ limit: 999, confirm: false }) });
+    const count = Number(preview.candidate_count || 0);
+    const skipped = Number(preview.skipped_count || 0);
+    if (!count) {
+      setText('internalRoleStatus', `No new paid users to import${skipped ? `; skipped ${skipped}` : ''}`);
+      return;
+    }
+    if (!confirm(`Import ${count} Microsoft paid user${count === 1 ? '' : 's'} as expense-only profiles? ${skipped ? `${skipped} will be skipped.` : ''}`)) {
+      setText('internalRoleStatus', 'Import cancelled');
+      return;
+    }
+    const result = await api('/pay/api/internal-users/import', { method: 'POST', body: JSON.stringify({ limit: 999, confirm: true }) });
+    const imported = Number(result.imported_count || 0);
+    setText('internalRoleStatus', `Imported ${imported} paid Microsoft user${imported === 1 ? '' : 's'}${skipped ? `, skipped ${skipped}` : ''}`);
     await loadContext();
   } catch (err) {
     setText('internalRoleStatus', err.message);
@@ -3171,7 +3399,7 @@ async def pay_page(request: Request):
     actor = await _current_pay_actor(request)
     if not actor:
         return RedirectResponse(url="/pay/start", status_code=303)
-    landing = "treasurer" if actor.can_lock else "entry"
+    landing = "treasurer" if actor.can_view_all else "entry"
     return RedirectResponse(url=f"/pay/{landing}", status_code=303)
 
 
@@ -3192,16 +3420,28 @@ async def pay_view_page(view: str, request: Request):
     return HTMLResponse(_render_pay_workspace_page(view=normalized_view, actor=actor))
 
 
-async def _pay_period_choices(db: Db) -> list[dict[str, object]]:
-    rows = await db.fetchall(
-        """SELECT p.id, p.period_start, p.period_end, p.status, p.revision,
-                  COUNT(e.id) AS entry_count
-           FROM pay_periods p
-           LEFT JOIN pay_entries e ON e.period_id = p.id
-           GROUP BY p.id, p.period_start, p.period_end, p.status, p.revision
-           ORDER BY p.period_start DESC, p.revision DESC
-           LIMIT 26"""
-    )
+async def _pay_period_choices(db: Db, *, actor: PayActor) -> list[dict[str, object]]:
+    if actor.can_view_all:
+        rows = await db.fetchall(
+            """SELECT p.id, p.period_start, p.period_end, p.status, p.revision,
+                      COUNT(e.id) AS entry_count
+               FROM pay_periods p
+               LEFT JOIN pay_entries e ON e.period_id = p.id
+               GROUP BY p.id, p.period_start, p.period_end, p.status, p.revision
+               ORDER BY p.period_start DESC, p.revision DESC
+               LIMIT 26"""
+        )
+    else:
+        rows = await db.fetchall(
+            """SELECT p.id, p.period_start, p.period_end, p.status, p.revision,
+                      COUNT(e.id) AS entry_count
+               FROM pay_periods p
+               LEFT JOIN pay_entries e ON e.period_id = p.id AND e.user_email=?
+               GROUP BY p.id, p.period_start, p.period_end, p.status, p.revision
+               ORDER BY p.period_start DESC, p.revision DESC
+               LIMIT 26""",
+            (actor.email,),
+        )
     return [
         {
             "id": row[0],
@@ -3240,7 +3480,7 @@ async def pay_context(request: Request):
             "created_at_utc": row[7],
             "updated_at_utc": row[8],
         }
-    periods = await _pay_period_choices(db)
+    periods = await _pay_period_choices(db, actor=actor)
     entries = await list_entries(db, period_id=str(period["id"]), actor=actor)
     attachments = await list_attachments(db, period_id=str(period["id"]), actor=actor)
     compensation_stubs = await list_compensation_stubs(db, actor=actor)
@@ -3266,6 +3506,9 @@ async def pay_context(request: Request):
         "settings": settings,
         "demo_settings": await pay_demo_settings(db),
         "pay_profile": current_profile,
+        "pay_profile_change_requests": await list_pay_profile_change_requests(
+            db, email=None if actor.can_lock else actor.email, pending_only=not actor.can_lock
+        ),
         "pay_users": await list_pay_users(db) if actor.can_lock else [],
         "pay_profiles": await list_pay_profiles(db) if actor.can_lock else [],
         "internal_roles": await list_internal_role_assignments(db) if actor.can_lock else [],
@@ -3306,6 +3549,7 @@ async def pay_demo_context(request: Request):
         "settings": settings,
         "demo_settings": demo_settings,
         "pay_profile": None,
+        "pay_profile_change_requests": [],
         "pay_users": [],
         "pay_profiles": [],
         "internal_roles": [],
@@ -3356,6 +3600,7 @@ async def save_pay_entry(body: PayEntryUpsertRequest, request: Request):
             actor=actor,
             data=body.model_dump(),
             pay_cfg=request.app.state.cfg.pay_portal,
+            require_submitter_certification=True,
         )
     except PermissionError as exc:
         raise _forbidden(str(exc)) from exc
@@ -3525,6 +3770,7 @@ async def create_pay_mileage(entry_id: str, body: PayMileageRequest, request: Re
             description=body.description,
             locations=body.locations,
             rate_text=body.rate,
+            graph=getattr(request.app.state, "graph", None),
         )
     except PermissionError as exc:
         raise _forbidden(str(exc)) from exc
@@ -3693,7 +3939,7 @@ async def import_pay_internal_users(body: PayInternalUserImportRequest, request:
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    imported: list[dict[str, object]] = []
+    candidates: list[dict[str, object]] = []
     skipped: list[dict[str, object]] = []
     for row in rows:
         email = normalize_email(getattr(row, "email", None) or getattr(row, "user_principal_name", None))
@@ -3706,11 +3952,26 @@ async def import_pay_internal_users(body: PayInternalUserImportRequest, request:
         if existing:
             skipped.append({"email": email, "reason": "profile exists"})
             continue
+        candidates.append({"email": email, "display_name": display_name, "principal_id": principal_id})
+
+    if not body.confirm:
+        return {
+            "preview": True,
+            "candidate_count": len(candidates),
+            "skipped_count": len(skipped),
+            "candidates": candidates,
+            "skipped": skipped,
+            "imported_count": 0,
+            "imported": [],
+        }
+
+    imported: list[dict[str, object]] = []
+    for candidate in candidates:
         saved = await upsert_pay_profile(
             request.app.state.db,
-            principal_id=principal_id,
-            principal_email=email,
-            principal_display_name=display_name,
+            principal_id=str(candidate.get("principal_id") or "").strip() or None,
+            principal_email=str(candidate["email"]),
+            principal_display_name=str(candidate.get("display_name") or candidate["email"]),
             pay_basis="expense_only",
             base_wage_input_type="hourly",
             base_wage_amount=0,
@@ -3725,6 +3986,8 @@ async def import_pay_internal_users(body: PayInternalUserImportRequest, request:
         imported.append(saved)
 
     return {
+        "preview": False,
+        "candidate_count": len(candidates),
         "imported_count": len(imported),
         "skipped_count": len(skipped),
         "imported": imported,
@@ -3826,7 +4089,60 @@ async def _save_pay_profile_request(
         target_status = str((existing or {}).get("status") or "active")
         target_pay_basis = "president" if actor.is_president and existing_basis == "president" else body.pay_basis
     wage_input_type = body.base_wage_input_type
+    if str(target_pay_basis or "").strip().lower() in {"hourly", "weekly"}:
+        wage_input_type = str(target_pay_basis).strip().lower()
     try:
+        requested_profile = {
+            "pay_basis": target_pay_basis,
+            "base_wage_input_type": wage_input_type,
+            "base_wage_amount": body.base_wage_amount,
+            "weekly_basis_hours": body.weekly_basis_hours,
+            "commission_month_1_amount": body.commission_month_1_amount,
+            "commission_month_2_amount": body.commission_month_2_amount,
+            "commission_month_3_amount": body.commission_month_3_amount,
+        }
+        if not actor.can_lock:
+            existing = await pay_profile_by_email(request.app.state.db, email=target_email)
+            wage_changed = pay_profile_wage_fields_changed(existing, requested_profile)
+            safe_basis = str((existing or {}).get("pay_basis") or "expense_only")
+            safe_wage_type = str((existing or {}).get("base_wage_input_type") or "hourly")
+            safe_profile = await upsert_pay_profile(
+                request.app.state.db,
+                principal_id=target_principal_id,
+                principal_email=target_email,
+                principal_display_name=target_display_name,
+                pay_basis=safe_basis,
+                base_wage_input_type=safe_wage_type,
+                base_wage_amount=float((existing or {}).get("base_wage_amount") or 0),
+                weekly_basis_hours=float((existing or {}).get("weekly_basis_hours") or body.weekly_basis_hours or 40),
+                commission_month_1_amount=float((existing or {}).get("commission_month_1_amount") or 0),
+                commission_month_2_amount=float((existing or {}).get("commission_month_2_amount") or 0),
+                commission_month_3_amount=float((existing or {}).get("commission_month_3_amount") or 0),
+                status=str((existing or {}).get("status") or "active"),
+                notes=body.notes,
+                updated_by=actor.email,
+                default_address=body.default_address,
+            )
+            if wage_changed:
+                pending = await request_pay_profile_change(
+                    request.app.state.db,
+                    principal_id=target_principal_id,
+                    principal_email=target_email,
+                    principal_display_name=target_display_name,
+                    pay_basis=target_pay_basis,
+                    base_wage_input_type=wage_input_type,
+                    base_wage_amount=body.base_wage_amount,
+                    weekly_basis_hours=body.weekly_basis_hours,
+                    commission_month_1_amount=body.commission_month_1_amount,
+                    commission_month_2_amount=body.commission_month_2_amount,
+                    commission_month_3_amount=body.commission_month_3_amount,
+                    status=target_status,
+                    notes=body.notes,
+                    requested_by=actor.email,
+                    default_address=body.default_address,
+                )
+                return {**safe_profile, "pending_wage_approval": True, "pending_profile_change": pending}
+            return safe_profile
         return await upsert_pay_profile(
             request.app.state.db,
             principal_id=target_principal_id,
@@ -3858,11 +4174,26 @@ async def update_pay_profile(email: str, body: PayProfileUpsertRequest, request:
     return await _save_pay_profile_request(body, request, email_override=email)
 
 
+@router.post("/pay/api/profiles/changes/{request_id}/review")
+async def review_pay_profile_change(request_id: str, body: PayProfileChangeReviewRequest, request: Request):
+    actor = await _require_treasurer(request)
+    try:
+        return await review_pay_profile_change_request(
+            request.app.state.db,
+            request_id=request_id,
+            actor=actor.email,
+            approved=body.approved,
+            review_note=body.review_note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.delete("/pay/api/profiles/{email}")
 async def remove_pay_profile(email: str, request: Request):
     actor = await _require_treasurer(request)
     try:
-        removed = await delete_pay_profile(request.app.state.db, email=email)
+        removed = await delete_pay_profile(request.app.state.db, email=email, actor=actor.email)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"removed": removed, "removed_by": actor.email}
@@ -3901,11 +4232,20 @@ async def lock_pay_period(period_id: str, body: PayLockRequest, request: Request
             actor=actor,
             president_signer_email=body.president_email,
             docx_to_pdf_func=docx_to_pdf,
+            mailer=getattr(request.app.state, "mailer", None),
         )
     except PermissionError as exc:
+        await _record_pay_lock_failure(request, period_id=period_id, actor=actor, exc=exc, status_code=403)
         raise _forbidden(str(exc)) from exc
     except ValueError as exc:
+        await _record_pay_lock_failure(request, period_id=period_id, actor=actor, exc=exc, status_code=400)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        await _record_pay_lock_failure(request, period_id=period_id, actor=actor, exc=exc, status_code=502)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        await _record_pay_lock_failure(request, period_id=period_id, actor=actor, exc=exc, status_code=502)
+        raise HTTPException(status_code=502, detail=f"failed to lock and send pay packet: {exc}") from exc
 
 
 @router.post("/pay/api/periods/{period_id}/revision")

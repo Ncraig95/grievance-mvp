@@ -8,7 +8,7 @@ import tempfile
 from datetime import date
 from dataclasses import dataclass
 from html import unescape
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from uuid import uuid4
 
 import requests
@@ -2518,6 +2518,8 @@ class DocuSealClient:
         submitter_id: str | int,
         email: str | None = None,
         send_email: bool = False,
+        completed: bool | None = None,
+        fields: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         submitter_key = str(submitter_id or "").strip()
         if not submitter_key:
@@ -2527,6 +2529,10 @@ class DocuSealClient:
         normalized_email = str(email or "").strip()
         if normalized_email:
             payload["email"] = normalized_email
+        if completed is not None:
+            payload["completed"] = bool(completed)
+        if fields is not None:
+            payload["fields"] = fields
 
         resp = requests.put(
             f"{self.base_url}/api/submitters/{submitter_key}",
@@ -2541,6 +2547,19 @@ class DocuSealClient:
         except Exception:
             response_payload = {"raw_text": resp.text[:400]}
         return response_payload if isinstance(response_payload, dict) else {"data": response_payload}
+
+    def auto_complete_submitter(
+        self,
+        *,
+        submitter_id: str | int,
+        fields: list[dict[str, object]],
+    ) -> dict[str, object]:
+        return self.update_submitter(
+            submitter_id=submitter_id,
+            send_email=False,
+            completed=True,
+            fields=fields,
+        )
 
     @staticmethod
     def _first_object(payload: object) -> dict:
@@ -2707,6 +2726,7 @@ class DocuSealClient:
 
     def download_completed_artifacts(self, *, submission_id: str) -> dict:
         zip_bytes: bytes | None = None
+        signed_pdf_bytes: bytes | None = None
         last_err: str | None = None
         for path in (
             f"/api/submissions/{submission_id}/completed.zip",
@@ -2722,6 +2742,37 @@ class DocuSealClient:
                 break
             last_err = f"{resp.status_code} {resp.text[:400]}"
 
+        documents: dict | list | None = None
+        if zip_bytes is None:
+            documents_resp = requests.get(
+                f"{self.base_url}/api/submissions/{submission_id}/documents",
+                headers=self._headers(is_json=False),
+                params={"merge": "true"},
+                timeout=self.timeout,
+            )
+            if 200 <= documents_resp.status_code < 300:
+                try:
+                    parsed_documents = documents_resp.json()
+                    if isinstance(parsed_documents, (dict, list)):
+                        documents = parsed_documents
+                except Exception:
+                    documents = None
+                document_url = self._extract_completed_document_url(documents)
+                if document_url:
+                    pdf_resp = requests.get(
+                        self._absolute_docuseal_url(document_url),
+                        headers=self._headers(is_json=False),
+                        timeout=self.timeout,
+                    )
+                    if 200 <= pdf_resp.status_code < 300 and pdf_resp.content:
+                        signed_pdf_bytes = pdf_resp.content
+                    else:
+                        last_err = f"{pdf_resp.status_code} {pdf_resp.text[:400]}"
+                elif documents is not None:
+                    last_err = "documents endpoint response missing document URL"
+            else:
+                last_err = f"{documents_resp.status_code} {documents_resp.text[:400]}"
+
         details: dict | None = None
         info = requests.get(
             f"{self.base_url}/api/submissions/{submission_id}",
@@ -2734,10 +2785,48 @@ class DocuSealClient:
             except Exception:
                 details = None
 
-        if zip_bytes is None and details is None:
+        if zip_bytes is None and signed_pdf_bytes is None and details is None:
             raise RuntimeError(f"DocuSeal artifact download failed: {last_err}")
 
         return {
             "completed_zip_bytes": zip_bytes,
+            "signed_pdf_bytes": signed_pdf_bytes,
+            "documents": documents,
             "submission": details,
         }
+
+    def _absolute_docuseal_url(self, url: str) -> str:
+        parsed = urlparse(url)
+        if parsed.scheme and parsed.netloc:
+            return url
+        return urljoin(f"{self.base_url}/", url.lstrip("/"))
+
+    @classmethod
+    def _extract_completed_document_url(cls, payload: object) -> str | None:
+        candidates = cls._iter_completed_document_url_candidates(payload)
+        pdf_candidates = [url for url in candidates if ".pdf" in urlparse(url).path.lower()]
+        return (pdf_candidates or candidates or [None])[0]
+
+    @classmethod
+    def _iter_completed_document_url_candidates(cls, payload: object) -> list[str]:
+        urls: list[str] = []
+        if isinstance(payload, dict):
+            for key in (
+                "download_url",
+                "downloadUrl",
+                "document_url",
+                "documentUrl",
+                "url",
+                "href",
+            ):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    urls.append(value.strip())
+            for key in ("documents", "data", "value", "results", "files"):
+                value = payload.get(key)
+                if isinstance(value, (dict, list)):
+                    urls.extend(cls._iter_completed_document_url_candidates(value))
+        elif isinstance(payload, list):
+            for item in payload:
+                urls.extend(cls._iter_completed_document_url_candidates(item))
+        return urls

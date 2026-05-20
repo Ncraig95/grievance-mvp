@@ -52,6 +52,8 @@ from grievance_api.web.routes_officers import (
     officer_case_events,
     officer_cases,
     officer_profile,
+    officers_admin_page,
+    officers_new_page,
     officer_next_grievance_number,
     motion_sheet_settings,
     officers_page,
@@ -448,17 +450,19 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
             host="8.8.8.8",
         )
 
-        response = await officers_page(request)
-        html = response.body.decode("utf-8")
-        create_select = html[
-            html.index('<select id="createOfficerStatus">') : html.index("</select>", html.index('<select id="createOfficerStatus">'))
+        tracker_response = await officers_page(request)
+        tracker_html = tracker_response.body.decode("utf-8")
+        new_response = await officers_new_page(request)
+        new_html = new_response.body.decode("utf-8")
+        create_select = new_html[
+            new_html.index('<select id="createOfficerStatus">') : new_html.index("</select>", new_html.index('<select id="createOfficerStatus">'))
         ]
-        edit_select = html[
-            html.index('<select id="editOfficerStatus">') : html.index("</select>", html.index('<select id="editOfficerStatus">'))
+        edit_select = tracker_html[
+            tracker_html.index('<select id="editOfficerStatus">') : tracker_html.index("</select>", tracker_html.index('<select id="editOfficerStatus">'))
         ]
 
-        self.assertIn('<select id="createOfficerStatus">', html)
-        self.assertIn('<select id="editOfficerStatus">', html)
+        self.assertIn('<select id="createOfficerStatus">', new_html)
+        self.assertIn('<select id="editOfficerStatus">', tracker_html)
         self.assertIn('<option value="open">Open</option>', create_select)
         self.assertIn('<option value="open_at_state">Open at State</option>', create_select)
         self.assertIn('<option value="open_at_national">Open at National</option>', create_select)
@@ -489,7 +493,7 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
             host="8.8.8.8",
         )
 
-        response = await officers_page(request)
+        response = await officers_admin_page(request)
         html = response.body.decode("utf-8")
 
         self.assertIn("Officer Profile", html)
@@ -504,13 +508,16 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
             host="8.8.8.8",
         )
 
-        response = await officers_page(request)
+        response = await officers_new_page(request)
         html = response.body.decode("utf-8")
+        tracker_response = await officers_page(request)
+        tracker_html = tracker_response.body.decode("utf-8")
 
         self.assertIn("Grievance ID / Number", html)
         self.assertIn('<select id="createContract">', html)
         self.assertNotIn('id="createGrievanceId"', html)
-        self.assertIn('<select id="editContract"', html)
+        self.assertNotIn('<select id="editContract"', html)
+        self.assertIn('<select id="editContract"', tracker_html)
         self.assertIn('const FIXED_SCOPE_OPTIONS =', html)
         for label in (
             "City of Jacksonville (COJ)",
@@ -529,7 +536,7 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
             host="8.8.8.8",
         )
 
-        response = await officers_page(request)
+        response = await officers_new_page(request)
         html = response.body.decode("utf-8")
 
         self.assertIn("async function loadNextGrievanceNumber()", html)
@@ -575,8 +582,8 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("position: sticky;", html)
         self.assertIn("top: 0;", html)
         self.assertIn(".tracker-table-wrap {", html)
-        self.assertIn("max-height: 70vh;", html)
-        self.assertIn("overflow-y: auto;", html)
+        self.assertNotIn("max-height: 70vh;", html)
+        self.assertNotIn("overflow-y: auto;", html)
         self.assertIn('<div class="table-wrap tracker-table-wrap">', html)
 
     async def test_officers_page_renders_hero_and_tracker_metrics(self) -> None:
@@ -596,7 +603,7 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="metricEscalatedValue">0</div>', html)
         self.assertIn('href="#trackerPanel"', html)
 
-    async def test_officers_page_renders_compact_expandable_tracker(self) -> None:
+    async def test_officers_page_renders_side_detail_tracker(self) -> None:
         request = _Request(
             state=SimpleNamespace(cfg=self._cfg(auth_enabled=True), db=self.db),
             session=self._session_user("admin", email="admin@example.org"),
@@ -607,12 +614,13 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         html = response.body.decode("utf-8")
 
         self.assertIn("Grievance Overview", html)
-        self.assertIn("Narrative Summary", html)
-        self.assertIn("function renderExpandedDetails(row)", html)
+        self.assertIn('id="caseDetailPanel"', html)
         self.assertIn("Full Narrative", html)
-        self.assertIn("narrative_summary", html)
-        self.assertIn("aria-expanded=", html)
-        self.assertIn("function toggleExpandedCase(caseId)", html)
+        self.assertIn("function renderCaseDetail(row)", html)
+        self.assertIn("function selectCase(caseId)", html)
+        self.assertIn("aria-selected=", html)
+        self.assertNotIn("function renderExpandedDetails(row)", html)
+        self.assertNotIn("function toggleExpandedCase(caseId)", html)
 
     @unittest.skipIf(esprima is None, "esprima not installed")
     async def test_officers_page_inline_script_parses(self) -> None:
@@ -665,7 +673,9 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Quick Nav", html)
         self.assertIn('class="workspace-menu-bar"', html)
         self.assertIn('href="#filtersPanel"', html)
-        self.assertIn('href="#mutationSplit"', html)
+        self.assertIn('href="/officers/new"', html)
+        self.assertIn('href="/officers/admin"', html)
+        self.assertNotIn('href="#mutationSplit"', html)
         self.assertIn('href="/ops"', html)
         self.assertIn("Ops Console", html)
         self.assertIn('href="/pay"', html)
@@ -948,7 +958,7 @@ class OfficerTrackerTests(unittest.IsolatedAsyncioTestCase):
         loaded = await motion_sheet_settings(request)
         self.assertEqual(loaded.officers, saved.officers)
 
-        response = await officers_page(request)
+        response = await officers_admin_page(request)
         html = response.body.decode("utf-8")
         self.assertIn('id="motionSheetSettingsPanel"', html)
         self.assertIn("/officers/forms", html)

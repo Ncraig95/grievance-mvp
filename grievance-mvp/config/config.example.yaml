@@ -38,6 +38,10 @@ document_policies:
     # Internal Statement of Occurrence submissions open DocuSeal immediately
     # after generation instead of waiting for grievance_number assignment.
     signature_dispatch_timing: immediate
+    # Optional delayed fallback: if the signer does not finish DocuSeal,
+    # complete signer1 with the attested typed name after this delay.
+    attested_auto_sign_enabled: true
+    attested_auto_sign_delay_seconds: 60
   non_discipline_grievance_brief:
     folder_resolution: default
     default_signer_field: ""
@@ -136,7 +140,13 @@ officer_tracking:
   roster: []
 pay_portal:
   enabled: true
-  sharepoint_root_folder: Pay Portal
+  sharepoint_root_folder: Local3106/Pay Portal
+  sharepoint_library: Documents
+  # Optional: route Pay Portal uploads/conversion temp files to a different SharePoint site than grievance filing.
+  sharepoint_site_hostname: cwa3106.sharepoint.com
+  sharepoint_site_path: /sites/OfficerEboardcommittee
+  docx_pdf_graph_temp_folder: Local3106/Pay Portal/_docx_pdf_convert
+  mileage_legacy_sharepoint_folder: Local3106/Mileage
   voucher_template_path: /app/templates/docx/Local 3106 Pay - Expense Voucher.docx
   receipt_max_file_bytes: 10000000
   receipt_max_entry_bytes: 50000000
