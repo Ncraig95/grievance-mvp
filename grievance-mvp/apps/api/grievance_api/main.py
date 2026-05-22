@@ -22,6 +22,7 @@ from .services.outreach_service import OutreachService
 from .services.referral_service import ReferralService
 from .services.sharepoint_graph import GraphUploader
 from .services.statement_auto_sign import run_statement_auto_sign_worker, statement_auto_sign_enabled
+from .dues_forms.routes import router as dues_forms_router
 from .web.routes_approval import router as approval_router
 from .web.routes_health import router as health_router
 from .web.routes_hosted_forms import router as hosted_forms_router
@@ -197,6 +198,7 @@ def create_app() -> FastAPI:
     app.include_router(outreach_router)
     app.include_router(referrals_router)
     app.include_router(pay_router)
+    app.include_router(dues_forms_router)
     app.include_router(steward_router)
     app.include_router(standalone_router)
 

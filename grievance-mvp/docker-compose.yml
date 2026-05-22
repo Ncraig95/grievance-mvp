@@ -17,6 +17,8 @@ services:
       - ./.env
     environment:
       - TZ=UTC
+      - DUES_FORMS_DATA_DIR=/data/dues_forms
+      - DUES_FORMS_DB_PATH=/data/dues_forms.sqlite3
     volumes:
       - ./config:/app/config:ro
       - ./data:/data

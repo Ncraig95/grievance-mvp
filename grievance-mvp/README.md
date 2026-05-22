@@ -273,6 +273,75 @@ Main watchdog env vars (`grievance-mvp/.env`):
 - `WATCHDOG_ALERT_EMAIL`
 - `WATCHDOG_ALERT_POPUP`
 
+
+## Dues Form PDF Intake
+
+The dues form intake scans one-page dues deduction PDFs from the local inbox at `data/dues_forms/inbox/`. It can also first copy PDFs from SharePoint `CWA 3106\Grievances Library - Documents\New Member E-Cards` into that local inbox, then stores extracted rows in `instance/dues_forms.sqlite3`, keeps source PDFs, and refreshes CSV/XLSX exports after each scan.
+
+Install Ubuntu OCR/rendering packages:
+
+```bash
+sudo apt update
+sudo apt install -y poppler-utils tesseract-ocr
+```
+
+Install Python dependencies in the project venv:
+
+```bash
+cd grievance-mvp
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r apps/api/requirements.txt
+```
+
+Create folders and initialize the dues database:
+
+```bash
+cd grievance-mvp
+mkdir -p data/dues_forms/{inbox,processed,needs_review,failed,exports,raw_text} instance
+PYTHONPATH=apps/api .venv/bin/python -c "from grievance_api.dues_forms.database import ensure_directories, init_db; ensure_directories(); init_db()"
+```
+
+Run the scanner manually against the local inbox only:
+
+```bash
+cd grievance-mvp
+.venv/bin/python -m app.dues_forms.scanner --once
+```
+
+Run the scanner after copying PDFs from the SharePoint e-card folder into the local inbox:
+
+```bash
+cd grievance-mvp
+.venv/bin/python -m app.dues_forms.scanner --once --sharepoint-sync \
+  --graph-config config/config.yaml \
+  --sharepoint-library "Grievances Library - Documents" \
+  --sharepoint-folder "New Member E-Cards"
+```
+
+The SharePoint sync uses `graph.site_hostname` and `graph.site_path` from `config/config.yaml` unless `--sharepoint-site-hostname` or `--sharepoint-site-path` are supplied. It never deletes SharePoint files; it records downloaded SharePoint item IDs in SQLite so the timer does not repeatedly download the same remote PDF. The example systemd timer runs at 6:30 AM and 6:30 PM with a small randomized delay; remove the second `OnCalendar` line if once daily is enough.
+
+Exports are written to:
+
+```text
+data/dues_forms/exports/dues_deduction_forms.csv
+data/dues_forms/exports/dues_deduction_forms.xlsx
+```
+
+Install the systemd timer after editing `systemd/dues-form-scanner.service` so `WorkingDirectory`, `ExecStart`, and `DUES_FORMS_GRAPH_CONFIG_PATH` point to this checkout, venv, and config file:
+
+```bash
+cd grievance-mvp
+sudo install -m 0644 systemd/dues-form-scanner.service /etc/systemd/system/dues-form-scanner.service
+sudo install -m 0644 systemd/dues-form-scanner.timer /etc/systemd/system/dues-form-scanner.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now dues-form-scanner.timer
+systemctl list-timers | grep dues-form-scanner
+journalctl -u dues-form-scanner.service -n 100 --no-pager
+```
+
+The web UI is available at `/dues-forms` through the existing app. It uses the app's existing ops/local access checks and does not expose the scanner or SQLite database directly.
+
 ## 7) Smoke tests
 
 Local end-to-end smoke (intake -> docs -> approval -> docuseal local/external checks):

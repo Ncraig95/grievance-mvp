@@ -17,9 +17,11 @@ data/grievances.sqlite3
 data/grievances/
 data/docuseal/
 data/docuseal_db/
+data/dues_forms/
 data/template_compare/
 data/template_compare_after_restore/
 data/watchdog/
+instance/
 tmp/
 .venv/
 .tmpvenv/

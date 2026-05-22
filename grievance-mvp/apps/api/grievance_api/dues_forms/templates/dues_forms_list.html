@@ -1,0 +1,113 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dues Forms</title>
+  <style>
+    :root {
+      --bg: #f5f7f8;
+      --panel: #ffffff;
+      --border: #d7e0e7;
+      --text: #1f2933;
+      --muted: #5b6b78;
+      --accent: #0f766e;
+      --danger: #a4262c;
+      --warning: #8a3b00;
+      --success: #107c10;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      color: var(--text);
+      background: var(--bg);
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    }
+    .shell { max-width: 1500px; margin: 0 auto; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 14px;
+    }
+    .header, .actions, .filters {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+    }
+    h1 { margin: 0; font-size: 28px; }
+    .summary { color: var(--muted); }
+    a.button, button {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+      padding: 8px 10px;
+      text-decoration: none;
+      font: inherit;
+      cursor: pointer;
+    }
+    a.button.primary, button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    select { min-width: 180px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; background: #fff; }
+    th, td { padding: 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+    th { background: #eef4f6; font-size: 12px; text-transform: uppercase; color: var(--muted); }
+    .status { display: inline-block; border-radius: 999px; padding: 3px 8px; font-size: 12px; font-weight: 700; background: #eef2f5; }
+    .status-processed, .status-approved, .status-exported { color: var(--success); background: #eaf6ea; }
+    .status-needs_review { color: var(--warning); background: #fff3e0; }
+    .status-rejected { color: var(--danger); background: #fde8e8; }
+    .empty { color: var(--muted); text-align: center; }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="panel header">
+      <div>
+        <h1>Dues Forms</h1>
+        <div class="summary">{{total_count}} records shown</div>
+      </div>
+      <div class="actions">
+        <a class="button" href="/dues-forms/export.csv">CSV</a>
+        <a class="button" href="/dues-forms/export.xlsx">XLSX</a>
+      </div>
+    </section>
+    <section class="panel">
+      <form class="filters" method="get" action="/dues-forms">
+        <label>Review status
+          <select name="review_status">
+            {{status_options}}
+          </select>
+        </label>
+        <button class="primary" type="submit">Apply</button>
+      </form>
+    </section>
+    <section class="panel">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Processed</th>
+              <th>Status</th>
+              <th>Name</th>
+              <th>Employee ID</th>
+              <th>Local</th>
+              <th>Source</th>
+              <th>Method</th>
+              <th>Issue</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{rows}}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

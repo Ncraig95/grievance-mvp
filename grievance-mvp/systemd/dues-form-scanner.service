@@ -1,0 +1,14 @@
+[Unit]
+Description=Grievance MVP dues form PDF scanner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/path/to/grievance-mvp
+Environment=PYTHONPATH=/path/to/grievance-mvp/apps/api
+Environment=DUES_FORMS_SHAREPOINT_ENABLED=1
+Environment=DUES_FORMS_GRAPH_CONFIG_PATH=/path/to/grievance-mvp/config/config.yaml
+Environment=DUES_FORMS_SHAREPOINT_LIBRARY=Grievances Library - Documents
+Environment=DUES_FORMS_SHAREPOINT_FOLDER=New Member E-Cards
+ExecStart=/path/to/grievance-mvp/.venv/bin/python -m app.dues_forms.scanner --once

@@ -1620,6 +1620,7 @@ def _render_officers_page(user: OfficerUserContext, cfg, *, page: str = "tracker
 
     review_links = [
         _menu_link("Tracker", "/officers" if page != "tracker" else "#trackerPanel", "Open the daily grievance table.", external=page != "tracker"),
+        _menu_link("Dues Forms", "/dues-forms", "Review dues deduction PDF intake and export CSV/XLSX files.", external=True),
         _menu_link("Lost Wage Portal", "/pay", "Open the payroll and expense voucher portal.", external=True),
         _menu_link("Referrals", "/officers/referrals", "Open the referral tracking portal.", external=True),
     ]
