@@ -9,6 +9,9 @@ WorkingDirectory=/path/to/grievance-mvp
 Environment=PYTHONPATH=/path/to/grievance-mvp/apps/api
 Environment=DUES_FORMS_SHAREPOINT_ENABLED=1
 Environment=DUES_FORMS_GRAPH_CONFIG_PATH=/path/to/grievance-mvp/config/config.yaml
+Environment=DUES_FORMS_SHAREPOINT_SITE_HOSTNAME=cwa3106.sharepoint.com
+Environment=DUES_FORMS_SHAREPOINT_SITE_PATH=/sites/GrievancesLibrary
 Environment=DUES_FORMS_SHAREPOINT_LIBRARY=Grievances Library - Documents
 Environment=DUES_FORMS_SHAREPOINT_FOLDER=New Member E-Cards
+Environment=DUES_FORMS_SHAREPOINT_RECURSIVE=1
 ExecStart=/path/to/grievance-mvp/.venv/bin/python -m app.dues_forms.scanner --once

@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 from html import escape
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from ..web.officer_auth import require_ops_page_access
-from . import database, exporter
+from . import database, exporter, scanner, sharepoint_sync
 
 router = APIRouter()
 
@@ -59,12 +60,42 @@ def _row_html(record: dict) -> str:  # noqa: ANN001
     """
 
 
-def _render_list(records: list[dict], *, selected_status: str | None) -> str:
+def _scan_message_html(scan_result: str | None) -> str:
+    if not scan_result:
+        return ""
+    return f'<section class="panel notice">{escape(scan_result)}</section>'
+
+
+def _ignored_row_html(record: dict) -> str:  # noqa: ANN001
+    return f"""
+      <tr>
+        <td>{escape(str(record.get("ignored_at") or ""))}</td>
+        <td>{escape(str(record.get("source_filename") or ""))}</td>
+        <td>{escape(str(record.get("ignored_reason") or ""))}</td>
+        <td>{escape(str(record.get("source_path") or ""))}</td>
+        <td class="hash">{escape(str(record.get("source_sha256") or ""))}</td>
+      </tr>
+    """
+
+
+def _render_ignored(records: list[dict]) -> str:
+    rows = "\n".join(_ignored_row_html(record) for record in records)
+    if not rows:
+        rows = '<tr><td colspan="5" class="empty">No ignored files found.</td></tr>'
+    return (
+        _template("dues_forms_ignored.html")
+        .replace("{{rows}}", rows)
+        .replace("{{total_count}}", str(len(records)))
+    )
+
+
+def _render_list(records: list[dict], *, selected_status: str | None, scan_result: str | None = None) -> str:
     rows = "\n".join(_row_html(record) for record in records)
     if not rows:
         rows = '<tr><td colspan="9" class="empty">No dues forms found.</td></tr>'
     return (
         _template("dues_forms_list.html")
+        .replace("{{scan_message}}", _scan_message_html(scan_result))
         .replace("{{status_options}}", _status_options(selected_status))
         .replace("{{rows}}", rows)
         .replace("{{total_count}}", str(len(records)))
@@ -124,13 +155,63 @@ def _render_detail(record: dict) -> str:  # noqa: ANN001
 
 
 @router.get("/dues-forms", response_class=HTMLResponse)
-async def dues_forms_list(request: Request, review_status: str | None = None):
+async def dues_forms_list(request: Request, review_status: str | None = None, scan_result: str | None = None):
     redirect = await _require_dues_forms_access(request, next_path="/dues-forms")
     if redirect is not None:
         return redirect
     selected = review_status if review_status in database.ALLOWED_REVIEW_STATUSES else None
     records = database.list_records(review_status=selected)
-    return HTMLResponse(_render_list(records, selected_status=selected))
+    return HTMLResponse(_render_list(records, selected_status=selected, scan_result=scan_result))
+
+
+def _manual_sharepoint_settings() -> sharepoint_sync.SharePointSyncSettings:
+    return sharepoint_sync.SharePointSyncSettings.from_env(enabled=True, recursive=True)
+
+
+def _scan_result_summary(summary: dict) -> str:  # noqa: ANN001
+    sharepoint = summary.get("sharepoint") if isinstance(summary.get("sharepoint"), dict) else {}
+    downloaded = int(sharepoint.get("downloaded", 0) or 0) if isinstance(sharepoint, dict) else 0
+    remote = int(sharepoint.get("remote_files", 0) or 0) if isinstance(sharepoint, dict) else 0
+    already_downloaded = int(sharepoint.get("already_downloaded", 0) or 0) if isinstance(sharepoint, dict) else 0
+    duplicate_hashes = int(sharepoint.get("duplicate_hashes", 0) or 0) if isinstance(sharepoint, dict) else 0
+    skipped_non_pdf = int(sharepoint.get("skipped_non_pdf", 0) or 0) if isinstance(sharepoint, dict) else 0
+    download_errors = int(sharepoint.get("download_errors", 0) or 0) if isinstance(sharepoint, dict) else 0
+    sharepoint_detail = ""
+    if sharepoint:
+        sharepoint_detail = (
+            f", SharePoint: {downloaded} PDFs downloaded from {remote} remote files"
+            f", {already_downloaded} already downloaded"
+            f", {duplicate_hashes} duplicate hashes"
+            f", {skipped_non_pdf} non-PDF skipped"
+            f", {download_errors} download errors"
+        )
+    return (
+        "Manual scan complete: "
+        f"{int(summary.get('processed', 0) or 0)} processed, "
+        f"{int(summary.get('needs_review', 0) or 0)} needs review, "
+        f"{int(summary.get('failed', 0) or 0)} failed, "
+        f"{int(summary.get('ignored', 0) or 0)} ignored, "
+        f"{int(summary.get('duplicates', 0) or 0)} duplicates"
+        + sharepoint_detail
+        + "."
+    )
+
+
+@router.post("/dues-forms/run-scan")
+async def dues_forms_run_scan(request: Request):
+    redirect = await _require_dues_forms_access(request, next_path="/dues-forms")
+    if redirect is not None:
+        return redirect
+    try:
+        summary = await asyncio.to_thread(
+            scanner.scan_once,
+            stable_delay_seconds=0,
+            sharepoint_settings=_manual_sharepoint_settings(),
+        )
+        message = _scan_result_summary(summary)
+    except Exception as exc:
+        message = f"Manual scan failed: {exc}"
+    return RedirectResponse(url=f"/dues-forms?{urlencode({'scan_result': message})}", status_code=303)
 
 
 @router.get("/dues-forms/export.csv")
@@ -159,6 +240,15 @@ async def dues_forms_export_xlsx(request: Request):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename="dues_deduction_forms.xlsx",
     )
+
+
+@router.get("/dues-forms/ignored", response_class=HTMLResponse)
+async def dues_forms_ignored(request: Request):
+    redirect = await _require_dues_forms_access(request, next_path="/dues-forms/ignored")
+    if redirect is not None:
+        return redirect
+    records = database.list_ignored_files()
+    return HTMLResponse(_render_ignored(records))
 
 
 @router.get("/dues-forms/{record_id}", response_class=HTMLResponse)

@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-venv python3-pip \
     libreoffice \
     poppler-utils \
+    tesseract-ocr \
     fonts-dejavu-core \
     fonts-liberation \
     fonts-liberation2 \

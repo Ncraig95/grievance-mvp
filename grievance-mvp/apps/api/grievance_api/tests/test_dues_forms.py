@@ -15,7 +15,7 @@ except RuntimeError:
     FastAPI = None
     TestClient = None
 
-from grievance_api.dues_forms import database, exporter, scanner, sharepoint_sync
+from grievance_api.dues_forms import database, exporter, filters, scanner, sharepoint_sync
 from grievance_api.dues_forms.parser import parse_dues_form_text
 from grievance_api.dues_forms.routes import router as dues_forms_router
 
@@ -48,6 +48,38 @@ def _temp_paths(tmpdir: str) -> tuple[Path, Path]:
     return root / "data" / "dues_forms", root / "instance" / "dues_forms.sqlite3"
 
 
+class DuesFormsFilterTests(unittest.TestCase):
+    def test_filename_filter_does_not_ignore_valid_jackson_name(self):
+        self.assertEqual(filters.should_ignore_filename("L3106 Stevie Jackson.pdf"), (False, ""))
+
+    def test_filename_filter_ignores_coj_and_perc_card_files(self):
+        cases = {
+            "COJ employee card.pdf": "filename_contains_coj",
+            "cityofjacksonville onboarding.pdf": "filename_contains_cityofjacksonville",
+            "city_of_jacksonville form.pdf": "filename_contains_city_of_jacksonville",
+            "member perc_card.pdf": "filename_contains_perc_card",
+        }
+        for filename, reason in cases.items():
+            with self.subTest(filename=filename):
+                self.assertEqual(filters.should_ignore_filename(filename), (True, reason))
+
+    def test_text_filter_ignores_city_of_jacksonville_text(self):
+        self.assertEqual(
+            filters.should_ignore_text("City of Jacksonville Employee Information"),
+            (True, "text_contains_city_of_jacksonville"),
+        )
+
+    def test_text_filter_ignores_employee_no_and_pay_grade(self):
+        ignored, reason = filters.should_ignore_text("Employee No: 12345\nPay Grade: 10")
+
+        self.assertTrue(ignored)
+        self.assertIn("employee_no", reason)
+        self.assertIn("pay_grade", reason)
+
+    def test_text_filter_does_not_ignore_valid_dues_authorization(self):
+        self.assertEqual(filters.should_ignore_text(SAMPLE_OCR_TEXT), (False, ""))
+
+
 class DuesFormsParserTests(unittest.TestCase):
     def test_parser_handles_sample_ocr_text_and_normalizes_values(self):
         record = parse_dues_form_text(SAMPLE_OCR_TEXT)
@@ -71,6 +103,61 @@ class DuesFormsParserTests(unittest.TestCase):
 
 
 class DuesFormsScannerTests(unittest.TestCase):
+    def test_filename_ignored_pdf_moves_to_ignored_without_extraction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir, db_path = _temp_paths(tmp)
+            database.ensure_directories(data_dir=data_dir, db_path=db_path)
+            inbox = data_dir / "inbox"
+            (inbox / "COJ packet.pdf").write_bytes(b"coj fake pdf")
+            calls: list[str] = []
+
+            def extractor(path: Path):
+                calls.append(path.name)
+                return SAMPLE_OCR_TEXT, "test"
+
+            result = scanner.scan_once(
+                data_dir=data_dir,
+                db_path=db_path,
+                stable_delay_seconds=0,
+                extractor=extractor,
+            )
+
+            ignored_rows = database.list_ignored_files(db_path=db_path)
+            self.assertEqual(result["ignored"], 1)
+            self.assertEqual(result["processed"], 0)
+            self.assertEqual(calls, [])
+            self.assertEqual(database.count_records(db_path=db_path), 0)
+            self.assertEqual(len(ignored_rows), 1)
+            self.assertEqual(ignored_rows[0]["source_filename"], "COJ packet.pdf")
+            self.assertEqual(ignored_rows[0]["ignored_reason"], "filename_contains_coj")
+            self.assertTrue(list((data_dir / "ignored").glob("*/*.pdf")))
+
+    def test_text_ignored_pdf_moves_to_ignored_without_dues_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir, db_path = _temp_paths(tmp)
+            database.ensure_directories(data_dir=data_dir, db_path=db_path)
+            inbox = data_dir / "inbox"
+            (inbox / "mixed.pdf").write_bytes(b"mixed fake pdf")
+
+            def extractor(path: Path):
+                return "Employee No: 12345\nPay Grade: 10\nJob Title: Worker", "test"
+
+            result = scanner.scan_once(
+                data_dir=data_dir,
+                db_path=db_path,
+                stable_delay_seconds=0,
+                extractor=extractor,
+            )
+
+            ignored_rows = database.list_ignored_files(db_path=db_path)
+            self.assertEqual(result["ignored"], 1)
+            self.assertEqual(result["processed"], 0)
+            self.assertEqual(database.count_records(db_path=db_path), 0)
+            self.assertEqual(len(ignored_rows), 1)
+            self.assertEqual(ignored_rows[0]["source_filename"], "mixed.pdf")
+            self.assertIn("employee_no", ignored_rows[0]["ignored_reason"])
+            self.assertTrue(list((data_dir / "ignored").glob("*/*.pdf")))
+
     def test_duplicate_pdf_hashes_are_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir, db_path = _temp_paths(tmp)
@@ -195,9 +282,96 @@ class DuesFormsSharePointSyncTests(unittest.TestCase):
             self.assertEqual(first["skipped_non_pdf"], 1)
             self.assertEqual(second["already_downloaded"], 1)
             self.assertEqual(graph.download_calls, 1)
+            self.assertTrue(graph.kwargs["recursive"])
             self.assertTrue((data_dir / "inbox" / "ecard.pdf").exists())
             self.assertTrue(database.sharepoint_item_seen(drive_id="drive-1", item_id="item-1", db_path=db_path))
 
+    def test_sharepoint_sync_falls_back_to_documents_library_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir, db_path = _temp_paths(tmp)
+            database.ensure_directories(data_dir=data_dir, db_path=db_path)
+
+            class FakeGraph:
+                def __init__(self):
+                    self.libraries: list[str] = []
+
+                def list_files_in_folder_path(self, **kwargs):  # noqa: ANN003
+                    self.libraries.append(kwargs["library"])
+                    if kwargs["library"] != "Documents":
+                        raise RuntimeError(
+                            f"Could not find document library drive named '{kwargs['library']}'"
+                        )
+                    return [
+                        SimpleNamespace(
+                            drive_id="drive-1",
+                            item_id="item-1",
+                            name="ecard.pdf",
+                            path="New Member E-Cards/202605/ecard.pdf",
+                            web_url="https://example.invalid/ecard.pdf",
+                        )
+                    ]
+
+                def download_item_bytes(self, **kwargs):  # noqa: ANN003
+                    return b"fake remote pdf"
+
+            graph = FakeGraph()
+            settings = sharepoint_sync.SharePointSyncSettings(
+                enabled=True,
+                site_hostname="cwa3106.sharepoint.com",
+                site_path="/sites/CWA3106",
+                library="Grievances Library - Documents",
+                folder_path="New Member E-Cards",
+            )
+
+            result = sharepoint_sync.sync_sharepoint_pdfs_to_inbox(
+                data_dir=data_dir,
+                db_path=db_path,
+                settings=settings,
+                graph=graph,
+            )
+
+            self.assertEqual(graph.libraries[:2], ["Grievances Library - Documents", "Documents"])
+            self.assertEqual(result["downloaded"], 1)
+            self.assertTrue((data_dir / "inbox" / "ecard.pdf").exists())
+
+    def test_sharepoint_sync_continues_after_download_write_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir, db_path = _temp_paths(tmp)
+            database.ensure_directories(data_dir=data_dir, db_path=db_path)
+
+            class FakeGraph:
+                def list_files_in_folder_path(self, **kwargs):  # noqa: ANN003
+                    return [
+                        SimpleNamespace(
+                            drive_id="drive-1",
+                            item_id="item-1",
+                            name="ecard.pdf",
+                            path="New Member E-Cards/202605/ecard.pdf",
+                            web_url="https://example.invalid/ecard.pdf",
+                        )
+                    ]
+
+                def download_item_bytes(self, **kwargs):  # noqa: ANN003
+                    return b"fake remote pdf"
+
+            settings = sharepoint_sync.SharePointSyncSettings(
+                enabled=True,
+                site_hostname="cwa3106.sharepoint.com",
+                site_path="/sites/GrievancesLibrary",
+                library="Documents",
+                folder_path="New Member E-Cards",
+            )
+
+            with patch.object(Path, "write_bytes", side_effect=FileNotFoundError("missing tmp")):
+                result = sharepoint_sync.sync_sharepoint_pdfs_to_inbox(
+                    data_dir=data_dir,
+                    db_path=db_path,
+                    settings=settings,
+                    graph=FakeGraph(),
+                )
+
+            self.assertEqual(result["downloaded"], 0)
+            self.assertEqual(result["download_errors"], 1)
 
 
 class DuesFormsExportTests(unittest.TestCase):
@@ -227,11 +401,82 @@ class DuesFormsExportTests(unittest.TestCase):
 
 
 class DuesFormsRouteTests(unittest.TestCase):
+
+    def test_dues_forms_page_renders_manual_scan_button(self):
+        from grievance_api.dues_forms.routes import _render_list
+
+        html = _render_list([], selected_status=None, scan_result="Manual scan complete: 0 processed.")
+
+        self.assertIn('/dues-forms/run-scan', html)
+        self.assertIn('/dues-forms/ignored', html)
+        self.assertIn('Run Manual Scan', html)
+        self.assertIn('Ignored Files', html)
+        self.assertIn('Manual scan complete', html)
+
+    def test_scan_result_summary_includes_sharepoint_zero_counts(self):
+        from grievance_api.dues_forms.routes import _scan_result_summary
+
+        html = _scan_result_summary(
+            {
+                "processed": 0,
+                "needs_review": 0,
+                "failed": 0,
+                "ignored": 0,
+                "duplicates": 0,
+                "sharepoint": {
+                    "remote_files": 0,
+                    "downloaded": 0,
+                    "already_downloaded": 0,
+                    "duplicate_hashes": 0,
+                    "skipped_non_pdf": 0,
+                },
+            }
+        )
+
+        self.assertIn("SharePoint: 0 PDFs downloaded from 0 remote files", html)
+
+    def test_manual_sharepoint_settings_force_sync_enabled(self):
+        from grievance_api.dues_forms.routes import _manual_sharepoint_settings
+
+        with patch.dict(os.environ, {"DUES_FORMS_SHAREPOINT_ENABLED": "0"}):
+            settings = _manual_sharepoint_settings()
+
+        self.assertTrue(settings.enabled)
+        self.assertTrue(settings.recursive)
+
+    def test_ignored_page_renders_ignored_file_details(self):
+        from grievance_api.dues_forms.routes import _render_ignored
+
+        html = _render_ignored(
+            [
+                {
+                    "ignored_at": "2026-05-22T12:00:00+00:00",
+                    "source_filename": "COJ packet.pdf",
+                    "ignored_reason": "filename_contains_coj",
+                    "source_path": "/tmp/ignored/COJ packet.pdf",
+                    "source_sha256": "abc123",
+                }
+            ]
+        )
+
+        self.assertIn("2026-05-22T12:00:00+00:00", html)
+        self.assertIn("COJ packet.pdf", html)
+        self.assertIn("filename_contains_coj", html)
+        self.assertIn("/tmp/ignored/COJ packet.pdf", html)
+        self.assertIn("abc123", html)
+
     @unittest.skipIf(TestClient is None, "httpx is not installed for FastAPI TestClient")
     def test_routes_render_exports_and_update_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir, db_path = _temp_paths(tmp)
             database.ensure_directories(data_dir=data_dir, db_path=db_path)
+            database.insert_ignored_file(
+                source_filename="COJ packet.pdf",
+                source_path="/tmp/ignored/COJ packet.pdf",
+                source_sha256="ignored-route-123",
+                ignored_reason="filename_contains_coj",
+                db_path=db_path,
+            )
             record_id = database.insert_record(
                 {
                     "source_filename": "sample.pdf",
@@ -259,6 +504,7 @@ class DuesFormsRouteTests(unittest.TestCase):
                 listing = client.get("/dues-forms")
                 detail = client.get(f"/dues-forms/{record_id}")
                 csv_response = client.get("/dues-forms/export.csv")
+                ignored_response = client.get("/dues-forms/ignored")
                 status_response = client.post(
                     f"/dues-forms/{record_id}/status",
                     data={"review_status": "approved"},
@@ -270,6 +516,8 @@ class DuesFormsRouteTests(unittest.TestCase):
             self.assertEqual(detail.status_code, 200)
             self.assertIn("Jordan Member", detail.text)
             self.assertEqual(csv_response.status_code, 200)
+            self.assertEqual(ignored_response.status_code, 200)
+            self.assertIn("COJ packet.pdf", ignored_response.text)
             self.assertEqual(status_response.status_code, 303)
             self.assertEqual(database.get_record(record_id, db_path=db_path)["review_status"], "approved")
 
@@ -286,3 +534,15 @@ class DuesFormsSchemaTests(unittest.TestCase):
                 con.close()
 
             self.assertEqual(columns, list(database.DB_COLUMNS))
+
+    def test_schema_creates_ignored_files_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _data_dir, db_path = _temp_paths(tmp)
+            database.init_db(db_path)
+            con = sqlite3.connect(db_path)
+            try:
+                columns = [row[1] for row in con.execute("PRAGMA table_info(ignored_files)").fetchall()]
+            finally:
+                con.close()
+
+            self.assertEqual(columns, list(database.IGNORED_FILES_COLUMNS))

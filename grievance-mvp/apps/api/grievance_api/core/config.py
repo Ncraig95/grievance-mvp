@@ -310,6 +310,7 @@ class AppConfig:
     wait_for_grievance_number_before_signature: bool = True
     require_approver_decision: bool = True
     log_level: str = "INFO"
+    app_mode: str = "production"
 
 
 def _as_recipients(value: object) -> tuple[str, ...]:
@@ -505,6 +506,18 @@ def _as_float(value: object, default: float) -> float:
         return float(value)
     except Exception:
         return float(default)
+
+
+
+def _normalize_app_mode(value: object) -> str:
+    mode = str(value or "production").strip().lower()
+    if not mode:
+        return "production"
+    if mode in {"prod", "production"}:
+        return "production"
+    if mode in {"local", "dev", "development"}:
+        return "local"
+    raise RuntimeError(f"Unsupported APP_MODE '{value}'. Expected 'production' or 'local'.")
 
 
 def _normalize_signature_layout_mode(value: object) -> str:
@@ -730,7 +743,16 @@ def _as_standalone_forms(value: object) -> dict[str, StandaloneFormConfig]:
 
 def load_config(path: str) -> AppConfig:
     p = Path(path)
-    raw = yaml.safe_load(p.read_text(encoding="utf-8"))
+    raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    app_mode = _normalize_app_mode(os.getenv("APP_MODE", raw.get("app_mode", "production")))
+    local_mode = app_mode == "local"
+    raw_db_path = str(raw["db_path"]).strip()
+    raw_data_root = str(raw["data_root"]).strip()
+    db_path = (os.getenv("LOCAL_DB_PATH", "").strip() or raw_db_path) if local_mode else raw_db_path
+    data_root = (os.getenv("LOCAL_DATA_ROOT", "").strip() or raw_data_root) if local_mode else raw_data_root
+    hmac_shared_secret = str(raw.get("hmac_shared_secret", "")).strip()
+    if local_mode:
+        hmac_shared_secret = os.getenv("LOCAL_HMAC_SHARED_SECRET", "").strip() or hmac_shared_secret
     docuseal_raw = raw.get("docuseal", {}) or {}
     graph_raw = raw.get("graph", {}) or {}
     email_raw = raw.get("email", {}) or {}
@@ -788,9 +810,9 @@ def load_config(path: str) -> AppConfig:
             )
 
     return AppConfig(
-        hmac_shared_secret=str(raw.get("hmac_shared_secret", "")).strip(),
-        db_path=str(raw["db_path"]),
-        data_root=str(raw["data_root"]),
+        hmac_shared_secret=hmac_shared_secret,
+        db_path=db_path,
+        data_root=data_root,
         docx_template_path=str(raw["docx_template_path"]),
         doc_templates=_as_mapping(raw.get("doc_templates")),
         libreoffice_timeout_seconds=int(raw.get("libreoffice_timeout_seconds", 45)),
@@ -824,7 +846,12 @@ def load_config(path: str) -> AppConfig:
         docuseal=DocuSealConfig(
             base_url=str(docuseal_raw["base_url"]).strip(),
             api_token=str(docuseal_raw["api_token"]).strip(),
-            webhook_secret=str(docuseal_raw["webhook_secret"]).strip(),
+            webhook_secret=(
+                os.getenv("LOCAL_DOCUSEAL_WEBHOOK_SECRET", "").strip()
+                or str(docuseal_raw["webhook_secret"]).strip()
+                if local_mode
+                else str(docuseal_raw["webhook_secret"]).strip()
+            ),
             public_base_url=(str(docuseal_raw.get("public_base_url", "")).strip() or None),
             web_base_url=(
                 str(docuseal_raw.get("web_base_url", "")).strip()
@@ -1106,4 +1133,5 @@ def load_config(path: str) -> AppConfig:
         ),
         require_approver_decision=bool(raw.get("require_approver_decision", True)),
         log_level=_normalize_log_level(raw.get("log_level")),
+        app_mode=app_mode,
     )

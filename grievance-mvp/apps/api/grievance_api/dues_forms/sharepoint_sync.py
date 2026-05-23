@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from . import database
 
 DEFAULT_SHAREPOINT_LIBRARY = "Grievances Library - Documents"
 DEFAULT_SHAREPOINT_FOLDER = "New Member E-Cards"
+FALLBACK_SHAREPOINT_LIBRARIES: tuple[str, ...] = ("Documents", "Shared Documents")
 
 
 def _as_bool(value: object, default: bool = False) -> bool:
@@ -36,6 +38,17 @@ def _unique_destination(path: Path) -> Path:
     raise RuntimeError(f"unable to find unique destination for {path}")
 
 
+def _library_candidates(library: str) -> tuple[str, ...]:
+    candidates: list[str] = []
+    configured = str(library or "").strip()
+    if configured:
+        candidates.append(configured)
+    for fallback in FALLBACK_SHAREPOINT_LIBRARIES:
+        if fallback.casefold() not in {candidate.casefold() for candidate in candidates}:
+            candidates.append(fallback)
+    return tuple(candidates)
+
+
 @dataclass(frozen=True)
 class SharePointSyncSettings:
     enabled: bool = False
@@ -44,7 +57,7 @@ class SharePointSyncSettings:
     site_path: str = ""
     library: str = DEFAULT_SHAREPOINT_LIBRARY
     folder_path: str = DEFAULT_SHAREPOINT_FOLDER
-    recursive: bool = False
+    recursive: bool = True
 
     @classmethod
     def from_env(
@@ -79,7 +92,7 @@ class SharePointSyncSettings:
             recursive=(
                 bool(recursive)
                 if recursive is not None
-                else _as_bool(os.getenv("DUES_FORMS_SHAREPOINT_RECURSIVE"), False)
+                else _as_bool(os.getenv("DUES_FORMS_SHAREPOINT_RECURSIVE"), True)
             ),
         )
 
@@ -121,6 +134,7 @@ def sync_sharepoint_pdfs_to_inbox(
         "already_downloaded": 0,
         "duplicate_hashes": 0,
         "skipped_non_pdf": 0,
+        "download_errors": 0,
     }
     if not active_settings.enabled:
         return result
@@ -137,13 +151,33 @@ def sync_sharepoint_pdfs_to_inbox(
     if not site_hostname or not site_path:
         raise RuntimeError("SharePoint site hostname/path is required for dues form sync")
 
-    files = graph.list_files_in_folder_path(
-        site_hostname=site_hostname,
-        site_path=site_path,
-        library=active_settings.library,
-        folder_path=active_settings.folder_path,
-        recursive=active_settings.recursive,
-    )
+    files = []
+    last_error: Exception | None = None
+    for library in _library_candidates(active_settings.library):
+        try:
+            files = graph.list_files_in_folder_path(
+                site_hostname=site_hostname,
+                site_path=site_path,
+                library=library,
+                folder_path=active_settings.folder_path,
+                recursive=active_settings.recursive,
+            )
+            if logger and library != active_settings.library:
+                logger.info("SharePoint dues form sync using document library fallback: %s", library)
+            break
+        except RuntimeError as exc:
+            message = str(exc)
+            if "Could not find document library drive named" not in message:
+                raise
+            last_error = exc
+            if logger:
+                logger.info("SharePoint document library not found for dues sync: %s", library)
+    else:
+        if last_error is not None:
+            raise RuntimeError(
+                f"Could not find SharePoint document library. Tried: {', '.join(_library_candidates(active_settings.library))}"
+            ) from last_error
+
     result["remote_files"] = len(files)
 
     for item in files:
@@ -160,32 +194,40 @@ def sync_sharepoint_pdfs_to_inbox(
             continue
 
         dest = _unique_destination(inbox / name)
-        content = graph.download_item_bytes(drive_id=drive_id, item_id=item_id)
-        if not content:
+        tmp_dest = dest.with_name(f"{dest.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            content = graph.download_item_bytes(drive_id=drive_id, item_id=item_id)
+            if not content:
+                continue
+            inbox.mkdir(parents=True, exist_ok=True)
+            tmp_dest.write_bytes(content)
+            tmp_dest.replace(dest)
+            source_sha256 = scanner_sha256_file(dest)
+            if database.record_exists(source_sha256, db_path=resolved_db_path):
+                dest.unlink(missing_ok=True)
+                result["duplicate_hashes"] += 1
+                local_path = ""
+            else:
+                result["downloaded"] += 1
+                local_path = str(dest)
+            database.mark_sharepoint_item_downloaded(
+                drive_id=drive_id,
+                item_id=item_id,
+                name=name,
+                path=str(getattr(item, "path", "") or ""),
+                web_url=str(getattr(item, "web_url", "") or ""),
+                source_sha256=source_sha256,
+                local_path=local_path,
+                db_path=resolved_db_path,
+            )
+            if logger:
+                logger.info("SharePoint dues form synced: %s", name)
+        except Exception as exc:
+            tmp_dest.unlink(missing_ok=True)
+            result["download_errors"] += 1
+            if logger:
+                logger.exception("SharePoint dues form download failed for %s: %s", name, exc)
             continue
-        tmp_dest = dest.with_suffix(f"{dest.suffix}.tmp")
-        tmp_dest.write_bytes(content)
-        tmp_dest.replace(dest)
-        source_sha256 = scanner_sha256_file(dest)
-        if database.record_exists(source_sha256, db_path=resolved_db_path):
-            dest.unlink(missing_ok=True)
-            result["duplicate_hashes"] += 1
-            local_path = ""
-        else:
-            result["downloaded"] += 1
-            local_path = str(dest)
-        database.mark_sharepoint_item_downloaded(
-            drive_id=drive_id,
-            item_id=item_id,
-            name=name,
-            path=str(getattr(item, "path", "") or ""),
-            web_url=str(getattr(item, "web_url", "") or ""),
-            source_sha256=source_sha256,
-            local_path=local_path,
-            db_path=resolved_db_path,
-        )
-        if logger:
-            logger.info("SharePoint dues form synced: %s", name)
 
     return result
 

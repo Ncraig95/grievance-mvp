@@ -14,15 +14,22 @@ services:
         INSTALL_DEV_DEPS: "1"
     restart: unless-stopped
     env_file:
-      - ./.env
+      - ${APP_ENV_FILE:-./.env}
     environment:
       - TZ=UTC
       - DUES_FORMS_DATA_DIR=/data/dues_forms
       - DUES_FORMS_DB_PATH=/data/dues_forms.sqlite3
+      - DUES_FORMS_SHAREPOINT_ENABLED=${DUES_FORMS_SHAREPOINT_ENABLED:-1}
+      - DUES_FORMS_GRAPH_CONFIG_PATH=/app/config/config.yaml
+      - DUES_FORMS_SHAREPOINT_SITE_HOSTNAME=${DUES_FORMS_SHAREPOINT_SITE_HOSTNAME:-cwa3106.sharepoint.com}
+      - DUES_FORMS_SHAREPOINT_SITE_PATH=${DUES_FORMS_SHAREPOINT_SITE_PATH:-/sites/GrievancesLibrary}
+      - DUES_FORMS_SHAREPOINT_LIBRARY=${DUES_FORMS_SHAREPOINT_LIBRARY:-Grievances Library - Documents}
+      - DUES_FORMS_SHAREPOINT_FOLDER=${DUES_FORMS_SHAREPOINT_FOLDER:-New Member E-Cards}
+      - DUES_FORMS_SHAREPOINT_RECURSIVE=${DUES_FORMS_SHAREPOINT_RECURSIVE:-1}
     volumes:
       - ./config:/app/config:ro
       - ./data:/data
-      - "../Docx Files Template:/app/templates/docx:ro"
+      - "${DOCX_TEMPLATES_HOST_DIR:-../Docx Files Template}:/app/templates/docx:ro"
     networks:
       - grievance-net
     ports:
@@ -39,7 +46,7 @@ services:
       context: ./apps/smtp_graph_bridge
     restart: unless-stopped
     env_file:
-      - ./.env
+      - ${APP_ENV_FILE:-./.env}
     environment:
       - TZ=UTC
       - GRAPH_CONFIG_PATH=/app/config/config.yaml
@@ -54,7 +61,7 @@ services:
     image: postgres:16
     restart: unless-stopped
     env_file:
-      - ./.env
+      - ${APP_ENV_FILE:-./.env}
     environment:
       POSTGRES_USER: ${DOCUSEAL_DB_USER:-docuseal}
       POSTGRES_PASSWORD: ${DOCUSEAL_DB_PASSWORD:-docuseal}
@@ -79,7 +86,7 @@ services:
       smtp_graph_bridge:
         condition: service_started
     env_file:
-      - ./.env
+      - ${APP_ENV_FILE:-./.env}
     environment:
       - TZ=UTC
       - DATABASE_URL=postgresql://${DOCUSEAL_DB_USER:-docuseal}:${DOCUSEAL_DB_PASSWORD:-docuseal}@docuseal_db:5432/${DOCUSEAL_DB_NAME:-docuseal}

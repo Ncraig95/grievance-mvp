@@ -40,7 +40,16 @@ DB_COLUMNS: tuple[str, ...] = (
 
 EXPORT_COLUMNS: tuple[str, ...] = tuple(column for column in DB_COLUMNS if column != "raw_text")
 ALLOWED_REVIEW_STATUSES: tuple[str, ...] = ("needs_review", "processed", "approved", "rejected", "exported")
-DUES_SUBDIRS: tuple[str, ...] = ("inbox", "processed", "needs_review", "failed", "exports", "raw_text")
+IGNORED_FILES_TABLE = "ignored_files"
+IGNORED_FILES_COLUMNS: tuple[str, ...] = (
+    "id",
+    "source_filename",
+    "source_path",
+    "source_sha256",
+    "ignored_reason",
+    "ignored_at",
+)
+DUES_SUBDIRS: tuple[str, ...] = ("inbox", "processed", "needs_review", "failed", "ignored", "exports", "raw_text")
 
 
 def utcnow() -> str:
@@ -164,6 +173,22 @@ def init_db(db_path: str | Path | None = None) -> None:
             )
             """
         )
+        con.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {IGNORED_FILES_TABLE} (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              source_filename TEXT NOT NULL,
+              source_path TEXT,
+              source_sha256 TEXT,
+              ignored_reason TEXT NOT NULL,
+              ignored_at TEXT NOT NULL
+            )
+            """
+        )
+        con.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_ignored_files_ignored_at "
+            f"ON {IGNORED_FILES_TABLE}(ignored_at DESC, id DESC)"
+        )
         con.commit()
     finally:
         con.close()
@@ -251,6 +276,46 @@ def count_records(db_path: str | Path | None = None) -> int:
     with connect(db_path) as con:
         row = con.execute(f"SELECT COUNT(*) AS count FROM {TABLE_NAME}").fetchone()
     return int(row["count"] if row else 0)
+
+
+def insert_ignored_file(
+    *,
+    source_filename: str,
+    source_path: str | None,
+    source_sha256: str | None,
+    ignored_reason: str,
+    db_path: str | Path | None = None,
+) -> int:
+    init_db(db_path)
+    with connect(db_path) as con:
+        cur = con.execute(
+            f"""
+            INSERT INTO {IGNORED_FILES_TABLE}(
+              source_filename, source_path, source_sha256, ignored_reason, ignored_at
+            )
+            VALUES(?,?,?,?,?)
+            """,
+            (source_filename, source_path, source_sha256, ignored_reason, utcnow()),
+        )
+        con.commit()
+        return int(cur.lastrowid)
+
+
+def list_ignored_files(db_path: str | Path | None = None) -> list[dict[str, Any]]:
+    init_db(db_path)
+    with connect(db_path) as con:
+        rows = con.execute(
+            f"SELECT * FROM {IGNORED_FILES_TABLE} ORDER BY ignored_at DESC, id DESC"
+        ).fetchall()
+    return [row_to_dict(row) or {} for row in rows]
+
+
+def count_ignored_files(db_path: str | Path | None = None) -> int:
+    init_db(db_path)
+    with connect(db_path) as con:
+        row = con.execute(f"SELECT COUNT(*) AS count FROM {IGNORED_FILES_TABLE}").fetchone()
+    return int(row["count"] if row else 0)
+
 
 def sharepoint_item_seen(*, drive_id: str, item_id: str, db_path: str | Path | None = None) -> bool:
     init_db(db_path)

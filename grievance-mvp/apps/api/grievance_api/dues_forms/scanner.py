@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import database, exporter, sharepoint_sync
+from . import database, exporter, filters, sharepoint_sync
 from .parser import parse_dues_form_text, text_needs_ocr
 
 ExtractResult = tuple[str, str]
@@ -157,6 +157,35 @@ def _base_record(*, pdf_path: Path, source_sha256: str) -> dict[str, Any]:
     }
 
 
+def _record_ignored_pdf(
+    pdf_path: Path,
+    *,
+    data_dir: Path,
+    db_path: Path,
+    source_sha256: str,
+    reason: str,
+    logger: logging.Logger | None = None,
+) -> dict[str, Any]:
+    source_filename = pdf_path.name
+    dest = move_pdf(pdf_path, data_dir=data_dir, bucket="ignored")
+    ignored_id = database.insert_ignored_file(
+        source_filename=source_filename,
+        source_path=str(dest),
+        source_sha256=source_sha256,
+        ignored_reason=reason,
+        db_path=db_path,
+    )
+    if logger:
+        logger.info("ignored %s (%s); moved to %s", source_filename, reason, dest)
+    return {
+        "status": "ignored",
+        "ignored_id": ignored_id,
+        "source_sha256": source_sha256,
+        "ignored_reason": reason,
+        "destination": dest,
+    }
+
+
 def process_pdf(
     pdf_path: Path,
     *,
@@ -172,6 +201,17 @@ def process_pdf(
             logger.info("skipped duplicate %s; moved to %s", pdf_path.name, dest)
         return {"status": "duplicate", "source_sha256": source_sha256, "destination": dest}
 
+    ignored, reason = filters.should_ignore_filename(pdf_path.name)
+    if ignored:
+        return _record_ignored_pdf(
+            pdf_path,
+            data_dir=data_dir,
+            db_path=db_path,
+            source_sha256=source_sha256,
+            reason=reason,
+            logger=logger,
+        )
+
     raw_text = ""
     extraction_method = "failed"
     record_id: int | None = None
@@ -180,6 +220,16 @@ def process_pdf(
             raw_text, extraction_method = extractor(pdf_path)
         else:
             raw_text, extraction_method = extract_pdf_text(pdf_path, logger=logger)
+        ignored, reason = filters.should_ignore_text(raw_text)
+        if ignored:
+            return _record_ignored_pdf(
+                pdf_path,
+                data_dir=data_dir,
+                db_path=db_path,
+                source_sha256=source_sha256,
+                reason=reason,
+                logger=logger,
+            )
         parsed = parse_dues_form_text(raw_text)
         _save_raw_text(data_dir=data_dir, source_sha256=source_sha256, raw_text=raw_text)
         record = _base_record(pdf_path=pdf_path, source_sha256=source_sha256)
@@ -253,6 +303,7 @@ def scan_once(
         "processed": 0,
         "needs_review": 0,
         "failed": 0,
+        "ignored": 0,
         "duplicates": 0,
         "skipped_unstable": 0,
         "sharepoint": {},
@@ -266,7 +317,7 @@ def scan_once(
             settings=active_sharepoint_settings,
             logger=log,
         )
-    pdfs = sorted(path for path in inbox.iterdir() if path.is_file() and path.suffix.lower() == ".pdf")
+    pdfs = sorted(path for path in inbox.rglob("*") if path.is_file() and path.suffix.lower() == ".pdf")
     for pdf_path in pdfs:
         if not file_size_is_stable(pdf_path, delay_seconds=stable_delay_seconds):
             summary["skipped_unstable"] += 1
@@ -287,16 +338,19 @@ def scan_once(
             summary["needs_review"] += 1
         elif status == "duplicate":
             summary["duplicates"] += 1
+        elif status == "ignored":
+            summary["ignored"] += 1
         elif status == "failed":
             summary["failed"] += 1
 
     summary["exports"] = exporter.regenerate_exports(db_path=resolved_db_path, data_dir=resolved_data_dir)
     log.info(
-        "scan complete: scanned=%s processed=%s needs_review=%s failed=%s duplicates=%s skipped_unstable=%s",
+        "scan complete: scanned=%s processed=%s needs_review=%s failed=%s ignored=%s duplicates=%s skipped_unstable=%s",
         summary["scanned"],
         summary["processed"],
         summary["needs_review"],
         summary["failed"],
+        summary["ignored"],
         summary["duplicates"],
         summary["skipped_unstable"],
     )
@@ -332,7 +386,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Folder path within the document library. Defaults to New Member E-Cards.",
     )
-    parser.add_argument("--sharepoint-recursive", action="store_true", help="Include PDFs in nested SharePoint folders.")
+    parser.add_argument("--sharepoint-recursive", action="store_true", help="Include PDFs in nested SharePoint folders (enabled by default).")
     return parser
 
 
