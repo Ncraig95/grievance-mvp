@@ -741,6 +741,10 @@ def _as_standalone_forms(value: object) -> dict[str, StandaloneFormConfig]:
     return out
 
 
+def resolve_config_path(default: str = "/app/config/config.yaml") -> str:
+    return os.getenv("APP_CONFIG_PATH", default)
+
+
 def load_config(path: str) -> AppConfig:
     p = Path(path)
     raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}

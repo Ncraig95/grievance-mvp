@@ -20,7 +20,7 @@ services:
       - DUES_FORMS_DATA_DIR=/data/dues_forms
       - DUES_FORMS_DB_PATH=/data/dues_forms.sqlite3
       - DUES_FORMS_SHAREPOINT_ENABLED=${DUES_FORMS_SHAREPOINT_ENABLED:-1}
-      - DUES_FORMS_GRAPH_CONFIG_PATH=/app/config/config.yaml
+      - DUES_FORMS_GRAPH_CONFIG_PATH=${APP_CONFIG_PATH:-/app/config/config.yaml}
       - DUES_FORMS_SHAREPOINT_SITE_HOSTNAME=${DUES_FORMS_SHAREPOINT_SITE_HOSTNAME:-cwa3106.sharepoint.com}
       - DUES_FORMS_SHAREPOINT_SITE_PATH=${DUES_FORMS_SHAREPOINT_SITE_PATH:-/sites/GrievancesLibrary}
       - DUES_FORMS_SHAREPOINT_LIBRARY=${DUES_FORMS_SHAREPOINT_LIBRARY:-Grievances Library - Documents}

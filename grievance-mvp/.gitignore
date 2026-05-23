@@ -15,6 +15,7 @@ config/graph_cert.pem
 
 data/grievances.sqlite3
 data/grievances/
+data/local-safe/
 data/docuseal/
 data/docuseal_db/
 data/dues_forms/

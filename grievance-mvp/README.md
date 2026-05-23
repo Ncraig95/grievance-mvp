@@ -5,6 +5,27 @@ It accepts Microsoft Forms submissions, generates grievance documents from templ
 
 This repo is set up for real workflow operations: idempotent intake, staged signature handling, approval controls, automated notifications, SharePoint foldering, and recovery-oriented runtime tooling (health checks, watchdog, smoke tests).
 
+
+## Local-Safe Development Mode
+
+`APP_MODE=local` runs the grievance intake/signature/completion workflow with fake local providers only. In local mode the API instantiates local Graph mail, local SharePoint, and local DocuSeal providers; startup fails if real Graph, SharePoint, DocuSeal, or Cloudflare Access provider paths are selected. Production behavior is unchanged when `APP_MODE` is unset or `production`.
+
+Use the fake-only env/config pair when cloning or testing without secrets:
+
+```bash
+cd grievance-mvp
+./scripts/local-smoke-test.sh
+```
+
+The smoke script defaults to `./.env.local` when present, otherwise `./.env.local.example`. It passes that file explicitly to Docker Compose, refuses `.env` unless `--allow-dot-env` is supplied, resets only `data/local-safe`, and starts only the `api` service. It does not start `smtp_graph_bridge`, `docuseal`, `docuseal_db`, `docuseal_proxy`, or `cloudflared`.
+
+Local artifacts are written under `data/local-safe/grievances/local_mock/`:
+- `mail/` contains sent-message JSON and attachment files.
+- `sharepoint/` contains the mock SharePoint folder tree and uploaded generated/signed/audit artifacts.
+- `docuseal/` contains local submissions, submitted PDFs, signed PDFs, and completion ZIPs.
+
+The local config example is `config/config.local.example.yaml`; it uses the bundled `/app/templates/grievance_template.docx`, LibreOffice PDF conversion, fake webhook/HMAC values, and local-only provider URLs. Do not put real secrets in `.env.local.example`; copy it to `.env.local` only for local fake overrides.
+
 ## Public Form Links (Local Testing)
 
 Use this section in GitHub so other locals can run the process end-to-end.

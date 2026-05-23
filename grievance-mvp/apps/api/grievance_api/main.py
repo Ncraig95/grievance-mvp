@@ -3,13 +3,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
-
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from .core.config import load_config
+from .core.config import load_config, resolve_config_path
 from .core.intake_auth import validate_intake_auth_config
 from .core.logging import setup_logging
 from .core.officer_auth import validate_external_steward_auth_config, validate_officer_auth_config
@@ -40,7 +38,7 @@ from .web.routes_webhook import router as webhook_router
 
 
 def create_app() -> FastAPI:
-    cfg = load_config(os.getenv("APP_CONFIG_PATH", "/app/config/config.yaml"))
+    cfg = load_config(resolve_config_path())
     setup_logging(cfg.log_level)
     validate_intake_auth_config(cfg.intake_auth)
     validate_officer_auth_config(cfg.officer_auth)
