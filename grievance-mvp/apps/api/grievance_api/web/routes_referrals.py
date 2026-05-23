@@ -195,6 +195,8 @@ def _render_referrals_page() -> str:
       --muted: #5b6b78;
       --accent: #0f766e;
       --danger: #a4262c;
+      --warning: #8a3b00;
+      --success: #107c10;
     }}
     * {{ box-sizing: border-box; }}
     body {{
@@ -229,6 +231,37 @@ def _render_referrals_page() -> str:
     }}
     h1, h2 {{ margin: 0 0 8px; }}
     .summary {{ color: var(--muted); font-size: 14px; line-height: 1.5; }}
+    .metric-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 10px;
+    }}
+    .metric-card {{
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: linear-gradient(180deg, #ffffff 0%, #f6fafb 100%);
+      padding: 13px 14px;
+      min-height: 92px;
+    }}
+    .metric-label {{
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }}
+    .metric-value {{
+      margin-top: 8px;
+      color: #15242e;
+      font-size: 30px;
+      font-weight: 800;
+      line-height: 1;
+    }}
+    .metric-note {{
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
     .grid {{
       display: grid;
       grid-template-columns: repeat(5, minmax(160px, 1fr));
@@ -264,18 +297,56 @@ def _render_referrals_page() -> str:
     button.danger {{ background: var(--danger); }}
     .actions {{ display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }}
     .table-wrap {{ overflow: auto; border: 1px solid var(--border); border-radius: 10px; }}
-    table {{ width: 100%; min-width: 1380px; border-collapse: collapse; background: white; }}
-    th, td {{ border-bottom: 1px solid #e3e9ee; padding: 9px 10px; text-align: left; vertical-align: top; font-size: 13px; }}
-    th {{ position: sticky; top: 0; background: #edf4f7; z-index: 1; }}
+    table {{ width: 100%; min-width: 1460px; border-collapse: collapse; background: white; }}
+    th, td {{ border-bottom: 1px solid #e3e9ee; padding: 11px 12px; text-align: left; vertical-align: top; font-size: 13px; }}
+    th {{ position: sticky; top: 0; background: #e8f1f4; color: #243746; z-index: 1; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }}
     tr:hover td {{ background: #f8fbfc; }}
     .pill {{ display: inline-flex; border-radius: 999px; padding: 4px 8px; background: #edf4f7; font-weight: 700; }}
-    .due {{ color: #8a3b00; font-weight: 700; }}
-    .sent {{ color: #107c10; font-weight: 700; }}
+    .status-badge {{
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 4px 9px;
+      font-size: 12px;
+      font-weight: 800;
+      background: #edf4f7;
+      color: #244253;
+    }}
+    .status-open {{ background: #fff4ce; color: #6b3a00; }}
+    .status-contacted {{ background: #dff3f1; color: #075b61; }}
+    .status-converted {{ background: #dff3df; color: #0b5a0b; }}
+    .status-not_interested, .status-closed {{ background: #e6ebef; color: #384b59; }}
+    .paid-badge {{
+      display: inline-flex;
+      border-radius: 999px;
+      padding: 4px 9px;
+      font-size: 12px;
+      font-weight: 800;
+      margin-bottom: 6px;
+    }}
+    .paid-badge.paid {{ background: #dff3df; color: #0b5a0b; }}
+    .paid-badge.unpaid {{ background: #edf4f7; color: #40515e; }}
+    .reminder-badge {{
+      display: inline-flex;
+      border-radius: 999px;
+      padding: 4px 9px;
+      font-weight: 800;
+      font-size: 12px;
+      margin-bottom: 4px;
+    }}
+    .due {{ color: var(--warning); background: #fff2d6; }}
+    .sent {{ color: var(--success); background: #e3f4e3; }}
     .error {{ color: var(--danger); font-weight: 700; }}
+    .date-main {{ font-weight: 700; }}
+    .date-sub {{ color: var(--muted); font-size: 12px; margin-top: 3px; }}
+    .edit-stack {{ display: grid; gap: 8px; margin-top: 8px; }}
+    .paid-toggle {{ display: flex; gap: 8px; align-items: center; margin-top: 8px; }}
+    .paid-toggle input {{ width: auto; }}
+    .note-preview {{ max-width: 280px; white-space: pre-wrap; color: #40515e; }}
     .hidden {{ display: none; }}
     @media (max-width: 900px) {{
       body {{ padding: 12px; }}
-      .grid {{ grid-template-columns: 1fr; }}
+      .grid, .metric-grid {{ grid-template-columns: 1fr; }}
       .header {{ display: block; }}
       .settings-row {{ display: block; }}
       .actions {{ margin-top: 10px; }}
@@ -300,7 +371,7 @@ def _render_referrals_page() -> str:
     <section class="panel">
       <div class="settings-row">
         <div>
-          <h2>Motion Window</h2>
+          <h2>Referral Window</h2>
           <div id="settingsSummary" class="summary">Loading sunset date...</div>
         </div>
         <div class="actions">
@@ -310,6 +381,10 @@ def _render_referrals_page() -> str:
           <button id="saveSettingsBtn" type="button">Save Sunset</button>
         </div>
       </div>
+    </section>
+
+    <section class="panel">
+      <div id="metricGrid" class="metric-grid" aria-label="Referral summary metrics"></div>
     </section>
 
     <section class="panel">
@@ -352,6 +427,7 @@ def _render_referrals_page() -> str:
             <tr>
               <th>Created</th>
               <th>Status</th>
+              <th>Paid</th>
               <th>Referred Person</th>
               <th>Referrer</th>
               <th>Group</th>
@@ -361,13 +437,14 @@ def _render_referrals_page() -> str:
               <th>Actions</th>
             </tr>
           </thead>
-          <tbody id="rowsBody"><tr><td colspan="9">Loading referrals...</td></tr></tbody>
+          <tbody id="rowsBody"><tr><td colspan="10">Loading referrals...</td></tr></tbody>
         </table>
       </div>
     </section>
   </main>
   <script>
     const STATUSES = {statuses_json};
+    const TERMINAL_STATUSES = ['converted', 'not_interested', 'closed'];
     let rows = [];
 
     function esc(value) {{
@@ -394,36 +471,109 @@ def _render_referrals_page() -> str:
       return out;
     }}
 
+    function titleCaseStatus(status) {{
+      return String(status || '').replaceAll('_', ' ').replace(/\\b\\w/g, (char) => char.toUpperCase());
+    }}
+
+    function formatDateTime(value) {{
+      if (!value) return '';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return String(value);
+      return new Intl.DateTimeFormat(undefined, {{
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit'
+      }}).format(date);
+    }}
+
+    function formatDateOnly(value) {{
+      if (!value) return '';
+      const date = new Date(`${{value}}T00:00:00`);
+      if (Number.isNaN(date.getTime())) return String(value);
+      return new Intl.DateTimeFormat(undefined, {{ month: 'short', day: 'numeric', year: 'numeric' }}).format(date);
+    }}
+
+    function reminderState(row) {{
+      if (row.reminder_sent_at_utc) return 'sent';
+      if (row.reminder_error) return 'failed';
+      const dueDate = Date.parse(row.reminder_due_at_utc || '');
+      if (dueDate && dueDate <= Date.now() && !TERMINAL_STATUSES.includes(row.status)) return 'due';
+      return 'upcoming';
+    }}
+
+    function renderMetrics() {{
+      const counts = {{
+        open: rows.filter((row) => row.status === 'open').length,
+        contacted: rows.filter((row) => row.status === 'contacted').length,
+        converted: rows.filter((row) => row.status === 'converted').length,
+        paid: rows.filter((row) => row.paid).length,
+        unpaid: rows.filter((row) => !row.paid).length,
+        due: rows.filter((row) => reminderState(row) === 'due').length,
+        failed: rows.filter((row) => reminderState(row) === 'failed').length
+      }};
+      const cards = [
+        ['Open', counts.open, 'New referrals awaiting review'],
+        ['Contacted', counts.contacted, 'Follow-up has started'],
+        ['Converted', counts.converted, 'Referral became a member/contact'],
+        ['Paid', counts.paid, 'Referral payment recorded'],
+        ['Unpaid', counts.unpaid, 'Still needs payment review'],
+        ['Due or Overdue', counts.due, '60-day reminders ready'],
+        ['Failed Reminders', counts.failed, 'Needs email retry or review']
+      ];
+      document.getElementById('metricGrid').innerHTML = cards.map(([label, value, note]) => `
+        <div class="metric-card">
+          <div class="metric-label">${{esc(label)}}</div>
+          <div class="metric-value">${{esc(value)}}</div>
+          <div class="metric-note">${{esc(note)}}</div>
+        </div>
+      `).join('');
+    }}
+
     function reminderLabel(row) {{
-      if (row.reminder_sent_at_utc) return `<span class="sent">Sent</span><br>${{esc(row.reminder_sent_at_utc)}}`;
-      if (row.reminder_error) return `<span class="error">Failed</span><br>${{esc(row.reminder_error)}}`;
-      const due = row.reminder_due_at_utc || '';
-      const dueDate = Date.parse(due);
-      const isDue = dueDate && dueDate <= Date.now() && !['converted', 'not_interested', 'closed'].includes(row.status);
-      return `<span class="${{isDue ? 'due' : ''}}">${{isDue ? 'Due' : 'Pending'}}</span><br>${{esc(due)}}`;
+      const state = reminderState(row);
+      if (state === 'sent') return `<span class="reminder-badge sent">Sent</span><div class="date-sub">${{esc(formatDateTime(row.reminder_sent_at_utc))}}</div>`;
+      if (state === 'failed') return `<span class="reminder-badge error">Failed</span><div class="date-sub">${{esc(row.reminder_error)}}</div>`;
+      const label = state === 'due' ? 'Due now' : 'Upcoming';
+      const className = state === 'due' ? 'due' : '';
+      return `<span class="reminder-badge ${{className}}">${{esc(label)}}</span><div class="date-sub">${{esc(formatDateTime(row.reminder_due_at_utc))}}</div>`;
     }}
 
     function statusSelect(row) {{
       return `<select data-role="status">${{
-        STATUSES.map((status) => `<option value="${{esc(status)}}"${{row.status === status ? ' selected' : ''}}>${{esc(status.replaceAll('_', ' '))}}</option>`).join('')
+        STATUSES.map((status) => `<option value="${{esc(status)}}"${{row.status === status ? ' selected' : ''}}>${{esc(titleCaseStatus(status))}}</option>`).join('')
       }}</select>`;
     }}
 
     function renderRows() {{
       const body = document.getElementById('rowsBody');
       if (!rows.length) {{
-        body.innerHTML = '<tr><td colspan="9">No referrals match the current filters.</td></tr>';
+        body.innerHTML = '<tr><td colspan="10">No referrals match the current filters.</td></tr>';
         return;
       }}
       body.innerHTML = rows.map((row) => `
         <tr data-id="${{esc(row.id)}}">
-          <td>${{esc(row.created_at_utc)}}<br><span class="summary">${{esc(row.id)}}</span></td>
-          <td>${{statusSelect(row)}}</td>
+          <td>
+            <div class="date-main">${{esc(formatDateTime(row.created_at_utc))}}</div>
+            <div class="date-sub">${{esc(row.id)}}</div>
+          </td>
+          <td>
+            <span class="status-badge status-${{esc(row.status)}}">${{esc(titleCaseStatus(row.status))}}</span>
+            <div class="edit-stack">${{statusSelect(row)}}</div>
+          </td>
+          <td>
+            <span class="paid-badge ${{row.paid ? 'paid' : 'unpaid'}}">${{row.paid ? 'Paid' : 'Unpaid'}}</span>
+            <div class="date-sub">${{row.paid_at_utc ? esc(formatDateTime(row.paid_at_utc)) : 'Not paid yet'}}</div>
+            <label class="paid-toggle"><input data-role="paid" type="checkbox"${{row.paid ? ' checked' : ''}} /> Paid</label>
+          </td>
           <td>
             <strong>${{esc(row.referred_name)}}</strong><br>
             <span class="summary">UID: ${{esc(row.referred_att_uid || '')}}</span><br>
-            <label>Group<input data-role="referred_group" value="${{esc(row.referred_group || '')}}" /></label>
-            <label>AT&T UID<input data-role="referred_att_uid" value="${{esc(row.referred_att_uid || '')}}" /></label>
+            <div class="edit-stack">
+              <label>Group<input data-role="referred_group" value="${{esc(row.referred_group || '')}}" /></label>
+              <label>AT&T UID<input data-role="referred_att_uid" value="${{esc(row.referred_att_uid || '')}}" /></label>
+            </div>
           </td>
           <td>
             <strong>${{esc(row.referrer_name)}}</strong><br>
@@ -432,10 +582,10 @@ def _render_referrals_page() -> str:
             <span class="summary">${{esc(row.referrer_address)}}</span>
           </td>
           <td><span class="pill">${{esc(row.referrer_group)}}</span><br><span class="summary">${{esc(row.referred_group || '')}}</span></td>
-          <td>${{reminderLabel(row)}}<label>Due<input data-role="reminder_due_at_utc" value="${{esc(row.reminder_due_at_utc || '')}}" /></label></td>
+          <td>${{reminderLabel(row)}}<div class="edit-stack"><label>Due<input data-role="reminder_due_at_utc" value="${{esc(row.reminder_due_at_utc || '')}}" /></label></div></td>
           <td><input data-role="assignee" value="${{esc(row.assignee || '')}}" /></td>
           <td>
-            <div class="summary">${{esc(row.referral_notes || '')}}</div>
+            <div class="note-preview">${{esc(row.referral_notes || '')}}</div>
             <textarea data-role="officer_notes">${{esc(row.officer_notes || '')}}</textarea>
           </td>
           <td>
@@ -458,9 +608,9 @@ def _render_referrals_page() -> str:
       const el = document.getElementById('settingsSummary');
       if (settings) {{
         const status = settings.is_active ? 'active' : 'closed';
-        const updated = settings.updated_at_utc ? ` Updated by ${{settings.updated_by || 'officer'}} at ${{settings.updated_at_utc}}.` : '';
+        const updated = settings.updated_at_utc ? ` Updated by ${{settings.updated_by || 'officer'}} at ${{formatDateTime(settings.updated_at_utc)}}.` : '';
         const disabled = settings.enabled ? '' : ' Referral tracking is disabled in config.';
-        el.textContent = `Referral form is ${{status}} through ${{settings.sunset_date}}.${{updated}}${{disabled}}`;
+        el.textContent = `Referral form is ${{status}} through ${{formatDateOnly(settings.sunset_date)}}.${{updated}}${{disabled}}`;
         el.style.color = settings.is_active ? '#5b6b78' : '#a4262c';
         return;
       }}
@@ -496,6 +646,7 @@ def _render_referrals_page() -> str:
       const data = await response.json();
       if (!response.ok) throw new Error(JSON.stringify(data));
       rows = Array.isArray(data.rows) ? data.rows : [];
+      renderMetrics();
       renderRows();
       setStatus(`${{data.count || 0}} referrals loaded.`, true);
     }}
@@ -503,9 +654,9 @@ def _render_referrals_page() -> str:
     async function saveRow(tr) {{
       const id = tr.dataset.id;
       const payload = {{}};
-      for (const role of ['status', 'assignee', 'officer_notes', 'referred_group', 'referred_att_uid', 'reminder_due_at_utc']) {{
+      for (const role of ['status', 'paid', 'assignee', 'officer_notes', 'referred_group', 'referred_att_uid', 'reminder_due_at_utc']) {{
         const el = tr.querySelector(`[data-role="${{role}}"]`);
-        if (el) payload[role] = el.value;
+        if (el) payload[role] = el.type === 'checkbox' ? el.checked : el.value;
       }}
       const response = await fetch(`/officers/referrals/${{encodeURIComponent(id)}}`, {{
         method: 'PATCH',

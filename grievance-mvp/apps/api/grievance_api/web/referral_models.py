@@ -26,6 +26,8 @@ class ReferralRow(BaseModel):
     status: str
     assignee: str | None = None
     officer_notes: str | None = None
+    paid: bool = False
+    paid_at_utc: str | None = None
     reminder_due_at_utc: str
     reminder_attempted_at_utc: str | None = None
     reminder_sent_at_utc: str | None = None
@@ -56,6 +58,7 @@ class ReferralUpdateRequest(BaseModel):
     status: str | None = None
     assignee: str | None = None
     officer_notes: str | None = None
+    paid: bool | None = None
     referred_group: str | None = None
     referred_att_uid: str | None = None
     reminder_due_at_utc: str | None = None

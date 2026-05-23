@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Grievance MVP dues form PDF scanner once or twice daily
+
+[Timer]
+OnCalendar=*-*-* 06:30:00
+OnCalendar=*-*-* 18:30:00
+RandomizedDelaySec=10min
+Persistent=true
+Unit=dues-form-scanner.service
+
+[Install]
+WantedBy=timers.target
