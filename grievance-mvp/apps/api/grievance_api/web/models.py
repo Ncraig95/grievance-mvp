@@ -207,6 +207,9 @@ class OfficerCaseRow(BaseModel):
     occurrence_date: str | None = None
     articles: str | None = None
     issue_summary: str | None = None
+    narrative_summary: str | None = None
+    narrative_full: str | None = None
+    summary_source: str | None = None
     first_level_request_sent_date: str | None = None
     second_level_request_sent_date: str | None = None
     third_level_request_sent_date: str | None = None

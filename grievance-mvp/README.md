@@ -5,6 +5,27 @@ It accepts Microsoft Forms submissions, generates grievance documents from templ
 
 This repo is set up for real workflow operations: idempotent intake, staged signature handling, approval controls, automated notifications, SharePoint foldering, and recovery-oriented runtime tooling (health checks, watchdog, smoke tests).
 
+
+## Local-Safe Development Mode
+
+`APP_MODE=local` runs the grievance intake/signature/completion workflow with fake local providers only. In local mode the API instantiates local Graph mail, local SharePoint, and local DocuSeal providers; startup fails if real Graph, SharePoint, DocuSeal, or Cloudflare Access provider paths are selected. Production behavior is unchanged when `APP_MODE` is unset or `production`.
+
+Use the fake-only env/config pair when cloning or testing without secrets:
+
+```bash
+cd grievance-mvp
+./scripts/local-smoke-test.sh
+```
+
+The smoke script defaults to `./.env.local` when present, otherwise `./.env.local.example`. It passes that file explicitly to Docker Compose, refuses `.env` unless `--allow-dot-env` is supplied, resets only `data/local-safe`, and starts only the `api` service. It does not start `smtp_graph_bridge`, `docuseal`, `docuseal_db`, `docuseal_proxy`, or `cloudflared`.
+
+Local artifacts are written under `data/local-safe/grievances/local_mock/`:
+- `mail/` contains sent-message JSON and attachment files.
+- `sharepoint/` contains the mock SharePoint folder tree and uploaded generated/signed/audit artifacts.
+- `docuseal/` contains local submissions, submitted PDFs, signed PDFs, and completion ZIPs.
+
+The local config example is `config/config.local.example.yaml`; it uses the bundled `/app/templates/grievance_template.docx`, LibreOffice PDF conversion, fake webhook/HMAC values, and local-only provider URLs. Do not put real secrets in `.env.local.example`; copy it to `.env.local` only for local fake overrides.
+
 ## Public Form Links (Local Testing)
 
 Use this section in GitHub so other locals can run the process end-to-end.
@@ -272,6 +293,86 @@ Main watchdog env vars (`grievance-mvp/.env`):
 - `WATCHDOG_POST_RESTART_HEALTH_DELAY_SECONDS`
 - `WATCHDOG_ALERT_EMAIL`
 - `WATCHDOG_ALERT_POPUP`
+
+
+## Dues Form PDF Intake
+
+The dues form intake scans one-page dues deduction PDFs from the local inbox at `data/dues_forms/inbox/`. It can also first copy PDFs recursively from SharePoint `CWA 3106\Grievances Library - Documents\New Member E-Cards` and its subfolders into that local inbox, then stores extracted dues rows in `instance/dues_forms.sqlite3`, keeps source PDFs, and refreshes CSV/XLSX exports after each scan. Power Automate or any other source may drop mixed PDFs into the inbox; the app only processes dues/membership authorization PDFs. COJ and PERC-card files are preserved but moved to `data/dues_forms/ignored/` and do not appear in normal exports.
+
+Install Ubuntu OCR/rendering packages:
+
+```bash
+sudo apt update
+sudo apt install -y poppler-utils tesseract-ocr
+```
+
+Install Python dependencies in the project venv:
+
+```bash
+cd grievance-mvp
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r apps/api/requirements.txt
+```
+
+Create folders and initialize the dues database:
+
+```bash
+cd grievance-mvp
+mkdir -p data/dues_forms/{inbox,processed,needs_review,failed,ignored,exports,raw_text} instance
+PYTHONPATH=apps/api .venv/bin/python -c "from grievance_api.dues_forms.database import ensure_directories, init_db; ensure_directories(); init_db()"
+```
+
+Run the scanner manually against the local inbox only:
+
+```bash
+cd grievance-mvp
+.venv/bin/python -m app.dues_forms.scanner --once
+```
+
+Run the scanner after copying PDFs from the SharePoint e-card folder into the local inbox:
+
+```bash
+cd grievance-mvp
+.venv/bin/python -m app.dues_forms.scanner --once --sharepoint-sync \
+  --graph-config config/config.yaml \
+  --sharepoint-site-hostname cwa3106.sharepoint.com \
+  --sharepoint-site-path /sites/GrievancesLibrary \
+  --sharepoint-library "Grievances Library - Documents" \
+  --sharepoint-folder "New Member E-Cards" \
+  --sharepoint-recursive
+```
+
+The SharePoint sync uses `graph.site_hostname` and `graph.site_path` from `config/config.yaml` unless `--sharepoint-site-hostname` or `--sharepoint-site-path` are supplied. For the CWA 3106 grievance library, use `cwa3106.sharepoint.com` and `/sites/GrievancesLibrary`. Recursive SharePoint scanning is enabled by default so PDFs in subfolders under `New Member E-Cards` are found. It never deletes SharePoint files; it records downloaded SharePoint item IDs in SQLite so the timer does not repeatedly download the same remote PDF. The example systemd timer runs at 6:30 AM and 6:30 PM with a small randomized delay; remove the second `OnCalendar` line if once daily is enough.
+
+Ignored COJ/PERC files are moved to dated folders under:
+
+```text
+data/dues_forms/ignored/YYYY-MM/
+```
+
+The ignored-file audit page is available at `/dues-forms/ignored`.
+
+Exports are written to:
+
+```text
+data/dues_forms/exports/dues_deduction_forms.csv
+data/dues_forms/exports/dues_deduction_forms.xlsx
+```
+
+Install the systemd timer after editing `systemd/dues-form-scanner.service` so `WorkingDirectory`, `ExecStart`, and `DUES_FORMS_GRAPH_CONFIG_PATH` point to this checkout, venv, and config file:
+
+```bash
+cd grievance-mvp
+sudo install -m 0644 systemd/dues-form-scanner.service /etc/systemd/system/dues-form-scanner.service
+sudo install -m 0644 systemd/dues-form-scanner.timer /etc/systemd/system/dues-form-scanner.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now dues-form-scanner.timer
+systemctl list-timers | grep dues-form-scanner
+journalctl -u dues-form-scanner.service -n 100 --no-pager
+```
+
+The web UI is available at `/dues-forms` through the existing app. It uses the app's existing ops/local access checks and does not expose the scanner or SQLite database directly.
 
 ## 7) Smoke tests
 

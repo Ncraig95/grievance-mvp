@@ -10,6 +10,16 @@ import requests
 
 _SIMPLE_UPLOAD_MAX_BYTES = 250 * 1024 * 1024
 _UPLOAD_SESSION_CHUNK_BYTES = 10 * 1024 * 1024
+_NONPAID_LICENSE_SKU_MARKERS = ("FREE", "TRIAL", "EXPLORATORY", "DEVELOPER", "VIRAL")
+_NONPAID_LICENSE_SKU_PART_NUMBERS = {
+    "FLOW_FREE",
+    "POWER_BI_STANDARD",
+    "POWERAPPS_VIRAL",
+    "RIGHTSMANAGEMENT_ADHOC",
+    "TEAMS_EXPLORATORY",
+    "TEAMS_FREE",
+    "WINDOWS_STORE",
+}
 
 
 @dataclass(frozen=True)
@@ -24,6 +34,15 @@ class CaseFolderRef:
 class UploadedFileRef:
     drive_id: str
     item_id: str
+    web_url: str | None
+    path: str
+
+
+@dataclass(frozen=True)
+class SharePointFileRef:
+    drive_id: str
+    item_id: str
+    name: str
     web_url: str | None
     path: str
 
@@ -196,6 +215,92 @@ class GraphUploader:
         )
         return self._directory_user_refs(payload, limit=capped_limit)
 
+    @staticmethod
+    def _is_paid_sku(sku: dict) -> bool:
+        sku_id = str(sku.get("skuId") or "").strip()
+        if not sku_id:
+            return False
+        part_number = str(sku.get("skuPartNumber") or "").strip().upper()
+        if not part_number:
+            return False
+        if part_number in _NONPAID_LICENSE_SKU_PART_NUMBERS:
+            return False
+        if any(marker in part_number for marker in _NONPAID_LICENSE_SKU_MARKERS):
+            return False
+        if str(sku.get("capabilityStatus") or "Enabled").strip().lower() not in {"enabled", "warning"}:
+            return False
+        prepaid_units = sku.get("prepaidUnits") if isinstance(sku.get("prepaidUnits"), dict) else {}
+        try:
+            enabled_units = int(prepaid_units.get("enabled") or 0)
+        except (TypeError, ValueError):
+            enabled_units = 0
+        return enabled_units > 0
+
+    def _paid_subscribed_sku_ids(self) -> set[str]:
+        paid_ids: set[str] = set()
+        endpoint = "/subscribedSkus"
+        params: dict[str, object] | None = {
+            "$select": "skuId,skuPartNumber,capabilityStatus,prepaidUnits",
+        }
+        while endpoint:
+            payload = self._request("GET", endpoint, params=params)
+            for item in payload.get("value", []):
+                if isinstance(item, dict) and self._is_paid_sku(item):
+                    paid_ids.add(str(item.get("skuId") or "").strip().lower())
+            endpoint = str(payload.get("@odata.nextLink") or "").strip()
+            params = None
+        return paid_ids
+
+    def list_licensed_directory_users(self, *, limit: int = 999) -> list[DirectoryUserRef]:
+        if self.dry_run:
+            return []
+
+        paid_sku_ids = self._paid_subscribed_sku_ids()
+        if not paid_sku_ids:
+            return []
+
+        capped_limit = max(1, min(int(limit or 999), 999))
+        rows: list[DirectoryUserRef] = []
+        seen_ids: set[str] = set()
+        endpoint = "/users"
+        params: dict[str, object] | None = {
+            "$select": "id,displayName,mail,userPrincipalName,accountEnabled,assignedLicenses",
+            "$top": "999",
+        }
+
+        while endpoint and len(rows) < capped_limit:
+            payload = self._request("GET", endpoint, params=params)
+            for item in payload.get("value", []):
+                if not isinstance(item, dict):
+                    continue
+                if item.get("accountEnabled") is False:
+                    continue
+                assigned_sku_ids = {
+                    str(license_row.get("skuId") or "").strip().lower()
+                    for license_row in item.get("assignedLicenses", [])
+                    if isinstance(license_row, dict)
+                }
+                if not assigned_sku_ids.intersection(paid_sku_ids):
+                    continue
+                item_id = str(item.get("id") or "").strip()
+                if not item_id or item_id in seen_ids:
+                    continue
+                seen_ids.add(item_id)
+                rows.append(
+                    DirectoryUserRef(
+                        id=item_id,
+                        display_name=str(item.get("displayName") or "").strip() or None,
+                        email=str(item.get("mail") or "").strip() or None,
+                        user_principal_name=str(item.get("userPrincipalName") or "").strip() or None,
+                    )
+                )
+                if len(rows) >= capped_limit:
+                    break
+            endpoint = str(payload.get("@odata.nextLink") or "").strip()
+            params = None
+
+        return rows
+
     def _upload_with_session(self, *, upload_url: str, local_path: str) -> dict:
         size = os.path.getsize(local_path)
         if size <= 0:
@@ -340,6 +445,103 @@ class GraphUploader:
                 existing = self._create_child_folder(drive_id, folder_id, part)
             folder_id = str(existing["id"])
         return folder_id, "/".join(current_path_parts)
+
+    def _resolve_folder_chain(self, drive_id: str, folder_path: str) -> tuple[str, str] | None:
+        folder_id = self._root_folder_id(drive_id)
+        current_path_parts: list[str] = []
+        for part in [p for p in folder_path.strip("/").split("/") if p]:
+            existing = self._find_child_folder(drive_id, folder_id, part)
+            if existing is None:
+                return None
+            current_path_parts.append(str(existing.get("name") or part))
+            folder_id = str(existing["id"])
+        return folder_id, "/".join(current_path_parts)
+
+    def list_files_in_folder_path(
+        self,
+        *,
+        site_hostname: str,
+        site_path: str,
+        library: str,
+        folder_path: str,
+        recursive: bool = False,
+    ) -> list[SharePointFileRef]:
+        drive_id = self._drive_id(site_hostname, site_path, library)
+        resolved = self._resolve_folder_chain(drive_id, folder_path)
+        if resolved is None:
+            return []
+        folder_id, normalized_folder = resolved
+
+        def collect_files(current_folder_id: str, current_folder_path: str) -> list[SharePointFileRef]:
+            collected: list[SharePointFileRef] = []
+            for child in self._list_children(drive_id, current_folder_id):
+                name = str(child.get("name") or "").strip()
+                if not name:
+                    continue
+                if "file" in child:
+                    item_id = str(child.get("id") or "").strip()
+                    if not item_id:
+                        continue
+                    collected.append(
+                        SharePointFileRef(
+                            drive_id=drive_id,
+                            item_id=item_id,
+                            name=name,
+                            web_url=child.get("webUrl"),
+                            path="/".join(part for part in [current_folder_path, name] if part),
+                        )
+                    )
+                    continue
+                if recursive and "folder" in child:
+                    child_id = str(child.get("id") or "").strip()
+                    if child_id:
+                        collected.extend(
+                            collect_files(
+                                child_id,
+                                "/".join(part for part in [current_folder_path, name] if part),
+                            )
+                        )
+            return collected
+
+        if recursive:
+            return collect_files(folder_id, normalized_folder)
+
+        rows: list[SharePointFileRef] = []
+        for child in self._list_children(drive_id, folder_id):
+            if "file" not in child:
+                continue
+            name = str(child.get("name") or "").strip()
+            item_id = str(child.get("id") or "").strip()
+            if not name or not item_id:
+                continue
+            rows.append(
+                SharePointFileRef(
+                    drive_id=drive_id,
+                    item_id=item_id,
+                    name=name,
+                    web_url=child.get("webUrl"),
+                    path="/".join(part for part in [normalized_folder, name] if part),
+                )
+            )
+        return rows
+
+    def download_item_bytes(self, *, drive_id: str, item_id: str) -> bytes:
+        if self.dry_run:
+            return b""
+        if not drive_id or not item_id:
+            return b""
+        url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/content"
+        resp = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {self.token()}"},
+            timeout=self.timeout_seconds,
+        )
+        if 200 <= resp.status_code < 300:
+            return resp.content
+        raise RuntimeError(
+            f"Graph download failed (GET /drives/{drive_id}/items/{item_id}/content): "
+            f"{resp.status_code} {resp.text[:500]}"
+        )
 
     @staticmethod
     def _matches_grievance_id_prefix(*, grievance_id: str, folder_name: str) -> bool:

@@ -17,6 +17,7 @@ from ..services.case_folder_naming import build_case_folder_member_name
 from ..services.contract_timeline import parse_incident_date
 from ..services.doc_render import render_docx
 from ..services.grievance_id_allocator import GrievanceIdAllocationError, GrievanceIdAllocator
+from ..services.grievance_summary import build_grievance_summary, is_low_priority_grievance_text
 from ..services.motion_sheet import load_motion_sheet_officers, save_motion_sheet_officers
 from ..services.notification_service import NotificationService
 from ..services.pdf_convert import docx_to_pdf
@@ -83,7 +84,6 @@ _OFFICER_STATUS_VALUES = {
 _PAPER_SOURCE = "paper_manual"
 _DIGITAL_SOURCE = "digital_intake"
 _MANUAL_TRACKING_STATUS = "manual_tracking"
-_FINAL_WORKFLOW_STATUSES = {"approved", "rejected", "uploaded"}
 
 _CASE_SELECT_SQL = """
     SELECT id, grievance_id, grievance_number, member_name, member_email,
@@ -215,12 +215,12 @@ def _effective_officer_source(raw_source: object, workflow_status: object) -> st
 
 
 def _effective_officer_status(raw_status: object, workflow_status: object) -> str:
+    _ = workflow_status
     status = _normalize_optional_text(raw_status)
     if status:
         lowered = status.lower()
         return lowered if lowered in _OFFICER_STATUS_VALUES else "open"
-    workflow = str(workflow_status or "").strip().lower()
-    return "closed" if workflow in _FINAL_WORKFLOW_STATUSES else "open"
+    return "open"
 
 
 def _build_viewer_model(user: OfficerUserContext) -> OfficerViewerContext:
@@ -270,14 +270,14 @@ def _build_officer_case_row(cfg, row: tuple[object, ...]) -> OfficerCaseRow:  # 
             "contract_articles",
         )
     )
-    issue_summary = _normalize_optional_text(row[19]) or _payload_pick(
+    manual_issue_summary = _normalize_optional_text(row[19])
+    manual_issue_is_low_priority = is_low_priority_grievance_text(payload, manual_issue_summary)
+    narrative = build_grievance_summary(
         payload,
-        "issue_summary",
-        "issue_text",
-        "issue_contract_section",
-        "q3_union_statement",
-        "narrative",
+        manual_text=None if manual_issue_is_low_priority else manual_issue_summary,
+        include_low_priority=False,
     )
+    issue_summary = (None if manual_issue_is_low_priority else manual_issue_summary) or narrative.summary
     first_level_request_sent_date = _normalize_optional_text(row[20]) or _normalize_date_text(
         _payload_pick(payload, "first_level_request_sent_date", "date_sent_first_level_request")
     )
@@ -305,6 +305,9 @@ def _build_officer_case_row(cfg, row: tuple[object, ...]) -> OfficerCaseRow:  # 
         occurrence_date=occurrence_date,
         articles=articles,
         issue_summary=issue_summary,
+        narrative_summary=narrative.summary,
+        narrative_full=narrative.full_text,
+        summary_source=narrative.source,
         first_level_request_sent_date=first_level_request_sent_date,
         second_level_request_sent_date=second_level_request_sent_date,
         third_level_request_sent_date=third_level_request_sent_date,
@@ -375,6 +378,9 @@ def _case_matches_filters(
             row.steward or "",
             row.articles or "",
             row.issue_summary or "",
+            row.narrative_summary or "",
+            row.narrative_full or "",
+            row.summary_source or "",
             row.officer_assignee or "",
             row.officer_status,
             row.workflow_status,
@@ -1367,7 +1373,8 @@ async def _local_directory_user_rows(db: Db, *, cfg, query: str, limit: int) -> 
             match_source="local",
         )
 
-    for value in getattr(cfg.officer_tracking, "roster", ()) or ():
+    officer_tracking = getattr(cfg, "officer_tracking", None)
+    for value in getattr(officer_tracking, "roster", ()) or ():
         email = _normalize_optional_text(value)
         if email and "@" in email:
             _add_row(principal_id=None, display_name=None, email=email, user_principal_name=email)
@@ -1397,6 +1404,36 @@ async def _local_directory_user_rows(db: Db, *, cfg, query: str, limit: int) -> 
     for row in external_rows:
         _add_row(
             principal_id=None,
+            email=_normalize_optional_text(row[1]),
+            display_name=_normalize_optional_text(row[2]),
+            user_principal_name=_normalize_optional_text(row[1]),
+        )
+
+    internal_role_rows = await db.fetchall(
+        """
+        SELECT principal_id, principal_email, principal_display_name
+        FROM internal_role_assignments
+        ORDER BY updated_at_utc DESC, id DESC
+        """
+    )
+    for row in internal_role_rows:
+        _add_row(
+            principal_id=_normalize_optional_text(row[0]),
+            email=_normalize_optional_text(row[1]),
+            display_name=_normalize_optional_text(row[2]),
+            user_principal_name=_normalize_optional_text(row[1]),
+        )
+
+    pay_profile_rows = await db.fetchall(
+        """
+        SELECT principal_id, principal_email, principal_display_name
+        FROM pay_profiles
+        ORDER BY updated_at_utc DESC, id DESC
+        """
+    )
+    for row in pay_profile_rows:
+        _add_row(
+            principal_id=_normalize_optional_text(row[0]),
             email=_normalize_optional_text(row[1]),
             display_name=_normalize_optional_text(row[2]),
             user_principal_name=_normalize_optional_text(row[1]),
@@ -1506,13 +1543,20 @@ async def _delete_chief_steward_assignment(db: Db, assignment_id: int) -> ChiefS
     )
 
 
-def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
+def _render_officers_page(user: OfficerUserContext, cfg, *, page: str = "tracker") -> str:  # noqa: ANN001
     viewer_payload = json.dumps(_build_viewer_model(user).model_dump(mode="json"), ensure_ascii=False)
     show_selection = _user_can_select_rows(user)
     show_actions = user.can_edit or user.can_delete or user.can_view_audit
     show_bulk_panel = user.can_bulk_edit or user.can_bulk_delete
-    show_mutation_split = user.can_create or user.can_edit
     edit_contract_disabled_attr = "" if user.can_delete else "disabled"
+    page_path = {
+        "admin": "/officers/admin",
+        "new": "/officers/new",
+    }.get(page, "/officers")
+    page_title = {
+        "admin": "Officer Admin Tools",
+        "new": "New Paper Grievance",
+    }.get(page, "Officer Grievance Tracker")
     fixed_scope_options_json = json.dumps(
         [{"value": scope_key, "label": label} for scope_key, label in selectable_contract_scopes()],
         ensure_ascii=False,
@@ -1530,12 +1574,16 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     }
     viewer_name = str(user.display_name or user.email or "Unknown").strip() or "Unknown"
     viewer_role_label = role_labels.get(user.role, "Read Only")
-    if user.role == "admin":
-        hero_summary = "Run triage, assignments, manual entries, and contract-level follow-up from one workspace."
+    if page == "admin":
+        hero_summary = "Manage profile settings, motion sheet names, chief steward assignments, and external steward access."
+    elif page == "new":
+        hero_summary = "Create a manual paper grievance without crowding the daily tracker workspace."
+    elif user.role == "admin":
+        hero_summary = "Run triage, assignments, manual entries, and contract-level follow-up from one focused tracker."
     elif user.role == "chief_steward":
         hero_summary = "Review in-scope grievances quickly, update tracking dates, and keep escalation work moving."
     elif user.role == "officer":
-        hero_summary = "Work the active tracker, keep statuses current, and manage paper entries without leaving the table."
+        hero_summary = "Work the active tracker and keep statuses current without fighting the page layout."
     else:
         hero_summary = "Review grievance activity in a read-only tracker view."
     if user.contract_scopes:
@@ -1547,15 +1595,14 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     else:
         scope_pills = '<span class="scope-pill scope-pill-muted">Local read-only mode</span>'
     hero_links = [
-        '<a class="link-chip" href="#filtersPanel">Filters</a>',
-        '<a class="link-chip" href="#trackerPanel">Tracker</a>',
+        '<a class="link-chip" href="/officers">Tracker</a>' if page != "tracker" else '<a class="link-chip" href="#filtersPanel">Filters</a>',
+        '<a class="link-chip" href="/pay">Lost Wage</a>',
     ]
-    if user.auth_enabled:
-        hero_links.append('<a class="link-chip" href="#officerProfilePanel">Profile</a>')
-    if show_mutation_split:
-        hero_links.append('<a class="link-chip" href="#mutationSplit">Edit Workspace</a>')
-    if user.can_manage_chief_assignments:
-        hero_links.append('<a class="link-chip" href="#chiefAssignmentPanel">Assignments</a>')
+    if page == "tracker":
+        hero_links.append('<a class="link-chip" href="#trackerPanel">Tracker</a>')
+    if user.can_create:
+        hero_links.append('<a class="link-chip" href="/officers/new">New Case</a>')
+    hero_links.append('<a class="link-chip" href="/officers/admin">Admin Tools</a>')
     if user.role == "admin" or not user.auth_enabled:
         hero_links.append('<a class="link-chip" href="/officers/forms">Forms</a>')
     hero_links_html = "".join(hero_links)
@@ -1572,18 +1619,21 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
         )
 
     review_links = [
-        _menu_link("Filters", "#filtersPanel", "Search, scope, assignee, status, and source filters."),
-        _menu_link("Tracker", "#trackerPanel", "Jump straight to the live grievance table."),
+        _menu_link("Tracker", "/officers" if page != "tracker" else "#trackerPanel", "Open the daily grievance table.", external=page != "tracker"),
+        _menu_link("Dues Forms", "/dues-forms", "Review dues deduction PDF intake and export CSV/XLSX files.", external=True),
+        _menu_link("Lost Wage Portal", "/pay", "Open the payroll and expense voucher portal.", external=True),
         _menu_link("Referrals", "/officers/referrals", "Open the referral tracking portal.", external=True),
-        _menu_link("Response Log", "#responsePanel", "See the latest API response and debug payload."),
     ]
+    if page == "tracker":
+        review_links.insert(0, _menu_link("Filters", "#filtersPanel", "Search, scope, assignee, status, and source filters."))
     work_links: list[str] = []
-    if show_bulk_panel:
+    if show_bulk_panel and page == "tracker":
         work_links.append(_menu_link("Bulk Update", "#bulkPanel", "Apply status, dates, assignee, or notes to checked rows."))
-    if show_mutation_split:
-        work_links.append(_menu_link("Edit Workspace", "#mutationSplit", "Create paper entries and edit the selected case."))
+    if user.can_create:
+        work_links.append(_menu_link("New Paper Case", "/officers/new", "Create a manual paper grievance.", external=page != "new"))
+    work_links.append(_menu_link("Admin Tools", "/officers/admin", "Open profile and administrative setup tools.", external=page != "admin"))
     admin_links: list[str] = []
-    if user.can_manage_chief_assignments:
+    if user.can_manage_chief_assignments and page == "admin":
         admin_links.extend(
             [
                 _menu_link(
@@ -1595,11 +1645,6 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
                     "External Stewards",
                     "#externalStewardPanel",
                     "Allowlist outside stewards and review their status.",
-                ),
-                _menu_link(
-                    "Case Assignments",
-                    "#caseExternalAssignmentPanel",
-                    "Assign external stewards to the selected grievance.",
                 ),
             ]
         )
@@ -1615,8 +1660,9 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
         admin_links.append(
             _menu_link(
                 "Motion Sheet",
-                "#motionSheetSettingsPanel",
+                "#motionSheetSettingsPanel" if page == "admin" else "/officers/admin",
                 "Edit the officer names printed on the Motion Sheet.",
+                external=page != "admin",
             )
         )
         admin_links.append(
@@ -1794,36 +1840,36 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     )
     case_external_assignment_panel = (
         """
-  <div class="panel" id="caseExternalAssignmentPanel">
-    <h2>External Steward Access For Selected Case</h2>
-    <div id="caseExternalAssignmentHint" class="summary">Select a grievance row first, then assign outside steward access for that case.</div>
-    <div class="grid" style="margin-top:12px;">
-      <label>Allowlisted External Steward
-        <select id="caseExternalStewardSelect"></select>
-      </label>
-    </div>
-    <div class="actions">
-      <button id="assignCaseExternalStewardBtn" type="button">Assign To Selected Case</button>
-    </div>
-    <div class="table-wrap" style="margin-top:12px;">
-      <table style="min-width: 900px;">
-        <thead>
-          <tr>
-            <th class="main">Steward</th>
-            <th class="main">Email</th>
-            <th class="main">Status</th>
-            <th class="main">Assigned</th>
-            <th class="main actions-col">Actions</th>
-          </tr>
-        </thead>
-        <tbody id="caseExternalAssignmentsBody">
-          <tr><td colspan="5">Select a case to load external steward assignments.</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
+      <section class="case-assignment-panel" id="caseExternalAssignmentPanel">
+        <h3>External Steward Access</h3>
+        <div id="caseExternalAssignmentHint" class="summary">Select a grievance row first, then assign outside steward access for that case.</div>
+        <div class="grid grid-compact" style="margin-top:12px;">
+          <label>Allowlisted External Steward
+            <select id="caseExternalStewardSelect"></select>
+          </label>
+        </div>
+        <div class="actions">
+          <button id="assignCaseExternalStewardBtn" type="button">Assign To Selected Case</button>
+        </div>
+        <div class="table-wrap" style="margin-top:12px;">
+          <table style="min-width: 720px;">
+            <thead>
+              <tr>
+                <th class="main">Steward</th>
+                <th class="main">Email</th>
+                <th class="main">Status</th>
+                <th class="main">Assigned</th>
+                <th class="main actions-col">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="caseExternalAssignmentsBody">
+              <tr><td colspan="5">Select a case to load external steward assignments.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
 """
-        if user.can_manage_chief_assignments
+        if user.can_manage_chief_assignments and page == "tracker"
         else ""
     )
     auth_panel = (
@@ -1877,8 +1923,8 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       <div class="section-header">
         <div>
           <div class="eyebrow">Admin</div>
-          <h2>Motion Sheet Officers</h2>
-          <div class="summary">These names print on new Motion Sheets submitted from the hosted form.</div>
+          <h2>Motion Sheet Assignments</h2>
+          <div class="summary">The first four names print as officers. The remaining names print as chief stewards.</div>
         </div>
         <div class="section-actions">
           <a class="button-link secondary" href="/officers/forms">All Hosted Forms</a>
@@ -1899,22 +1945,22 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
         <label>Officer 4
           <input id="motionOfficer4" />
         </label>
-        <label>Officer 5
+        <label>Chief Steward 1
           <input id="motionOfficer5" />
         </label>
-        <label>Officer 6
+        <label>Chief Steward 2
           <input id="motionOfficer6" />
         </label>
-        <label>Officer 7
+        <label>Chief Steward 3
           <input id="motionOfficer7" />
         </label>
-        <label>Officer 8
+        <label>Chief Steward 4
           <input id="motionOfficer8" />
         </label>
-        <label>Officer 9
+        <label>Chief Steward 5
           <input id="motionOfficer9" />
         </label>
-        <label>Officer 10
+        <label>Chief Steward 6
           <input id="motionOfficer10" />
         </label>
       </div>
@@ -1925,10 +1971,12 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
         else ""
     )
     bulk_panel = (
-        """
-  <div class="panel" id="bulkPanel">
-    <h2>Bulk Update</h2>
-    <div id="bulkSummary" class="summary selection-summary">0 cases selected.</div>
+        f"""
+  <details class="panel bulk-drawer" id="bulkPanel">
+    <summary class="bulk-summary-row">
+      <span>Bulk Update</span>
+      <span id="bulkSummary" class="selection-summary">0 cases checked.</span>
+    </summary>
     <div class="summary">Only filled fields are applied. Leave a field blank to keep current values.</div>
     <div class="grid" style="margin-top:12px;">
       <label>Officer Status
@@ -1963,183 +2011,342 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     </div>
     <div class="actions">
       <button id="applyBulkBtn" type="button">Apply To Checked Rows</button>
-      """
-        + (
-            '<button id="deleteBulkBtn" class="danger" type="button">Delete Checked Rows</button>'
-            if user.can_bulk_delete
-            else ""
-        )
-        + """
+      {('<button id="deleteBulkBtn" class="danger" type="button">Delete Checked Rows</button>' if user.can_bulk_delete else '')}
       <button id="clearBulkSelectionBtn" class="secondary" type="button">Clear Checked Rows</button>
     </div>
-  </div>
+  </details>
 """
-        if show_bulk_panel
+        if show_bulk_panel and page == "tracker"
         else ""
     )
-    mutation_split = (
+    manual_entry_panel = (
         f"""
-  <div class="split" id="mutationSplit">
-    {
-      f'''
-    <div class="panel">
-      <h2>Manual Paper Entry</h2>
-      <div class="grid">
-        <label>Grievance ID / Number
-          <input id="createGrievanceNumber" placeholder="Optional grievance number" />
-        </label>
-        <label>Scope
-          <select id="createContract">
-{manual_contract_options}
-          </select>
-        </label>
-        <label>Member Name
-          <input id="createMemberName" placeholder="Required" />
-        </label>
-        <label>Member Email
-          <input id="createMemberEmail" placeholder="Optional" />
-        </label>
-        <label>Department
-          <input id="createDepartment" />
-        </label>
-        <label>Steward
-          <input id="createSteward" />
-        </label>
-        <label>Date of Occurrence
-          <input id="createOccurrenceDate" type="date" />
-        </label>
-        <label>Officer Status
-          <select id="createOfficerStatus">
-{status_options}
-          </select>
-        </label>
-        <label>Date Sent 1st Level Request
-          <input id="createFirstLevelDate" type="date" />
-        </label>
-        <label>Date Sent 2nd Level Request
-          <input id="createSecondLevelDate" type="date" />
-        </label>
-        <label>Date Sent 3rd Level Request
-          <input id="createThirdLevelDate" type="date" />
-        </label>
-        <label>Date Sent 4th Level Request
-          <input id="createFourthLevelDate" type="date" />
-        </label>
-        <label>Assign To Roster
-          <select id="createAssigneeSelect"></select>
-        </label>
-        <label>Manual Assignee Override
-          <input id="createAssigneeManual" placeholder="Type any name/email" />
-        </label>
+  <div class="panel" id="manualEntryPanel">
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">Paper Intake</div>
+        <h2>Manual Paper Entry</h2>
+        <div class="summary">Create the case here, then return to the tracker to work it alongside digital intakes.</div>
       </div>
-      <div class="grid-wide" style="margin-top:12px;">
-        <label>Issue
-          <textarea id="createIssueSummary" placeholder="Short grievance summary"></textarea>
-        </label>
-        <label>Notes
-          <textarea id="createOfficerNotes" placeholder="Officer-only notes"></textarea>
-        </label>
-      </div>
-      <div class="actions">
-        <button id="createBtn" type="button">Create Paper Grievance</button>
+      <div class="section-actions">
+        <a class="button-link secondary" href="/officers">Back To Tracker</a>
       </div>
     </div>
-''' if user.can_create else '<div class="panel"><h2>Edit Access</h2><div class="summary">Chief stewards can edit in-scope rows but cannot create new cases.</div></div>'
-    }
-
-    {
-      f'''
-    <div class="panel">
-      <h2>Edit Selected Case</h2>
-      <div id="editHint" class="summary">Select a table row to edit.</div>
-      <input id="editCaseId" type="hidden" />
-      <input id="editOriginalGrievanceNumber" type="hidden" />
-      <input id="editOriginalDisplayGrievance" type="hidden" />
-      <div class="grid">
-        <label>Case ID
-          <input id="editCaseIdDisplay" disabled />
-        </label>
-        <label>Workflow Status
-          <input id="editWorkflowStatus" disabled />
-        </label>
-        <label>Source
-          <input id="editSource" disabled />
-        </label>
-        <label>Grievance Number
-          <input id="editGrievanceNumber" />
-        </label>
-        <label>Member Name
-          <input id="editMemberName" />
-        </label>
-        <label>Member Email
-          <input id="editMemberEmail" />
-        </label>
-        <label>Contract / Scope
-          <select id="editContract" {edit_contract_disabled_attr}>
+    <div class="grid">
+      <label>Grievance ID / Number
+        <input id="createGrievanceNumber" placeholder="Optional grievance number" />
+      </label>
+      <label>Scope
+        <select id="createContract">
 {manual_contract_options}
-          </select>
-        </label>
-        <label>Department
-          <input id="editDepartment" />
-        </label>
-        <label>Steward
-          <input id="editSteward" />
-        </label>
-        <label>Date of Occurrence
-          <input id="editOccurrenceDate" type="date" />
-        </label>
-        <label>Officer Status
-          <select id="editOfficerStatus">
+        </select>
+      </label>
+      <label>Member Name
+        <input id="createMemberName" placeholder="Required" />
+      </label>
+      <label>Member Email
+        <input id="createMemberEmail" placeholder="Optional" />
+      </label>
+      <label>Department
+        <input id="createDepartment" />
+      </label>
+      <label>Steward
+        <input id="createSteward" />
+      </label>
+      <label>Date of Occurrence
+        <input id="createOccurrenceDate" type="date" />
+      </label>
+      <label>Officer Status
+        <select id="createOfficerStatus">
 {status_options}
-          </select>
-        </label>
-        <label>Date Sent 1st Level Request
-          <input id="editFirstLevelDate" type="date" />
-        </label>
-        <label>Date Sent 2nd Level Request
-          <input id="editSecondLevelDate" type="date" />
-        </label>
-        <label>Date Sent 3rd Level Request
-          <input id="editThirdLevelDate" type="date" />
-        </label>
-        <label>Date Sent 4th Level Request
-          <input id="editFourthLevelDate" type="date" />
-        </label>
-        <label>Assign To Roster
-          <select id="editAssigneeSelect"></select>
-        </label>
-        <label>Manual Assignee Override
-          <input id="editAssigneeManual" placeholder="Type any name/email" />
-        </label>
-      </div>
-      <div class="grid-wide" style="margin-top:12px;">
-        <label>Issue
-          <textarea id="editIssueSummary"></textarea>
-        </label>
-        <label>Notes
-          <textarea id="editOfficerNotes"></textarea>
-        </label>
-      </div>
-      <div class="actions">
-        <button id="saveEditBtn" type="button">Save Edits</button>
-        <button id="clearEditBtn" class="secondary" type="button">Clear Selection</button>
-      </div>
-      <div id="editMeta" class="summary"></div>
+        </select>
+      </label>
+      <label>Date Sent 1st Level Request
+        <input id="createFirstLevelDate" type="date" />
+      </label>
+      <label>Date Sent 2nd Level Request
+        <input id="createSecondLevelDate" type="date" />
+      </label>
+      <label>Date Sent 3rd Level Request
+        <input id="createThirdLevelDate" type="date" />
+      </label>
+      <label>Date Sent 4th Level Request
+        <input id="createFourthLevelDate" type="date" />
+      </label>
+      <label>Assign To Roster
+        <select id="createAssigneeSelect"></select>
+      </label>
+      <label>Manual Assignee Override
+        <input id="createAssigneeManual" placeholder="Type any name/email" />
+      </label>
     </div>
-''' if user.can_edit else ''
-    }
+    <div class="grid-wide" style="margin-top:12px;">
+      <label>Issue
+        <textarea id="createIssueSummary" placeholder="Short grievance summary"></textarea>
+      </label>
+      <label>Notes
+        <textarea id="createOfficerNotes" placeholder="Officer-only notes"></textarea>
+      </label>
+    </div>
+    <div class="actions">
+      <button id="createBtn" type="button">Create Paper Grievance</button>
+    </div>
   </div>
 """
-        if show_mutation_split
+        if user.can_create
+        else """
+  <div class="panel" id="manualEntryPanel">
+    <h2>Manual Paper Entry</h2>
+    <div class="summary">You do not have permission to create paper grievances.</div>
+  </div>
+"""
+    )
+    edit_panel = (
+        f"""
+      <section class="detail-editor" id="editCasePanel">
+        <h3>Edit Selected Case</h3>
+        <div id="editHint" class="summary">Select a table row to edit.</div>
+        <input id="editCaseId" type="hidden" />
+        <input id="editOriginalGrievanceNumber" type="hidden" />
+        <input id="editOriginalDisplayGrievance" type="hidden" />
+        <div class="grid grid-compact">
+          <label>Case ID
+            <input id="editCaseIdDisplay" disabled />
+          </label>
+          <label>Workflow Status
+            <input id="editWorkflowStatus" disabled />
+          </label>
+          <label>Source
+            <input id="editSource" disabled />
+          </label>
+          <label>Grievance Number
+            <input id="editGrievanceNumber" />
+          </label>
+          <label>Member Name
+            <input id="editMemberName" />
+          </label>
+          <label>Member Email
+            <input id="editMemberEmail" />
+          </label>
+          <label>Contract / Scope
+            <select id="editContract" {edit_contract_disabled_attr}>
+{manual_contract_options}
+            </select>
+          </label>
+          <label>Department
+            <input id="editDepartment" />
+          </label>
+          <label>Steward
+            <input id="editSteward" />
+          </label>
+          <label>Date of Occurrence
+            <input id="editOccurrenceDate" type="date" />
+          </label>
+          <label>Officer Status
+            <select id="editOfficerStatus">
+{status_options}
+            </select>
+          </label>
+          <label>Date Sent 1st Level Request
+            <input id="editFirstLevelDate" type="date" />
+          </label>
+          <label>Date Sent 2nd Level Request
+            <input id="editSecondLevelDate" type="date" />
+          </label>
+          <label>Date Sent 3rd Level Request
+            <input id="editThirdLevelDate" type="date" />
+          </label>
+          <label>Date Sent 4th Level Request
+            <input id="editFourthLevelDate" type="date" />
+          </label>
+          <label>Assign To Roster
+            <select id="editAssigneeSelect"></select>
+          </label>
+          <label>Manual Assignee Override
+            <input id="editAssigneeManual" placeholder="Type any name/email" />
+          </label>
+        </div>
+        <div class="grid-wide" style="margin-top:12px;">
+          <label>Issue
+            <textarea id="editIssueSummary"></textarea>
+          </label>
+          <label>Notes
+            <textarea id="editOfficerNotes"></textarea>
+          </label>
+        </div>
+        <div class="actions">
+          <button id="saveEditBtn" type="button">Save Edits</button>
+          <button id="clearEditBtn" class="secondary" type="button">Clear Selection</button>
+        </div>
+        <div id="editMeta" class="summary"></div>
+      </section>
+"""
+        if user.can_edit
         else ""
     )
+    case_detail_panel = f"""
+    <aside class="case-detail-panel" id="caseDetailPanel">
+      <div class="detail-pane-header">
+        <div>
+          <div class="eyebrow">Selected Case</div>
+          <h2 id="caseDetailTitle">Case Details</h2>
+        </div>
+        <button id="clearDetailBtn" class="secondary" type="button">Clear</button>
+      </div>
+      <div id="caseDetailBody" class="detail-empty">Select a grievance row to view the full narrative, dates, workflow status, notes, and available actions.</div>
+      <div id="caseDetailActions" class="row-actions detail-action-row"></div>
+      <div id="caseAuditPanel" class="case-audit-panel" hidden>
+        <h3>Audit Events</h3>
+        <div id="caseAuditBody" class="summary"></div>
+      </div>
+{edit_panel}{case_external_assignment_panel}
+    </aside>
+"""
+    tracker_page_body = f"""
+  {auth_panel}
+  <div class="tracker-workspace">
+    <main class="tracker-main-column">
+      <div class="panel" id="filtersPanel">
+        <div class="section-header">
+          <div>
+            <div class="eyebrow">Control Center</div>
+            <h2>Filters</h2>
+          </div>
+          <div class="section-actions">
+            <button id="reloadBtn" type="button">Load Tracker</button>
+            <button id="clearFiltersBtn" class="secondary" type="button">Clear Filters</button>
+          </div>
+        </div>
+        <div class="grid">
+          <label>Search
+            <input id="filterSearch" placeholder="Grievance, contract, name, issue..." />
+          </label>
+          <label>Contract Scope
+            <select id="filterContractScope">
+              <option value="">All scopes</option>
+            </select>
+          </label>
+          <label>Assigned To
+            <select id="filterAssignee"></select>
+          </label>
+          <label>Officer Status
+            <select id="filterStatus">
+              <option value="">All statuses</option>
+              <option value="open">Open</option>
+              <option value="in_progress">In Progress</option>
+              <option value="waiting">Waiting</option>
+              <option value="open_at_state">Open at State</option>
+              <option value="open_at_national">Open at National</option>
+              <option value="closed">Closed</option>
+            </select>
+          </label>
+          <label>Source
+            <select id="filterSource">
+              <option value="">All sources</option>
+              <option value="digital_intake">Digital intake</option>
+              <option value="paper_manual">Paper manual</option>
+            </select>
+          </label>
+        </div>
+        <div class="metric-grid" id="trackerStats">
+          <div class="metric-card">
+            <div class="metric-label">Visible Cases</div>
+            <div class="metric-value" id="metricTotalValue">0</div>
+            <div class="metric-note" id="metricScopeNote">Load the tracker to see scope coverage.</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Active</div>
+            <div class="metric-value" id="metricActiveValue">0</div>
+            <div class="metric-note">Open, in progress, and waiting cases still on the board.</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Escalated</div>
+            <div class="metric-value" id="metricEscalatedValue">0</div>
+            <div class="metric-note">Cases already moved to state or national level.</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Waiting</div>
+            <div class="metric-value" id="metricWaitingValue">0</div>
+            <div class="metric-note">Cases paused pending the next union or company step.</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Closed</div>
+            <div class="metric-value" id="metricClosedValue">0</div>
+            <div class="metric-note">Completed grievances in the current filtered view.</div>
+          </div>
+        </div>
+        <div id="tableSummary" class="summary">Tracker not loaded yet.</div>
+      </div>
+
+      {bulk_panel}
+
+      <div class="panel" id="trackerPanel">
+        <div class="section-header">
+          <div>
+            <div class="eyebrow">Live Results</div>
+            <h2>Grievance Overview</h2>
+            <div class="summary">Select a grievance row to review the full narrative, dates, notes, and workflow details in the side pane.</div>
+          </div>
+        </div>
+        <div class="table-wrap tracker-table-wrap">
+          <table id="trackerTable">
+            <thead>
+              <tr>
+                {selection_header}
+                <th class="main">Grievance / Member</th>
+                <th class="main">Status</th>
+                <th class="main">Next Step</th>
+                <th class="main">Assignee</th>
+                <th class="main">Occurrence</th>
+                <th class="main">Contract / Scope</th>
+                {actions_header}
+              </tr>
+            </thead>
+            <tbody id="tableBody">
+              <tr><td colspan="{6 + (1 if show_selection else 0) + (1 if show_actions else 0)}">No cases loaded.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="scrollbar-dock" id="trackerScrollbarDock" aria-hidden="true">
+          <div class="scrollbar-hint">Scroll left / right</div>
+          <div class="table-scrollbar" id="trackerScrollbar">
+            <div id="trackerScrollbarInner"></div>
+          </div>
+        </div>
+      </div>
+    </main>
+{case_detail_panel}
+  </div>
+"""
+    admin_page_body = f"""
+  {auth_panel}
+  {profile_panel}
+  {motion_sheet_settings_panel}
+  {chief_assignment_panel}
+  {external_steward_panel}
+"""
+    new_page_body = f"""
+  {auth_panel}
+  {manual_entry_panel}
+"""
+    page_body = {
+        "admin": admin_page_body,
+        "new": new_page_body,
+    }.get(page, tracker_page_body)
+    status_panel = """
+  <div class="status-panel" aria-live="polite">
+    <span class="status-label">Status</span>
+    <span id="out">Ready.</span>
+  </div>
+"""
+
     return f"""
 <!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Officer Grievance Tracker</title>
+  <title>{escape(page_title)}</title>
   <style>
     :root {{
       --sheet-green: #95cf46;
@@ -2154,10 +2361,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       margin: 0;
       padding: 24px;
       color: var(--sheet-text);
-      background:
-        radial-gradient(circle at top left, rgba(149, 207, 70, 0.16), transparent 22%),
-        radial-gradient(circle at top right, rgba(79, 129, 189, 0.14), transparent 20%),
-        linear-gradient(180deg, #f8fbfd 0%, #eef3f7 100%);
+      background: linear-gradient(180deg, #f8fbfd 0%, #eef3f7 100%);
     }}
     h1, h2 {{ margin: 0 0 12px; }}
     .page-shell {{
@@ -2170,19 +2374,18 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     .panel {{
       background: rgba(255, 255, 255, 0.94);
       border: 1px solid #dde4ea;
-      border-radius: 16px;
-      padding: 18px;
-      margin-bottom: 16px;
-      box-shadow: 0 18px 40px rgba(15, 23, 42, 0.06);
+      border-radius: 10px;
+      padding: 14px;
+      margin-bottom: 12px;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
       backdrop-filter: blur(8px);
     }}
     .hero-panel {{
       display: grid;
-      grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.9fr);
-      gap: 18px;
-      padding: 24px;
-      background:
-        linear-gradient(135deg, rgba(255,255,255,0.96) 0%, rgba(248, 252, 255, 0.96) 54%, rgba(231, 244, 252, 0.98) 100%);
+      grid-template-columns: minmax(0, 1.8fr) minmax(240px, 0.8fr);
+      gap: 14px;
+      padding: 16px;
+      background: #ffffff;
     }}
     .eyebrow {{
       margin-bottom: 10px;
@@ -2193,23 +2396,23 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       color: #516574;
     }}
     .hero-panel h1 {{
-      font-size: clamp(30px, 4vw, 42px);
-      line-height: 1.04;
-      letter-spacing: -0.03em;
-      margin-bottom: 10px;
+      font-size: 30px;
+      line-height: 1.1;
+      letter-spacing: 0;
+      margin-bottom: 8px;
     }}
     .hero-subtitle {{
       margin: 0;
       max-width: 64ch;
-      font-size: 15px;
-      line-height: 1.6;
+      font-size: 14px;
+      line-height: 1.45;
       color: #435565;
     }}
     .hero-meta {{
       display: flex;
       flex-wrap: wrap;
       gap: 10px;
-      margin-top: 16px;
+      margin-top: 10px;
       align-items: center;
     }}
     .role-pill,
@@ -2219,7 +2422,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       align-items: center;
       gap: 6px;
       border-radius: 999px;
-      padding: 8px 12px;
+      padding: 6px 10px;
       font-size: 12px;
       font-weight: 700;
       line-height: 1;
@@ -2238,8 +2441,8 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     .hero-links {{
       display: flex;
       flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 16px;
+      gap: 8px;
+      margin-top: 10px;
     }}
     .scope-pill {{
       background: #edf4f8;
@@ -2255,9 +2458,9 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       flex-direction: column;
       justify-content: space-between;
       gap: 16px;
-      border-radius: 14px;
-      padding: 16px;
-      background: linear-gradient(180deg, #f7fbff 0%, #ecf4fb 100%);
+      border-radius: 8px;
+      padding: 12px;
+      background: #f7fbff;
       border: 1px solid #d8e5f0;
     }}
     .hero-tools h2 {{
@@ -2301,7 +2504,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       position: sticky;
       top: 14px;
       z-index: 9;
-      padding: 12px 16px;
+      padding: 10px 12px;
     }}
     .workspace-menu-bar {{
       display: flex;
@@ -2348,7 +2551,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       align-items: center;
       gap: 0;
       border-radius: 999px;
-      padding: 10px 14px;
+      padding: 8px 12px;
       text-decoration: none;
       color: #17334f;
       border: 1px solid #d8e2eb;
@@ -2435,15 +2638,15 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     .metric-grid {{
       display: grid;
       grid-template-columns: repeat(5, minmax(150px, 1fr));
-      gap: 12px;
-      margin-top: 16px;
+      gap: 10px;
+      margin-top: 12px;
     }}
     .metric-card {{
-      padding: 14px 16px;
-      border-radius: 14px;
+      padding: 10px 12px;
+      border-radius: 8px;
       border: 1px solid #d9e3ec;
-      background: linear-gradient(180deg, #ffffff 0%, #f5f8fb 100%);
-      min-height: 104px;
+      background: #ffffff;
+      min-height: 76px;
     }}
     .metric-label {{
       font-size: 12px;
@@ -2454,20 +2657,29 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     }}
     .metric-value {{
       margin-top: 8px;
-      font-size: 32px;
+      font-size: 24px;
       font-weight: 800;
       line-height: 1;
       color: #12212f;
     }}
     .metric-note {{
       margin-top: 8px;
-      font-size: 13px;
+      font-size: 12px;
       color: #5b6b78;
       line-height: 1.45;
     }}
+    .tracker-workspace {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(360px, 430px);
+      gap: 14px;
+      align-items: start;
+    }}
+    .tracker-main-column {{
+      min-width: 0;
+    }}
     .table-wrap {{
       overflow-x: auto;
-      border-radius: 12px;
+      border-radius: 8px;
       border: 1px solid var(--sheet-border);
       background: white;
       scrollbar-gutter: stable both-edges;
@@ -2475,9 +2687,77 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     }}
     .tracker-table-wrap {{
       position: relative;
-      max-height: 70vh;
-      overflow-y: auto;
-      overscroll-behavior: contain;
+    }}
+    .case-detail-panel {{
+      position: sticky;
+      top: 86px;
+      max-height: calc(100vh - 104px);
+      overflow: auto;
+      border: 1px solid #d6e1ea;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.96);
+      padding: 14px;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+    }}
+    .detail-pane-header {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+      margin-bottom: 10px;
+    }}
+    .detail-empty {{
+      border: 1px dashed #c9d6e2;
+      border-radius: 8px;
+      padding: 14px;
+      color: #526373;
+      background: #f8fbfd;
+      line-height: 1.45;
+    }}
+    .detail-action-row {{
+      margin-top: 12px;
+    }}
+    .detail-editor,
+    .case-assignment-panel,
+    .case-audit-panel {{
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid #dbe5ee;
+    }}
+    .detail-editor h3,
+    .case-assignment-panel h3,
+    .case-audit-panel h3 {{
+      margin: 0 0 8px;
+      font-size: 16px;
+    }}
+    .grid-compact {{
+      grid-template-columns: repeat(2, minmax(150px, 1fr));
+    }}
+    .bulk-drawer summary {{
+      cursor: pointer;
+    }}
+    .bulk-summary-row {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      font-weight: 800;
+    }}
+    .status-panel {{
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-top: 12px;
+      padding: 10px 12px;
+      border: 1px solid #d8e2eb;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.92);
+      color: #425466;
+      font-size: 13px;
+    }}
+    .status-label {{
+      font-weight: 800;
+      color: #203040;
     }}
     .scrollbar-dock {{
       position: sticky;
@@ -2515,7 +2795,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     table {{
       width: 100%;
       border-collapse: collapse;
-      min-width: 1600px;
+      min-width: 900px;
     }}
     #trackerTable thead th {{
       position: sticky;
@@ -2550,7 +2830,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       position: sticky;
       right: 0;
       z-index: 2;
-      min-width: 180px;
+      min-width: 156px;
       box-shadow: -6px 0 10px rgba(15, 23, 42, 0.06);
       background: white;
     }}
@@ -2583,6 +2863,77 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     .badge.open_at_state {{ background: #fde68a; }}
     .badge.open_at_national {{ background: #fca5a5; }}
     .muted {{ color: #64748b; font-size: 12px; }}
+    .tracker-primary-row {{
+      cursor: pointer;
+    }}
+    .tracker-primary-row:hover td {{
+      background: #f7fbff;
+    }}
+    .tracker-primary-row.closed-row:hover td {{
+      background: #e7ebef;
+    }}
+    .tracker-primary-row[aria-selected="true"] td {{
+      border-bottom-color: #b9c7d4;
+      background: #f5f9fc;
+    }}
+    .grievance-cell {{
+      min-width: 190px;
+    }}
+    .grievance-title {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 800;
+      color: #152b3f;
+    }}
+    .next-step-cell {{
+      min-width: 150px;
+      font-weight: 700;
+      color: #243746;
+    }}
+    .detail-row td {{
+      background: #f8fbfd;
+      border-top: 0;
+    }}
+    .detail-cell {{
+      padding: 0;
+    }}
+    .detail-panel {{
+      padding: 14px;
+      border-top: 1px solid #d8e2eb;
+    }}
+    .detail-grid {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(150px, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }}
+    .detail-item {{
+      border: 1px solid #d8e2eb;
+      border-radius: 8px;
+      padding: 10px;
+      background: white;
+      min-height: 54px;
+    }}
+    .detail-label {{
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #64748b;
+    }}
+    .detail-value {{
+      margin-top: 4px;
+      color: #203040;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }}
+    .detail-full {{
+      grid-column: 1 / -1;
+    }}
+    .detail-narrative {{
+      white-space: pre-wrap;
+    }}
     .row-actions {{
       display: flex;
       gap: 8px;
@@ -2608,7 +2959,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       margin: 0;
     }}
     @media (max-width: 1200px) {{
-      .hero-panel, .grid, .grid-wide, .split, .metric-grid, .menu-grid {{
+      .hero-panel, .grid, .grid-wide, .split, .metric-grid, .menu-grid, .tracker-workspace {{
         grid-template-columns: 1fr;
       }}
       .section-header {{
@@ -2617,8 +2968,10 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       .section-actions {{
         justify-content: flex-start;
       }}
-      .workspace-menu-panel {{
+      .workspace-menu-panel,
+      .case-detail-panel {{
         position: static;
+        max-height: none;
       }}
       .workspace-menu-bar,
       .menu-group {{
@@ -2654,9 +3007,8 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       .metric-card {{
         min-height: 0;
       }}
-      .tracker-table-wrap {{
-        max-height: none;
-        overflow: visible;
+      .detail-grid {{
+        grid-template-columns: 1fr;
       }}
       .scrollbar-dock {{
         display: none !important;
@@ -2677,7 +3029,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       #trackerTable tr {{
         margin-bottom: 12px;
         border: 1px solid var(--sheet-border);
-        border-radius: 14px;
+        border-radius: 8px;
         overflow: hidden;
         background: white;
       }}
@@ -2698,6 +3050,9 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
         letter-spacing: 0.06em;
         text-transform: uppercase;
         color: #607181;
+      }}
+      #trackerTable td.detail-cell::before {{
+        content: none;
       }}
       #trackerTable th.select-col,
       #trackerTable td.select-col,
@@ -2732,7 +3087,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
   <div class="panel hero-panel">
     <div>
       <div class="eyebrow">Officer Workspace</div>
-      <h1>Officer Grievance Tracker</h1>
+      <h1>{escape(page_title)}</h1>
       <p class="hero-subtitle">{escape(hero_summary)}</p>
       <div class="hero-meta">
         <span class="role-pill">{escape(viewer_role_label)}</span>
@@ -2744,151 +3099,23 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       <div>
         <div class="eyebrow">Quick Jump</div>
         <h2>Move Fast</h2>
-        <div class="summary">Jump straight to the controls, active tracker, or assignment panels without hunting through the page.</div>
+        <div class="summary">Use the quick links to move between the tracker, case entry, and administrative tools.</div>
       </div>
       <div class="hero-links">{hero_links_html}</div>
     </div>
   </div>
-  {auth_panel}
-  {profile_panel}
-  {motion_sheet_settings_panel}
-  {chief_assignment_panel}
-  {external_steward_panel}
-  {case_external_assignment_panel}
-
-  <div class="panel" id="filtersPanel">
-    <div class="section-header">
-      <div>
-        <div class="eyebrow">Control Center</div>
-        <h2>Filters</h2>
-        <div class="summary">Slice the tracker by scope, assignee, status, source, or a free-text search across grievance details.</div>
-      </div>
-      <div class="section-actions">
-        <button id="reloadBtn" type="button">Load Tracker</button>
-        <button id="clearFiltersBtn" class="secondary" type="button">Clear Filters</button>
-      </div>
-    </div>
-    <div class="grid">
-      <label>Search
-        <input id="filterSearch" placeholder="Grievance, contract, name, issue..." />
-      </label>
-      <label>Contract Scope
-        <select id="filterContractScope">
-          <option value="">All scopes</option>
-        </select>
-      </label>
-      <label>Assigned To
-        <select id="filterAssignee"></select>
-      </label>
-      <label>Officer Status
-        <select id="filterStatus">
-          <option value="">All statuses</option>
-          <option value="open">Open</option>
-          <option value="in_progress">In Progress</option>
-          <option value="waiting">Waiting</option>
-          <option value="open_at_state">Open at State</option>
-          <option value="open_at_national">Open at National</option>
-          <option value="closed">Closed</option>
-        </select>
-      </label>
-      <label>Source
-        <select id="filterSource">
-          <option value="">All sources</option>
-          <option value="digital_intake">Digital intake</option>
-          <option value="paper_manual">Paper manual</option>
-        </select>
-      </label>
-    </div>
-    <div class="metric-grid" id="trackerStats">
-      <div class="metric-card">
-        <div class="metric-label">Visible Cases</div>
-        <div class="metric-value" id="metricTotalValue">0</div>
-        <div class="metric-note" id="metricScopeNote">Load the tracker to see scope coverage.</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-label">Active</div>
-        <div class="metric-value" id="metricActiveValue">0</div>
-        <div class="metric-note">Open, in progress, and waiting cases still on the board.</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-label">Escalated</div>
-        <div class="metric-value" id="metricEscalatedValue">0</div>
-        <div class="metric-note">Cases already moved to state or national level.</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-label">Waiting</div>
-        <div class="metric-value" id="metricWaitingValue">0</div>
-        <div class="metric-note">Cases paused pending the next union or company step.</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-label">Closed</div>
-        <div class="metric-value" id="metricClosedValue">0</div>
-        <div class="metric-note">Completed grievances in the current filtered view.</div>
-      </div>
-    </div>
-    <div id="tableSummary" class="summary">Tracker not loaded yet.</div>
-  </div>
-
-  {bulk_panel}
-  {mutation_split}
-
-  <div class="panel" id="trackerPanel">
-    <div class="section-header">
-      <div>
-        <div class="eyebrow">Live Results</div>
-        <h2>Tracker Table</h2>
-        <div class="summary">The header stays visible inside this pane. Use the bottom dock to scroll sideways when the table is wider than the screen.</div>
-      </div>
-    </div>
-    <div class="table-wrap tracker-table-wrap">
-      <table id="trackerTable">
-        <thead>
-          <tr>
-            {selection_header}
-            <th class="main">Grievance Number</th>
-            <th class="main">Contract / Scope</th>
-            <th class="main">Department</th>
-            <th class="main">Name</th>
-            <th class="main">Steward</th>
-            <th class="main">Date of Occurrence</th>
-            <th class="main">Issue</th>
-            <th class="request">Date Sent 1st Level Request</th>
-            <th class="request">Date Sent 2nd Level Request</th>
-            <th class="request">Date Sent 3rd Level Request</th>
-            <th class="request">Date Sent 4th Level Request</th>
-            <th class="main">Assigned To</th>
-            <th class="main">Officer Status</th>
-            <th class="main">Workflow Status</th>
-            <th class="main">Source</th>
-            {actions_header}
-          </tr>
-        </thead>
-        <tbody id="tableBody">
-          <tr><td colspan="15">No cases loaded.</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <div class="scrollbar-dock" id="trackerScrollbarDock" aria-hidden="true">
-      <div class="scrollbar-hint">Scroll left / right</div>
-      <div class="table-scrollbar" id="trackerScrollbar">
-        <div id="trackerScrollbarInner"></div>
-      </div>
-    </div>
-  </div>
-
-  <div class="panel" id="responsePanel">
-    <h2>Last Response</h2>
-    <pre id="out">Ready.</pre>
-  </div>
+  {page_body}
+  {status_panel}
   </div>
 
   <script>
     const VIEWER = {viewer_payload};
+    const OFFICER_PAGE_PATH = {json.dumps(page_path)};
     const FIXED_SCOPE_OPTIONS = {fixed_scope_options_json};
     const SCOPE_LABELS = {scope_labels_json};
     const ENABLE_SELECTION = {str(show_selection).lower()};
     const SHOW_ACTIONS = {str(show_actions).lower()};
-    const EMPTY_COLSPAN = 15 + (ENABLE_SELECTION ? 1 : 0) + (SHOW_ACTIONS ? 1 : 0);
+    const EMPTY_COLSPAN = 6 + (ENABLE_SELECTION ? 1 : 0) + (SHOW_ACTIONS ? 1 : 0);
     const out = document.getElementById('out');
     const trackerTable = document.getElementById('trackerTable');
     const trackerTableWrap = trackerTable ? trackerTable.closest('.table-wrap') : null;
@@ -2918,6 +3145,11 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     const caseExternalAssignmentsBody = document.getElementById('caseExternalAssignmentsBody');
     const caseExternalStewardSelect = document.getElementById('caseExternalStewardSelect');
     const caseExternalAssignmentHint = document.getElementById('caseExternalAssignmentHint');
+    const caseDetailTitle = document.getElementById('caseDetailTitle');
+    const caseDetailBody = document.getElementById('caseDetailBody');
+    const caseDetailActions = document.getElementById('caseDetailActions');
+    const caseAuditPanel = document.getElementById('caseAuditPanel');
+    const caseAuditBody = document.getElementById('caseAuditBody');
     const DIRECTORY_SEARCH_MIN_CHARS = 3;
     const currentRows = new Map();
     const selectedCaseIds = new Set();
@@ -2926,6 +3158,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     let directorySearchTimer = null;
     let directorySearchRequestSeq = 0;
     let syncingTrackerScroll = false;
+    let selectedDetailCaseId = null;
 
     function esc(value) {{
       return String(value == null ? '' : value)
@@ -2937,18 +3170,34 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     }}
 
     function show(data) {{
-      out.textContent = JSON.stringify(data, null, 2);
+      if (!out) return;
+      if (typeof data === 'string') {{
+        out.textContent = data;
+        return;
+      }}
+      const payload = data && data.data ? data.data : data;
+      if (payload && payload.error) {{
+        out.textContent = `Error: ${{payload.error}}`;
+      }} else if (payload && payload.detail) {{
+        out.textContent = `Error: ${{payload.detail}}`;
+      }} else if (payload && payload.display_grievance) {{
+        out.textContent = `Updated ${{payload.display_grievance}}.`;
+      }} else if (payload && Number.isFinite(payload.count)) {{
+        out.textContent = `Loaded ${{payload.count}} case(s).`;
+      }} else {{
+        out.textContent = 'Done.';
+      }}
     }}
 
     async function call(url, opts) {{
       const res = await fetch(url, opts || {{}});
       if (res.status === 401 && VIEWER.auth_enabled) {{
-        window.location.href = '/auth/login?next=' + encodeURIComponent('/officers');
+        window.location.href = '/auth/login?next=' + encodeURIComponent(OFFICER_PAGE_PATH);
         throw new Error('login required');
       }}
       const text = await res.text();
       let data = text;
-      try {{ data = JSON.parse(text); }} catch {{}}
+      try {{ data = JSON.parse(text); }} catch (err) {{ void err; }}
       if (!res.ok) throw {{ status: res.status, data }};
       return data;
     }}
@@ -3062,6 +3311,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     }}
 
     function populateScopeOptions(values, selectedValue) {{
+      if (!filterContractScope) return;
       void values;
       filterContractScope.innerHTML = '<option value="">All scopes</option>' + FIXED_SCOPE_OPTIONS
         .map((option) => `<option value="${{esc(option.value)}}">${{esc(option.label)}}</option>`)
@@ -3160,6 +3410,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       if (!ENABLE_SELECTION) return;
       selectedCaseIds.clear();
       updateSelectionUi();
+      if (!tableBody) return;
       for (const checkbox of tableBody.querySelectorAll('input[data-select-case-id]')) {{
         checkbox.checked = false;
       }}
@@ -3184,6 +3435,150 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       if (contract) return esc(contract);
       if (scope) return `<span class="muted">${{esc(scopeLabel(scope))}}</span>`;
       return '';
+    }}
+
+    function nextStepLabel(row) {{
+      if (!row || row.officer_status === 'closed') return 'Closed';
+      if (!row.first_level_request_sent_date) return 'Send 1st level request';
+      if (!row.second_level_request_sent_date) return 'Send 2nd level request';
+      if (!row.third_level_request_sent_date) return 'Send 3rd level request';
+      if (!row.fourth_level_request_sent_date) return 'Send 4th level request';
+      if (row.officer_status === 'waiting') return 'Waiting';
+      if (row.officer_status === 'open_at_state') return 'State level';
+      if (row.officer_status === 'open_at_national') return 'National level';
+      return 'Review / follow up';
+    }}
+
+    function statusCell(row) {{
+      return `
+        <span class="badge ${{esc(row.officer_status)}}">${{esc(labelForStatus(row.officer_status))}}</span>
+        <div class="muted">${{esc(row.workflow_status || '')}}</div>
+      `;
+    }}
+
+    function grievanceCell(row) {{
+      return `
+        <div class="grievance-title">
+          <span>${{esc(row.display_grievance)}}</span>
+        </div>
+        <div class="muted">${{esc(row.member_name || '')}}</div>
+        <div class="muted">${{esc(row.case_id || '')}}</div>
+      `;
+    }}
+
+    function detailItem(label, value) {{
+      return `
+        <div class="detail-item">
+          <div class="detail-label">${{esc(label)}}</div>
+          <div class="detail-value">${{value ? esc(value) : '<span class="muted">Not set</span>'}}</div>
+        </div>
+      `;
+    }}
+
+    function renderCaseActions(row) {{
+      if (!caseDetailActions || !row) return;
+      caseDetailActions.innerHTML = `
+        ${{VIEWER.can_edit ? `<button type="button" data-action="edit" data-case-id="${{esc(row.case_id)}}">Edit</button>` : ''}}
+        ${{VIEWER.can_edit ? `<button type="button" class="secondary" data-action="auto-data-request" data-case-id="${{esc(row.case_id)}}">Auto Data Request</button>` : ''}}
+        ${{VIEWER.can_view_audit ? `<button type="button" class="secondary" data-action="audit" data-case-id="${{esc(row.case_id)}}">Audit</button>` : ''}}
+        ${{VIEWER.can_delete ? `<button type="button" class="danger" data-action="delete" data-case-id="${{esc(row.case_id)}}">Delete</button>` : ''}}
+      `;
+    }}
+
+    function renderCaseDetail(row) {{
+      if (!caseDetailBody) return;
+      if (!row) {{
+        if (caseDetailTitle) caseDetailTitle.textContent = 'Case Details';
+        caseDetailBody.className = 'detail-empty';
+        caseDetailBody.textContent = 'Select a grievance row to view the full narrative, dates, workflow status, notes, and available actions.';
+        if (caseDetailActions) caseDetailActions.innerHTML = '';
+        if (caseAuditPanel) caseAuditPanel.hidden = true;
+        return;
+      }}
+      const narrative = row.narrative_full || row.issue_summary || row.narrative_summary || '';
+      const summary = row.issue_summary || row.narrative_summary || '';
+      if (caseDetailTitle) caseDetailTitle.textContent = row.display_grievance || 'Case Details';
+      caseDetailBody.className = 'detail-grid';
+      caseDetailBody.innerHTML = `
+        <div class="detail-item detail-full">
+          <div class="detail-label">Full Narrative</div>
+          <div class="detail-value detail-narrative">${{narrative ? esc(narrative) : '<span class="muted">No narrative captured.</span>'}}</div>
+          ${{row.summary_source ? `<div class="muted">Summary source: ${{esc(row.summary_source)}}</div>` : ''}}
+        </div>
+        <div class="detail-item detail-full">
+          <div class="detail-label">Narrative Summary</div>
+          <div class="detail-value detail-narrative">${{summary ? esc(summary) : '<span class="muted">No summary yet.</span>'}}</div>
+        </div>
+        ${{detailItem('Status', labelForStatus(row.officer_status))}}
+        ${{detailItem('Next Step', nextStepLabel(row))}}
+        ${{detailItem('Assignee', row.officer_assignee)}}
+        ${{detailItem('Contract / Scope', row.contract_scope ? `${{row.contract || ''}} ${{scopeLabel(row.contract_scope)}}`.trim() : row.contract)}}
+        ${{detailItem('Occurrence', row.occurrence_date)}}
+        ${{detailItem('Department', row.department)}}
+        ${{detailItem('Steward', row.steward)}}
+        ${{detailItem('Articles', row.articles)}}
+        ${{detailItem('1st Level Sent', row.first_level_request_sent_date)}}
+        ${{detailItem('2nd Level Sent', row.second_level_request_sent_date)}}
+        ${{detailItem('3rd Level Sent', row.third_level_request_sent_date)}}
+        ${{detailItem('4th Level Sent', row.fourth_level_request_sent_date)}}
+        ${{detailItem('Workflow', row.workflow_status)}}
+        ${{detailItem('Approval', row.approval_status)}}
+        ${{detailItem('Source', labelForSource(row.officer_source))}}
+        ${{detailItem('Created', row.created_at_utc)}}
+        ${{detailItem('Closed', row.officer_closed_at_utc ? `${{row.officer_closed_at_utc}}${{row.officer_closed_by ? ` by ${{row.officer_closed_by}}` : ''}}` : '')}}
+        <div class="detail-item detail-full">
+          <div class="detail-label">Officer Notes</div>
+          <div class="detail-value detail-narrative">${{row.officer_notes ? esc(row.officer_notes) : '<span class="muted">No notes.</span>'}}</div>
+        </div>
+      `;
+      renderCaseActions(row);
+    }}
+
+    function renderAudit(data) {{
+      if (!caseAuditPanel || !caseAuditBody) return;
+      const rows = Array.isArray(data && data.events) ? data.events : [];
+      caseAuditPanel.hidden = false;
+      if (!rows.length) {{
+        caseAuditBody.textContent = 'No audit events found for this case.';
+        return;
+      }}
+      caseAuditBody.innerHTML = rows.slice(0, 12).map((event) => `
+        <div class="detail-item">
+          <div class="detail-label">${{esc(event.event_type || 'Event')}}</div>
+          <div class="detail-value">${{esc(event.ts_utc || '')}}</div>
+        </div>
+      `).join('');
+    }}
+
+    function renderCaseRow(row) {{
+      const isSelected = selectedDetailCaseId === row.case_id;
+      const classes = [
+        'tracker-primary-row',
+        row.officer_status === 'closed' ? 'closed-row' : '',
+      ].filter(Boolean).join(' ');
+      return `
+        <tr class="${{classes}}" data-case-id="${{esc(row.case_id)}}" tabindex="0" aria-selected="${{isSelected ? 'true' : 'false'}}">
+          ${{ENABLE_SELECTION ? `
+            <td class="select-col" data-label="Select">
+              <input type="checkbox" data-select-case-id="${{esc(row.case_id)}}" ${{selectedCaseIds.has(row.case_id) ? 'checked' : ''}} />
+            </td>` : ''}}
+          <td class="grievance-cell" data-label="Grievance / Member">${{grievanceCell(row)}}</td>
+          <td data-label="Status">${{statusCell(row)}}</td>
+          <td class="next-step-cell" data-label="Next Step">${{esc(nextStepLabel(row))}}</td>
+          <td data-label="Assignee">${{esc(row.officer_assignee || '')}}</td>
+          <td data-label="Occurrence">${{esc(row.occurrence_date || '')}}</td>
+          <td data-label="Contract / Scope">${{contractCell(row)}}</td>
+          ${{SHOW_ACTIONS ? `
+            <td class="actions-col" data-label="Actions">
+              <div class="row-actions">
+                ${{VIEWER.can_edit ? `<button type="button" data-action="edit" data-case-id="${{esc(row.case_id)}}">Edit</button>` : ''}}
+                ${{VIEWER.can_edit ? `<button type="button" class="secondary" data-action="auto-data-request" data-case-id="${{esc(row.case_id)}}">Auto Data Request</button>` : ''}}
+                ${{VIEWER.can_view_audit ? `<button type="button" class="secondary" data-action="audit" data-case-id="${{esc(row.case_id)}}">Audit</button>` : ''}}
+                ${{VIEWER.can_delete ? `<button type="button" class="danger" data-action="delete" data-case-id="${{esc(row.case_id)}}">Delete</button>` : ''}}
+              </div>
+            </td>` : ''}}
+        </tr>
+      `;
     }}
 
     function updateTrackerMetrics(rows) {{
@@ -3214,60 +3609,46 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       }}
     }}
 
+    function renderSelectedCaseDetail() {{
+      const row = selectedDetailCaseId ? currentRows.get(selectedDetailCaseId) : null;
+      renderCaseDetail(row || null);
+      if (row) populateEditForm(row);
+      else clearEditFields();
+    }}
+
     function renderRows(rows) {{
       currentRows.clear();
       for (const row of rows) currentRows.set(row.case_id, row);
       for (const caseId of [...selectedCaseIds]) {{
         if (!currentRows.has(caseId)) selectedCaseIds.delete(caseId);
       }}
+      if (selectedDetailCaseId && !currentRows.has(selectedDetailCaseId)) selectedDetailCaseId = null;
       const selectedFilter = valueOf('filterAssignee');
       refreshRosterOptions(rows, selectedFilter);
       updateSelectionUi();
       updateTrackerMetrics(rows);
+      renderSelectedCaseDetail();
+      if (!tableBody || !tableSummary) return;
 
       const scopeSet = new Set(rows.map((row) => String(row.contract_scope || '').trim()).filter(Boolean));
       tableSummary.textContent = rows.length
-        ? `${{rows.length}} case(s) loaded across ${{scopeSet.size || 1}} scope(s).`
+        ? `${{rows.length}} case(s) loaded across ${{scopeSet.size || 1}} scope(s). Select a row for details.`
         : 'No matching grievances found for the current filters.';
       if (!rows.length) {{
         tableBody.innerHTML = `<tr><td colspan="${{EMPTY_COLSPAN}}">No matching grievances found.</td></tr>`;
         return;
       }}
 
-      tableBody.innerHTML = rows.map((row) => `
-        <tr class="${{row.officer_status === 'closed' ? 'closed-row' : ''}}">
-          ${{ENABLE_SELECTION ? `
-            <td class="select-col" data-label="Select">
-              <input type="checkbox" data-select-case-id="${{esc(row.case_id)}}" ${{selectedCaseIds.has(row.case_id) ? 'checked' : ''}} />
-            </td>` : ''}}
-          <td data-label="Grievance Number">${{esc(row.display_grievance)}}<div class="muted">${{esc(row.case_id)}}</div></td>
-          <td data-label="Contract / Scope">${{contractCell(row)}}</td>
-          <td data-label="Department">${{esc(row.department || '')}}</td>
-          <td data-label="Name">${{esc(row.member_name || '')}}</td>
-          <td data-label="Steward">${{esc(row.steward || '')}}</td>
-          <td data-label="Date of Occurrence">${{esc(row.occurrence_date || '')}}</td>
-          <td data-label="Issue">${{esc(row.issue_summary || '')}}</td>
-          <td data-label="Date Sent 1st Level Request">${{esc(row.first_level_request_sent_date || '')}}</td>
-          <td data-label="Date Sent 2nd Level Request">${{esc(row.second_level_request_sent_date || '')}}</td>
-          <td data-label="Date Sent 3rd Level Request">${{esc(row.third_level_request_sent_date || '')}}</td>
-          <td data-label="Date Sent 4th Level Request">${{esc(row.fourth_level_request_sent_date || '')}}</td>
-          <td data-label="Assigned To">${{esc(row.officer_assignee || '')}}</td>
-          <td data-label="Officer Status"><span class="badge ${{esc(row.officer_status)}}">${{esc(labelForStatus(row.officer_status))}}</span></td>
-          <td data-label="Workflow Status">${{esc(row.workflow_status || '')}}</td>
-          <td data-label="Source">${{esc(labelForSource(row.officer_source))}}</td>
-          ${{SHOW_ACTIONS ? `
-            <td class="actions-col" data-label="Actions">
-              <div class="row-actions">
-                ${{VIEWER.can_edit ? `<button type="button" data-action="edit" data-case-id="${{esc(row.case_id)}}">Edit</button>` : ''}}
-                ${{VIEWER.can_edit ? `<button type="button" class="secondary" data-action="auto-data-request" data-case-id="${{esc(row.case_id)}}">Auto Data Request</button>` : ''}}
-                ${{VIEWER.can_view_audit ? `<button type="button" class="secondary" data-action="audit" data-case-id="${{esc(row.case_id)}}">Audit</button>` : ''}}
-                ${{VIEWER.can_delete ? `<button type="button" class="danger" data-action="delete" data-case-id="${{esc(row.case_id)}}">Delete</button>` : ''}}
-              </div>
-            </td>` : ''}}
-        </tr>
-      `).join('');
+      tableBody.innerHTML = rows.map(renderCaseRow).join('');
       updateSelectionUi();
       syncTrackerScrollbarMetrics();
+    }}
+
+    function selectCase(caseId) {{
+      if (!caseId || !currentRows.has(caseId)) return;
+      selectedDetailCaseId = caseId;
+      renderRows([...currentRows.values()]);
+      if (VIEWER.can_manage_chief_assignments) void loadCaseExternalStewardAssignments(caseId);
     }}
 
     function queryString() {{
@@ -3385,6 +3766,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
     async function loadAudit(caseId) {{
       try {{
         const data = await call(`/officers/cases/${{encodeURIComponent(caseId)}}/events`);
+        renderAudit(data);
         show(data);
       }} catch (e) {{
         show(e);
@@ -3544,7 +3926,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       }}
     }}
 
-    function clearEditSelection() {{
+    function clearEditFields() {{
       for (const id of [
         'editCaseId', 'editCaseIdDisplay', 'editOriginalGrievanceNumber', 'editOriginalDisplayGrievance',
         'editWorkflowStatus', 'editSource', 'editGrievanceNumber',
@@ -3563,10 +3945,17 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       renderCaseExternalAssignments(null);
     }}
 
-    function startEdit(caseId) {{
-      const row = currentRows.get(caseId);
-      if (!row) return;
-      document.getElementById('editCaseId').value = row.case_id || '';
+    function clearEditSelection() {{
+      selectedDetailCaseId = null;
+      clearEditFields();
+      renderCaseDetail(null);
+      if (tableBody) renderRows([...currentRows.values()]);
+    }}
+
+    function populateEditForm(row) {{
+      const editCaseInput = document.getElementById('editCaseId');
+      if (!row || !editCaseInput) return;
+      editCaseInput.value = row.case_id || '';
       document.getElementById('editCaseIdDisplay').value = row.case_id || '';
       document.getElementById('editOriginalGrievanceNumber').value = row.grievance_number || '';
       document.getElementById('editOriginalDisplayGrievance').value = row.display_grievance || '';
@@ -3576,7 +3965,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       document.getElementById('editMemberName').value = row.member_name || '';
       document.getElementById('editMemberEmail').value = row.member_email || '';
       if (document.getElementById('editContract')) {{
-        document.getElementById('editContract').value = scopeLabel(row.contract_scope || row.contract || '');
+        document.getElementById('editContract').value = row.contract_scope || row.contract || '';
       }}
       document.getElementById('editDepartment').value = row.department || '';
       document.getElementById('editSteward').value = row.steward || '';
@@ -3594,7 +3983,10 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       document.getElementById('editMeta').textContent = row.officer_closed_at_utc
         ? `Closed ${{row.officer_closed_at_utc}}${{row.officer_closed_by ? ` by ${{row.officer_closed_by}}` : ''}}`
         : '';
-      if (VIEWER.can_manage_chief_assignments) void loadCaseExternalStewardAssignments(caseId);
+    }}
+
+    function startEdit(caseId) {{
+      selectCase(caseId);
     }}
 
     async function saveEdit() {{
@@ -3944,24 +4336,47 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       }}
     }}
 
-    tableBody.addEventListener('click', (event) => {{
-      const button = event.target.closest('button[data-case-id][data-action]');
-      if (!button) return;
-      const caseId = button.dataset.caseId || '';
-      if (button.dataset.action === 'delete') {{
+    function handleCaseAction(action, caseId) {{
+      if (!caseId) return;
+      selectCase(caseId);
+      if (action === 'delete') {{
         void deleteCase(caseId);
         return;
       }}
-      if (button.dataset.action === 'audit') {{
+      if (action === 'audit') {{
         void loadAudit(caseId);
         return;
       }}
-      if (button.dataset.action === 'auto-data-request') {{
+      if (action === 'auto-data-request') {{
         void autoDataRequest(caseId);
+      }}
+    }}
+
+    tableBody && tableBody.addEventListener('click', (event) => {{
+      const button = event.target.closest('button[data-case-id][data-action]');
+      if (button) {{
+        handleCaseAction(button.dataset.action || 'edit', button.dataset.caseId || '');
         return;
       }}
-      startEdit(caseId);
+      if (event.target.closest('a, input, select, textarea, label')) return;
+      const row = event.target.closest('tr[data-case-id]');
+      if (!row) return;
+      selectCase(row.dataset.caseId || '');
     }});
+    tableBody && tableBody.addEventListener('keydown', (event) => {{
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      if (event.target.closest('button, a, input, select, textarea, label')) return;
+      const row = event.target.closest('tr[data-case-id]');
+      if (!row) return;
+      event.preventDefault();
+      selectCase(row.dataset.caseId || '');
+    }});
+    caseDetailActions && caseDetailActions.addEventListener('click', (event) => {{
+      const button = event.target.closest('button[data-case-id][data-action]');
+      if (!button) return;
+      handleCaseAction(button.dataset.action || 'edit', button.dataset.caseId || '');
+    }});
+
     chiefAssignmentsBody && chiefAssignmentsBody.addEventListener('click', (event) => {{
       const button = event.target.closest('button[data-chief-assignment-id]');
       if (!button) return;
@@ -3992,7 +4407,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
         button.dataset.directoryName || '',
       );
     }});
-    tableBody.addEventListener('change', (event) => {{
+    tableBody && tableBody.addEventListener('change', (event) => {{
       const checkbox = event.target.closest('input[data-select-case-id]');
       if (!checkbox) return;
       const caseId = checkbox.dataset.selectCaseId || '';
@@ -4002,15 +4417,19 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       updateSelectionUi();
     }});
 
-    document.getElementById('reloadBtn').addEventListener('click', () => {{ void loadCases(); }});
-    document.getElementById('clearFiltersBtn').addEventListener('click', () => {{
-      document.getElementById('filterSearch').value = '';
-      document.getElementById('filterContractScope').value = '';
-      document.getElementById('filterAssignee').value = '';
-      document.getElementById('filterStatus').value = '';
-      document.getElementById('filterSource').value = '';
+    document.getElementById('reloadBtn') && document.getElementById('reloadBtn').addEventListener('click', () => {{ void loadCases(); }});
+    document.getElementById('clearFiltersBtn') && document.getElementById('clearFiltersBtn').addEventListener('click', () => {{
+      const filterSearch = document.getElementById('filterSearch');
+      if (filterSearch) filterSearch.value = '';
+      if (filterContractScope) filterContractScope.value = '';
+      if (filterAssignee) filterAssignee.value = '';
+      const filterStatus = document.getElementById('filterStatus');
+      if (filterStatus) filterStatus.value = '';
+      const filterSource = document.getElementById('filterSource');
+      if (filterSource) filterSource.value = '';
       void loadCases();
     }});
+    document.getElementById('clearDetailBtn') && document.getElementById('clearDetailBtn').addEventListener('click', clearEditSelection);
     document.getElementById('applyBulkBtn') && document.getElementById('applyBulkBtn').addEventListener('click', () => {{ void applyBulkUpdate(); }});
     document.getElementById('deleteBulkBtn') && document.getElementById('deleteBulkBtn').addEventListener('click', () => {{ void deleteSelectedCases(); }});
     document.getElementById('clearBulkSelectionBtn') && document.getElementById('clearBulkSelectionBtn').addEventListener('click', clearBulkSelection);
@@ -4058,8 +4477,10 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       }} else {{
         for (const caseId of currentRows.keys()) selectedCaseIds.delete(caseId);
       }}
-      for (const checkbox of tableBody.querySelectorAll('input[data-select-case-id]')) {{
-        checkbox.checked = selectAllRows.checked;
+      if (tableBody) {{
+        for (const checkbox of tableBody.querySelectorAll('input[data-select-case-id]')) {{
+          checkbox.checked = selectAllRows.checked;
+        }}
       }}
       updateSelectionUi();
     }});
@@ -4075,7 +4496,7 @@ def _render_officers_page(user: OfficerUserContext, cfg) -> str:  # noqa: ANN001
       syncTrackerScrollbarMetrics();
       void loadNextGrievanceNumber();
       void loadMotionSheetSettings();
-      void loadCases();
+      if (tableBody || createAssigneeSelect) void loadCases();
       if (VIEWER.can_manage_chief_assignments) {{
         void loadChiefAssignments();
         void loadExternalStewards();
@@ -4111,7 +4532,25 @@ async def officers_page(request: Request):
     gate = await require_officer_page_access(request, next_path="/officers")
     if isinstance(gate, RedirectResponse):
         return gate
-    return HTMLResponse(_render_officers_page(gate, request.app.state.cfg))
+    return HTMLResponse(_render_officers_page(gate, request.app.state.cfg, page="tracker"))
+
+
+@router.get("/officers/admin", response_class=HTMLResponse)
+async def officers_admin_page(request: Request):
+    gate = await require_officer_page_access(request, next_path="/officers/admin")
+    if isinstance(gate, RedirectResponse):
+        return gate
+    return HTMLResponse(_render_officers_page(gate, request.app.state.cfg, page="admin"))
+
+
+@router.get("/officers/new", response_class=HTMLResponse)
+async def officers_new_page(request: Request):
+    gate = await require_officer_page_access(request, next_path="/officers/new")
+    if isinstance(gate, RedirectResponse):
+        return gate
+    if not gate.can_create:
+        raise HTTPException(status_code=403, detail="manual paper entry requires admin access")
+    return HTMLResponse(_render_officers_page(gate, request.app.state.cfg, page="new"))
 
 
 @router.get("/officers/profile", response_model=OfficerProfileResponse)
@@ -4214,9 +4653,12 @@ async def chief_steward_assignments(request: Request):
     )
 
 
-@router.get("/officers/directory/users", response_model=DirectoryUserSearchResponse)
-async def officer_directory_users(request: Request, search: str = "", limit: int = 10):
-    await require_admin_user(request)
+async def search_directory_users_for_request(
+    request: Request,
+    *,
+    search: str = "",
+    limit: int = 10,
+) -> DirectoryUserSearchResponse:
     query = str(search or "").strip()
     if len(query) < 2:
         return DirectoryUserSearchResponse(search=query, count=0, rows=[], warning=None)
@@ -4246,6 +4688,12 @@ async def officer_directory_users(request: Request, search: str = "", limit: int
 
     rows = _merge_directory_user_rows(graph_rows, local_rows, query=query, limit=capped_limit)
     return DirectoryUserSearchResponse(search=query, count=len(rows), rows=rows, warning=warning)
+
+
+@router.get("/officers/directory/users", response_model=DirectoryUserSearchResponse)
+async def officer_directory_users(request: Request, search: str = "", limit: int = 10):
+    await require_admin_user(request)
+    return await search_directory_users_for_request(request, search=search, limit=limit)
 
 
 @router.post("/officers/chief-assignments", response_model=ChiefStewardAssignmentRow)

@@ -19,7 +19,7 @@ Template-specific (`template_data`):
 - Company representative name -> `company_rep_name`
 - Company representative title -> `company_rep_title`
 - Company representative email -> `company_rep_email`
-- Requested information list -> `data_requested`
+- Requested information list (Long text, auto-expanding) -> `data_requested`
 - Preferred delivery format -> `preferred_format`
 - Union representative name -> `steward_name`
 - Union representative email -> `steward_email`
@@ -29,6 +29,7 @@ Derived by the API:
 - `template_data.grievance_number` from `grievance_id`
 - `template_data.grievant_name` from first + last name
 - `template_data.today_date` from the submission date
+- `data_requested_rows` from `template_data.data_requested` for the auto-expanding request block in the letterhead template
 
 ## HTTP body skeleton
 

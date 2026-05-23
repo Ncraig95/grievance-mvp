@@ -50,6 +50,14 @@ def _normalize_email(value: object) -> str:
     return _normalize_text(value).lower()
 
 
+def _normalize_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float):
+        return value != 0
+    return _normalize_text(value).lower() in {"1", "true", "yes", "y", "on", "paid"}
+
+
 def _parse_iso(value: object) -> datetime | None:
     text = str(value or "").strip()
     if not text:
@@ -236,6 +244,7 @@ class ReferralService:
         row = await self.db.fetchone(
             """
             SELECT id, request_id, created_at_utc, updated_at_utc, status, assignee, officer_notes,
+                   paid, paid_at_utc,
                    reminder_due_at_utc, reminder_attempted_at_utc, reminder_sent_at_utc, reminder_error,
                    referrer_name, referrer_address, referrer_phone, referrer_email, referrer_group,
                    referred_name, referred_group, referred_att_uid, referral_notes,
@@ -261,6 +270,7 @@ class ReferralService:
         rows = await self.db.fetchall(
             """
             SELECT id, request_id, created_at_utc, updated_at_utc, status, assignee, officer_notes,
+                   paid, paid_at_utc,
                    reminder_due_at_utc, reminder_attempted_at_utc, reminder_sent_at_utc, reminder_error,
                    referrer_name, referrer_address, referrer_phone, referrer_email, referrer_group,
                    referred_name, referred_group, referred_att_uid, referral_notes,
@@ -329,6 +339,17 @@ class ReferralService:
             if status not in REFERRAL_STATUSES:
                 raise RuntimeError("invalid referral status")
             updates["status"] = status
+        if "paid" in payload:
+            paid = _normalize_bool(payload.get("paid"))
+            existing_paid = bool(existing.get("paid"))
+            existing_paid_at = existing.get("paid_at_utc")
+            if paid != existing_paid:
+                updates["paid"] = 1 if paid else 0
+                updates["paid_at_utc"] = utcnow() if paid else None
+            elif paid and not existing_paid_at:
+                updates["paid_at_utc"] = utcnow()
+            elif not paid and existing_paid_at:
+                updates["paid_at_utc"] = None
         for key, column in (
             ("assignee", "assignee"),
             ("officer_notes", "officer_notes"),
@@ -367,6 +388,8 @@ class ReferralService:
         fieldnames = [
             "id",
             "status",
+            "paid",
+            "paid_at_utc",
             "created_at_utc",
             "reminder_due_at_utc",
             "reminder_sent_at_utc",
@@ -400,6 +423,7 @@ class ReferralService:
         rows = await self.db.fetchall(
             """
             SELECT id, request_id, created_at_utc, updated_at_utc, status, assignee, officer_notes,
+                   paid, paid_at_utc,
                    reminder_due_at_utc, reminder_attempted_at_utc, reminder_sent_at_utc, reminder_error,
                    referrer_name, referrer_address, referrer_phone, referrer_email, referrer_group,
                    referred_name, referred_group, referred_att_uid, referral_notes,
@@ -529,20 +553,22 @@ class ReferralService:
             "status": str(row[4] or "open"),
             "assignee": str(row[5]) if row[5] is not None else None,
             "officer_notes": str(row[6]) if row[6] is not None else None,
-            "reminder_due_at_utc": str(row[7] or ""),
-            "reminder_attempted_at_utc": str(row[8]) if row[8] is not None else None,
-            "reminder_sent_at_utc": str(row[9]) if row[9] is not None else None,
-            "reminder_error": str(row[10]) if row[10] is not None else None,
-            "referrer_name": str(row[11] or ""),
-            "referrer_address": str(row[12] or ""),
-            "referrer_phone": str(row[13] or ""),
-            "referrer_email": str(row[14]) if row[14] is not None else None,
-            "referrer_group": str(row[15] or ""),
-            "referred_name": str(row[16] or ""),
-            "referred_group": str(row[17]) if row[17] is not None else None,
-            "referred_att_uid": str(row[18]) if row[18] is not None else None,
-            "referral_notes": str(row[19]) if row[19] is not None else None,
-            "submitter_ip_hash": str(row[20]) if row[20] is not None else None,
-            "submitter_user_agent_hash": str(row[21]) if row[21] is not None else None,
-            "source_payload_json": str(row[22] or "{}"),
+            "paid": _normalize_bool(row[7]),
+            "paid_at_utc": str(row[8]) if row[8] is not None else None,
+            "reminder_due_at_utc": str(row[9] or ""),
+            "reminder_attempted_at_utc": str(row[10]) if row[10] is not None else None,
+            "reminder_sent_at_utc": str(row[11]) if row[11] is not None else None,
+            "reminder_error": str(row[12]) if row[12] is not None else None,
+            "referrer_name": str(row[13] or ""),
+            "referrer_address": str(row[14] or ""),
+            "referrer_phone": str(row[15] or ""),
+            "referrer_email": str(row[16]) if row[16] is not None else None,
+            "referrer_group": str(row[17] or ""),
+            "referred_name": str(row[18] or ""),
+            "referred_group": str(row[19]) if row[19] is not None else None,
+            "referred_att_uid": str(row[20]) if row[20] is not None else None,
+            "referral_notes": str(row[21]) if row[21] is not None else None,
+            "submitter_ip_hash": str(row[22]) if row[22] is not None else None,
+            "submitter_user_agent_hash": str(row[23]) if row[23] is not None else None,
+            "source_payload_json": str(row[24] or "{}"),
         }

@@ -110,6 +110,39 @@ class ReferralConfig:
 
 
 @dataclass(frozen=True)
+class PayPortalConfig:
+    enabled: bool = True
+    sharepoint_root_folder: str = "Local3106/Pay Portal"
+    sharepoint_library: str = ""
+    sharepoint_site_hostname: str = ""
+    sharepoint_site_path: str = ""
+    docx_pdf_graph_temp_folder: str = "Local3106/Pay Portal/_docx_pdf_convert"
+    mileage_legacy_sharepoint_folder: str = "Local3106/Mileage"
+    voucher_template_path: str = "/app/templates/docx/Local 3106 Pay - Expense Voucher.docx"
+    receipt_max_file_bytes: int = 10_000_000
+    receipt_max_entry_bytes: int = 50_000_000
+    clamav_host: str = "clamav"
+    clamav_port: int = 3310
+    clamav_timeout_seconds: int = 30
+    president_email: str = ""
+    treasurer_emails: tuple[str, ...] = ()
+    president_target_scale: str = "36"
+    president_target_multiplier: float = 1.20
+    fund_fica_rate: float = 0.0765
+    google_maps_api_key: str = ""
+    irs_rates: dict[str, str] = field(default_factory=dict)
+    irs_rate_sync_enabled: bool = True
+    irs_rate_source_urls: tuple[str, ...] = (
+        "https://www.irs.gov/tax-professionals/standard-mileage-rates",
+        "https://www.irs.gov/newsroom/irs-sets-2026-business-standard-mileage-rate-at-725-cents-per-mile-up-25-cents",
+    )
+    common_places: tuple[dict[str, str], ...] = field(default_factory=tuple)
+    common_places_sharepoint_library: str = ""
+    common_places_sharepoint_folder: str = "Local3106/Mileage/Config"
+    pay_users: tuple[dict[str, str], ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
 class GrievanceIdConfig:
     mode: str
     timezone: str
@@ -141,6 +174,8 @@ class DocumentPolicyConfig:
     store_all_stage_artifacts: bool = False
     input_source: str = ""
     signature_dispatch_timing: str = "default"
+    attested_auto_sign_enabled: bool = False
+    attested_auto_sign_delay_seconds: int = 60
 
 
 @dataclass(frozen=True)
@@ -244,6 +279,10 @@ def _default_referrals() -> ReferralConfig:
     return ReferralConfig()
 
 
+def _default_pay_portal() -> PayPortalConfig:
+    return PayPortalConfig()
+
+
 @dataclass(frozen=True)
 class AppConfig:
     hmac_shared_secret: str
@@ -258,6 +297,7 @@ class AppConfig:
     grievance_id: GrievanceIdConfig
     outreach: OutreachConfig = field(default_factory=OutreachConfig)
     referrals: ReferralConfig = field(default_factory=_default_referrals)
+    pay_portal: PayPortalConfig = field(default_factory=_default_pay_portal)
     intake_auth: IntakeAuthConfig = field(default_factory=_default_intake_auth)
     rendering: RenderingConfig = field(default_factory=_default_rendering)
     officer_tracking: OfficerTrackingConfig = field(default_factory=_default_officer_tracking)
@@ -270,6 +310,7 @@ class AppConfig:
     wait_for_grievance_number_before_signature: bool = True
     require_approver_decision: bool = True
     log_level: str = "INFO"
+    app_mode: str = "production"
 
 
 def _as_recipients(value: object) -> tuple[str, ...]:
@@ -302,6 +343,52 @@ def _as_mapping(value: object) -> dict[str, str]:
         if key and val:
             out[key] = val
     return out
+
+
+def _as_place_list(value: object) -> tuple[dict[str, str], ...]:
+    if not isinstance(value, list):
+        return ()
+    places: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        address = str(item.get("address") or "").strip()
+        if label and address:
+            places.append({"label": label, "address": address})
+    return tuple(places)
+
+
+def _as_pay_user_list(value: object) -> tuple[dict[str, str], ...]:
+    if not isinstance(value, list):
+        return ()
+    users: list[dict[str, str]] = []
+    for item in value:
+        if isinstance(item, str):
+            email = item.strip()
+            if email:
+                users.append({"email": email, "display_name": "", "role": "guest", "status": "active"})
+            continue
+        if not isinstance(item, dict):
+            continue
+        email = str(item.get("email") or "").strip()
+        if not email:
+            continue
+        role = str(item.get("role") or "guest").strip().lower()
+        if role not in {"guest", "officer", "treasurer"}:
+            role = "guest"
+        status = str(item.get("status") or "active").strip().lower()
+        if status not in {"active", "inactive"}:
+            status = "active"
+        users.append(
+            {
+                "email": email,
+                "display_name": str(item.get("display_name") or "").strip(),
+                "role": role,
+                "status": status,
+            }
+        )
+    return tuple(users)
 
 
 def _as_int_mapping(value: object) -> dict[str, int]:
@@ -419,6 +506,18 @@ def _as_float(value: object, default: float) -> float:
         return float(value)
     except Exception:
         return float(default)
+
+
+
+def _normalize_app_mode(value: object) -> str:
+    mode = str(value or "production").strip().lower()
+    if not mode:
+        return "production"
+    if mode in {"prod", "production"}:
+        return "production"
+    if mode in {"local", "dev", "development"}:
+        return "local"
+    raise RuntimeError(f"Unsupported APP_MODE '{value}'. Expected 'production' or 'local'.")
 
 
 def _normalize_signature_layout_mode(value: object) -> str:
@@ -642,14 +741,28 @@ def _as_standalone_forms(value: object) -> dict[str, StandaloneFormConfig]:
     return out
 
 
+def resolve_config_path(default: str = "/app/config/config.yaml") -> str:
+    return os.getenv("APP_CONFIG_PATH", default)
+
+
 def load_config(path: str) -> AppConfig:
     p = Path(path)
-    raw = yaml.safe_load(p.read_text(encoding="utf-8"))
+    raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    app_mode = _normalize_app_mode(os.getenv("APP_MODE", raw.get("app_mode", "production")))
+    local_mode = app_mode == "local"
+    raw_db_path = str(raw["db_path"]).strip()
+    raw_data_root = str(raw["data_root"]).strip()
+    db_path = (os.getenv("LOCAL_DB_PATH", "").strip() or raw_db_path) if local_mode else raw_db_path
+    data_root = (os.getenv("LOCAL_DATA_ROOT", "").strip() or raw_data_root) if local_mode else raw_data_root
+    hmac_shared_secret = str(raw.get("hmac_shared_secret", "")).strip()
+    if local_mode:
+        hmac_shared_secret = os.getenv("LOCAL_HMAC_SHARED_SECRET", "").strip() or hmac_shared_secret
     docuseal_raw = raw.get("docuseal", {}) or {}
     graph_raw = raw.get("graph", {}) or {}
     email_raw = raw.get("email", {}) or {}
     outreach_raw = raw.get("outreach", {}) or {}
     referrals_raw = raw.get("referrals", {}) or {}
+    pay_portal_raw = raw.get("pay_portal", {}) or {}
     grievance_raw = raw.get("grievance_id", {}) or {}
     intake_auth_raw = raw.get("intake_auth", {}) or {}
     rendering_raw = raw.get("rendering", {}) or {}
@@ -693,12 +806,17 @@ def load_config(path: str) -> AppConfig:
                 signature_dispatch_timing=_normalize_signature_dispatch_timing(
                     raw_policy.get("signature_dispatch_timing")
                 ),
+                attested_auto_sign_enabled=bool(raw_policy.get("attested_auto_sign_enabled", False)),
+                attested_auto_sign_delay_seconds=max(
+                    30,
+                    int(raw_policy.get("attested_auto_sign_delay_seconds") or 60),
+                ),
             )
 
     return AppConfig(
-        hmac_shared_secret=str(raw.get("hmac_shared_secret", "")).strip(),
-        db_path=str(raw["db_path"]),
-        data_root=str(raw["data_root"]),
+        hmac_shared_secret=hmac_shared_secret,
+        db_path=db_path,
+        data_root=data_root,
         docx_template_path=str(raw["docx_template_path"]),
         doc_templates=_as_mapping(raw.get("doc_templates")),
         libreoffice_timeout_seconds=int(raw.get("libreoffice_timeout_seconds", 45)),
@@ -732,7 +850,12 @@ def load_config(path: str) -> AppConfig:
         docuseal=DocuSealConfig(
             base_url=str(docuseal_raw["base_url"]).strip(),
             api_token=str(docuseal_raw["api_token"]).strip(),
-            webhook_secret=str(docuseal_raw["webhook_secret"]).strip(),
+            webhook_secret=(
+                os.getenv("LOCAL_DOCUSEAL_WEBHOOK_SECRET", "").strip()
+                or str(docuseal_raw["webhook_secret"]).strip()
+                if local_mode
+                else str(docuseal_raw["webhook_secret"]).strip()
+            ),
             public_base_url=(str(docuseal_raw.get("public_base_url", "")).strip() or None),
             web_base_url=(
                 str(docuseal_raw.get("web_base_url", "")).strip()
@@ -826,6 +949,121 @@ def load_config(path: str) -> AppConfig:
             ),
             sunset_date=str(referrals_raw.get("sunset_date", "2027-02-05")).strip() or "2027-02-05",
         ),
+        pay_portal=PayPortalConfig(
+            enabled=_as_bool(pay_portal_raw.get("enabled"), True),
+            sharepoint_root_folder=(
+                str(
+                    pay_portal_raw.get(
+                        "sharepoint_root_folder",
+                        PayPortalConfig().sharepoint_root_folder,
+                    )
+                ).strip()
+                or PayPortalConfig().sharepoint_root_folder
+            ),
+            sharepoint_library=(
+                str(
+                    pay_portal_raw.get(
+                        "sharepoint_library",
+                        PayPortalConfig().sharepoint_library,
+                    )
+                ).strip()
+                or PayPortalConfig().sharepoint_library
+            ),
+            sharepoint_site_hostname=(
+                str(
+                    pay_portal_raw.get(
+                        "sharepoint_site_hostname",
+                        PayPortalConfig().sharepoint_site_hostname,
+                    )
+                ).strip()
+            ),
+            sharepoint_site_path=(
+                str(
+                    pay_portal_raw.get(
+                        "sharepoint_site_path",
+                        PayPortalConfig().sharepoint_site_path,
+                    )
+                ).strip()
+            ),
+            docx_pdf_graph_temp_folder=(
+                str(
+                    pay_portal_raw.get(
+                        "docx_pdf_graph_temp_folder",
+                        PayPortalConfig().docx_pdf_graph_temp_folder,
+                    )
+                ).strip()
+                or PayPortalConfig().docx_pdf_graph_temp_folder
+            ),
+            mileage_legacy_sharepoint_folder=(
+                str(
+                    pay_portal_raw.get(
+                        "mileage_legacy_sharepoint_folder",
+                        PayPortalConfig().mileage_legacy_sharepoint_folder,
+                    )
+                ).strip()
+                or PayPortalConfig().mileage_legacy_sharepoint_folder
+            ),
+            voucher_template_path=(
+                str(
+                    pay_portal_raw.get(
+                        "voucher_template_path",
+                        "/app/templates/docx/Local 3106 Pay - Expense Voucher.docx",
+                    )
+                ).strip()
+                or "/app/templates/docx/Local 3106 Pay - Expense Voucher.docx"
+            ),
+            receipt_max_file_bytes=max(
+                1,
+                int(pay_portal_raw.get("receipt_max_file_bytes", 10_000_000)),
+            ),
+            receipt_max_entry_bytes=max(
+                1,
+                int(pay_portal_raw.get("receipt_max_entry_bytes", 50_000_000)),
+            ),
+            clamav_host=str(pay_portal_raw.get("clamav_host", "clamav")).strip() or "clamav",
+            clamav_port=max(1, int(pay_portal_raw.get("clamav_port", 3310))),
+            clamav_timeout_seconds=max(
+                1,
+                int(pay_portal_raw.get("clamav_timeout_seconds", 30)),
+            ),
+            president_email=str(pay_portal_raw.get("president_email", "")).strip(),
+            treasurer_emails=_as_recipients(pay_portal_raw.get("treasurer_emails")),
+            president_target_scale=(
+                str(pay_portal_raw.get("president_target_scale", "36")).strip() or "36"
+            ),
+            president_target_multiplier=max(
+                0.0,
+                _as_float(pay_portal_raw.get("president_target_multiplier", 1.20), 1.20),
+            ),
+            fund_fica_rate=max(
+                0.0,
+                _as_float(pay_portal_raw.get("fund_fica_rate", 0.0765), 0.0765),
+            ),
+            google_maps_api_key=(
+                str(pay_portal_raw.get("google_maps_api_key", "")).strip()
+                or os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
+            ),
+            irs_rates=_as_mapping(pay_portal_raw.get("irs_rates")),
+            irs_rate_sync_enabled=_as_bool(pay_portal_raw.get("irs_rate_sync_enabled"), True),
+            irs_rate_source_urls=(
+                _as_str_tuple(pay_portal_raw.get("irs_rate_source_urls"))
+                or PayPortalConfig().irs_rate_source_urls
+            ),
+            common_places=_as_place_list(pay_portal_raw.get("common_places")),
+            common_places_sharepoint_library=(
+                str(pay_portal_raw.get("common_places_sharepoint_library", "")).strip()
+            ),
+            common_places_sharepoint_folder=(
+                str(
+                    pay_portal_raw.get(
+                        "common_places_sharepoint_folder",
+                        PayPortalConfig().common_places_sharepoint_folder,
+                    )
+                ).strip()
+                or PayPortalConfig().common_places_sharepoint_folder
+            ),
+            pay_users=_as_pay_user_list(pay_portal_raw.get("pay_users")),
+        ),
         grievance_id=GrievanceIdConfig(
             mode=_normalize_grievance_mode(grievance_raw.get("mode")),
             timezone=str(grievance_raw.get("timezone", "America/New_York")).strip() or "America/New_York",
@@ -899,4 +1137,5 @@ def load_config(path: str) -> AppConfig:
         ),
         require_approver_decision=bool(raw.get("require_approver_decision", True)),
         log_level=_normalize_log_level(raw.get("log_level")),
+        app_mode=app_mode,
     )

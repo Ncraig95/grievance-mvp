@@ -196,7 +196,7 @@
         "company_rep_name": "<Company representative name>",
         "company_rep_title": "<Company representative title>",
         "company_rep_email": "<Company representative email>",
-        "data_requested": "<Requested information list>",
+        "data_requested": "<Requested information list; long text>",
         "preferred_format": "<Preferred delivery format>",
         "steward_name": "<Union representative name>",
         "steward_email": "<Union representative email>",
