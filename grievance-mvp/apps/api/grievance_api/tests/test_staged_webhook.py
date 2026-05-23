@@ -114,7 +114,10 @@ class StagedWebhookTests(unittest.IsolatedAsyncioTestCase):
                 internal_recipients=(),
                 allow_signer_copy_link=False,
                 max_attachment_bytes=5_000_000,
+                approval_request_url_base="https://approve.local/cases",
+                derek_email="approver@example.org",
             ),
+            require_approver_decision=False,
         )
 
     async def _insert_stage1_document(self) -> tuple[str, str, str]:
@@ -195,6 +198,181 @@ class StagedWebhookTests(unittest.IsolatedAsyncioTestCase):
         payload = {"event": "submission.completed", "submission_id": submission_id}
         request = _Request(state=state, body=json.dumps(payload).encode("utf-8"), headers={})
         return await webhook_docuseal(request)
+
+    async def _insert_regular_document(
+        self,
+        *,
+        case_id: str = "C-regular",
+        document_id: str = "D-regular",
+        submission_id: str = "regular-submission",
+        doc_type: str = "settlement_form_3106",
+        template_key: str = "settlement_form_3106",
+        officer_status: str | None = None,
+        officer_closed_at_utc: str | None = None,
+        officer_closed_by: str | None = None,
+    ) -> tuple[str, str, str]:
+        doc_dir = Path(self.data_root) / case_id / document_id
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = doc_dir / "generated.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n% unsigned generated pdf\n")
+        await self.db.exec(
+            """INSERT INTO cases(
+                 id, grievance_id, created_at_utc, status, approval_status, member_name, member_email,
+                 intake_request_id, intake_payload_json, officer_status, officer_closed_at_utc, officer_closed_by
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                case_id,
+                "2026002",
+                "2026-04-20T12:00:00+00:00",
+                "awaiting_signatures",
+                "approved",
+                "Pat Member",
+                "pat@example.org",
+                f"forms-{case_id}",
+                json.dumps({"contract": "AT&T Mobility", "incident_date": "2026-04-01"}),
+                officer_status,
+                officer_closed_at_utc,
+                officer_closed_by,
+            ),
+        )
+        await self.db.exec(
+            """INSERT INTO documents(
+                 id, case_id, created_at_utc, doc_type, template_key, status, requires_signature,
+                 signer_order_json, pdf_path, docuseal_submission_id, docuseal_signing_link
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                document_id,
+                case_id,
+                "2026-04-20T12:00:01+00:00",
+                doc_type,
+                template_key,
+                "sent_for_signature",
+                1,
+                json.dumps(["pat@example.org"]),
+                str(pdf_path),
+                submission_id,
+                "https://sign.local/regular",
+            ),
+        )
+        return case_id, document_id, submission_id
+
+    async def _run_regular_completion_webhook(
+        self,
+        *,
+        case_id: str = "C-regular",
+        document_id: str = "D-regular",
+        submission_id: str = "regular-submission",
+        doc_type: str = "settlement_form_3106",
+        template_key: str = "settlement_form_3106",
+        officer_status: str | None = None,
+        officer_closed_at_utc: str | None = None,
+        officer_closed_by: str | None = None,
+    ) -> dict[str, object]:
+        await self._insert_regular_document(
+            case_id=case_id,
+            document_id=document_id,
+            submission_id=submission_id,
+            doc_type=doc_type,
+            template_key=template_key,
+            officer_status=officer_status,
+            officer_closed_at_utc=officer_closed_at_utc,
+            officer_closed_by=officer_closed_by,
+        )
+        state = SimpleNamespace(
+            cfg=self._cfg(),
+            db=self.db,
+            logger=logging.getLogger("test"),
+            graph=SimpleNamespace(),
+            docuseal=_FakeStageDocuSeal(stage1_status="completed", include_signed_pdf=True),
+            notifications=_FakeNotifications(),
+        )
+        payload = {"event": "submission.completed", "submission_id": submission_id}
+        request = _Request(state=state, body=json.dumps(payload).encode("utf-8"), headers={})
+        return await webhook_docuseal(request)
+
+    async def test_settlement_completion_auto_closes_blank_tracker_status(self) -> None:
+        result = await self._run_regular_completion_webhook()
+
+        self.assertTrue(result["handled"])
+        row = await self.db.fetchone(
+            "SELECT status, officer_status, officer_closed_at_utc, officer_closed_by FROM cases WHERE id=?",
+            ("C-regular",),
+        )
+        self.assertEqual(row[0], "approved")
+        self.assertEqual(row[1], "closed")
+        self.assertTrue(str(row[2] or "").strip())
+        self.assertEqual(row[3], "DocuSeal automation")
+        event = await self.db.fetchone(
+            "SELECT details_json FROM events WHERE event_type='settlement_tracker_auto_closed'"
+        )
+        details = json.loads(event[0])
+        self.assertIsNone(details["previous_officer_status"])
+        self.assertEqual(details["new_officer_status"], "closed")
+        self.assertEqual(details["actor"], "docuseal")
+
+    async def test_settlement_completion_auto_closes_escalated_tracker_status(self) -> None:
+        await self._run_regular_completion_webhook(
+            case_id="C-national",
+            document_id="D-national",
+            submission_id="regular-submission-national",
+            officer_status="open_at_national",
+        )
+
+        row = await self.db.fetchone(
+            "SELECT officer_status, officer_closed_by FROM cases WHERE id=?",
+            ("C-national",),
+        )
+        self.assertEqual(row[0], "closed")
+        self.assertEqual(row[1], "DocuSeal automation")
+        event = await self.db.fetchone(
+            "SELECT details_json FROM events WHERE event_type='settlement_tracker_auto_closed'"
+        )
+        details = json.loads(event[0])
+        self.assertEqual(details["previous_officer_status"], "open_at_national")
+
+    async def test_non_settlement_completion_does_not_close_tracker_status(self) -> None:
+        await self._run_regular_completion_webhook(
+            case_id="C-statement",
+            document_id="D-statement",
+            submission_id="regular-submission-statement",
+            doc_type="statement_of_occurrence",
+            template_key="statement_of_occurrence",
+            officer_status="open",
+        )
+
+        row = await self.db.fetchone(
+            "SELECT officer_status, officer_closed_at_utc, officer_closed_by FROM cases WHERE id=?",
+            ("C-statement",),
+        )
+        self.assertEqual(row[0], "open")
+        self.assertIsNone(row[1])
+        self.assertIsNone(row[2])
+        event = await self.db.fetchone(
+            "SELECT id FROM events WHERE event_type='settlement_tracker_auto_closed'"
+        )
+        self.assertIsNone(event)
+
+    async def test_settlement_completion_preserves_already_closed_tracker_metadata(self) -> None:
+        await self._run_regular_completion_webhook(
+            case_id="C-closed",
+            document_id="D-closed",
+            submission_id="regular-submission-closed",
+            officer_status="closed",
+            officer_closed_at_utc="2026-04-01T00:00:00+00:00",
+            officer_closed_by="Manual Officer",
+        )
+
+        row = await self.db.fetchone(
+            "SELECT officer_status, officer_closed_at_utc, officer_closed_by FROM cases WHERE id=?",
+            ("C-closed",),
+        )
+        self.assertEqual(row[0], "closed")
+        self.assertEqual(row[1], "2026-04-01T00:00:00+00:00")
+        self.assertEqual(row[2], "Manual Officer")
+        event = await self.db.fetchone(
+            "SELECT id FROM events WHERE event_type='settlement_tracker_auto_closed'"
+        )
+        self.assertIsNone(event)
 
     async def test_stage_completion_does_not_advance_when_signer_not_completed(self) -> None:
         docuseal = _FakeStageDocuSeal(stage1_status="pending", include_signed_pdf=True)

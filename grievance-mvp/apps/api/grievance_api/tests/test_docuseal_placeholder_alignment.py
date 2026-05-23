@@ -1648,6 +1648,22 @@ class DocuSealPlaceholderAlignmentTests(unittest.TestCase):
         self.assertAlmostEqual(sig_area["h"], 20.0 / 792.0, places=6)
         self.assertAlmostEqual(date_area["y"], 560.0 / 792.0, places=6)
 
+    def test_auto_complete_submitter_sends_completed_signature_fields(self) -> None:
+        fields = [
+            {"name": "signer1_signature", "default_value": "Taylor Jones", "readonly": True},
+            {"name": "signer1_date", "default_value": "2026-05-19", "readonly": True},
+        ]
+        with patch("grievance_api.services.docuseal_client.requests.put") as mock_put:
+            mock_put.return_value = SimpleNamespace(status_code=200, json=lambda: {"id": 11, "completed": True})
+            result = self.client.auto_complete_submitter(submitter_id=11, fields=fields)
+
+        self.assertTrue(result["completed"])
+        payload = mock_put.call_args.kwargs["json"]
+        self.assertTrue(payload["completed"])
+        self.assertFalse(payload["send_email"])
+        self.assertEqual(payload["fields"], fields)
+
+
 
 if __name__ == "__main__":
     unittest.main()

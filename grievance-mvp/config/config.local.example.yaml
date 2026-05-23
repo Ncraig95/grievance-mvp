@@ -1,0 +1,145 @@
+app_mode: local
+hmac_shared_secret: local-dev-hmac-secret
+db_path: /data/local-safe/grievances.sqlite3
+data_root: /data/local-safe/grievances
+docx_template_path: /app/templates/grievance_template.docx
+doc_templates:
+  grievance_form: /app/templates/grievance_template.docx
+  statement_of_occurrence: /app/templates/grievance_template.docx
+libreoffice_timeout_seconds: 45
+docx_pdf_engine: libreoffice
+docx_pdf_graph_temp_folder: Grievances/_local_docx_pdf_convert
+wait_for_grievance_number_before_signature: false
+require_approver_decision: false
+log_level: INFO
+
+grievance_id:
+  mode: auto
+  timezone: America/New_York
+  min_width: 3
+  separator: ""
+
+rendering:
+  normalize_split_placeholders: true
+  layout_policies: {}
+
+document_policies:
+  grievance_form:
+    folder_resolution: default
+    default_signer_field: grievant_email
+    default_requires_signature: true
+    signature_dispatch_timing: immediate
+    attested_auto_sign_enabled: false
+  statement_of_occurrence:
+    folder_resolution: default
+    default_signer_field: grievant_email
+    default_requires_signature: true
+    signature_dispatch_timing: immediate
+    attested_auto_sign_enabled: false
+
+intake_auth:
+  shared_header_name: X-Intake-Key
+  shared_header_value: ""
+  cloudflare_access_client_id: ""
+  cloudflare_access_client_secret: ""
+
+docuseal:
+  base_url: local://docuseal
+  api_token: local-fake-docuseal-token
+  webhook_secret: local-dev-docuseal-webhook-secret
+  public_base_url: local://docuseal
+  web_base_url: local://docuseal
+  web_email: local-docuseal-admin@example.invalid
+  web_password: local-fake-docuseal-password
+  default_template_id: 1
+  template_ids: {}
+  strict_template_ids: false
+  submitters_order: preserved
+  submitters_order_by_form: {}
+  signature_layout_mode: table_preferred
+  signature_layout_mode_by_form: {}
+  signature_table_trace_enabled: false
+  signature_table_trace_by_form: {}
+  signature_table_guard_enabled: false
+  signature_table_maps: {}
+
+graph:
+  tenant_id: local-fake-tenant-id
+  client_id: local-fake-client-id
+  cert_pem_path: /app/config/local-fake-graph-cert.pem
+  cert_thumbprint: local-fake-thumbprint
+  site_hostname: local.sharepoint.invalid
+  site_path: /sites/LocalSafe
+  document_library: Documents
+  case_parent_folder: Grievances
+  generated_subfolder: Generated
+  signed_subfolder: Signed
+  audit_subfolder: Audit
+  audit_backup_subfolders: []
+  audit_local_backup_roots: []
+  client_supplied_subfolder: Client supplied data
+  failed_processes_folder: config files/failed
+  standalone_parent_folder: Standalone Forms
+
+email:
+  enabled: true
+  sender_user_id: local-mailer@example.invalid
+  templates_dir: /app/templates/email
+  internal_recipients:
+    - local-team@example.invalid
+  derek_email: ""
+  approval_request_url_base: http://127.0.0.1:18080/approval
+  allow_signer_copy_link: true
+  artifact_delivery_mode: sharepoint_link
+  max_attachment_bytes: 2000000
+  resend_cooldown_seconds: 0
+  dry_run: false
+  test_mode: false
+  test_mode_by_form: {}
+
+outreach:
+  enabled: false
+  sender_user_id: ""
+
+referrals:
+  enabled: false
+  reminder_days: 60
+  notification_recipients: []
+  sunset_date: "2027-02-05"
+
+pay_portal:
+  enabled: false
+  irs_rate_sync_enabled: false
+  google_maps_api_key: ""
+  president_email: ""
+  treasurer_emails: []
+  pay_users: []
+
+officer_tracking:
+  roster: []
+
+officer_auth:
+  enabled: false
+  tenant_id: ""
+  client_id: ""
+  client_secret: ""
+  redirect_uri: ""
+  post_logout_redirect_uri: ""
+  session_secret: ""
+  officer_group_ids: []
+  admin_group_ids: []
+  chief_steward_group_ids: []
+  chief_steward_contract_scopes: {}
+
+external_steward_auth:
+  enabled: false
+  tenant_id: ""
+  reuse_officer_auth_app: true
+  authority: ""
+  discovery_url: ""
+  client_id: ""
+  client_secret: ""
+  redirect_uri: ""
+  post_logout_redirect_uri: ""
+
+standalone_forms: {}

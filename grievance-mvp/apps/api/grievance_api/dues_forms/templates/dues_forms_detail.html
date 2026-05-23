@@ -1,0 +1,68 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dues Form {{id}}</title>
+  <style>
+    :root {
+      --bg: #f5f7f8;
+      --panel: #ffffff;
+      --border: #d7e0e7;
+      --text: #1f2933;
+      --muted: #5b6b78;
+      --accent: #0f766e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      color: var(--text);
+      background: var(--bg);
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    }
+    .shell { max-width: 1100px; margin: 0 auto; }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 14px; }
+    .header, form { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+    h1 { margin: 0; font-size: 28px; }
+    a.button, button { border: 1px solid var(--border); border-radius: 6px; background: #fff; color: var(--text); padding: 8px 10px; text-decoration: none; font: inherit; cursor: pointer; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    select { min-width: 180px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
+    dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin: 0; }
+    .field { border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: #fff; }
+    dt { color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; }
+    dd { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; padding: 12px; background: #111827; color: #f9fafb; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="panel header">
+      <div>
+        <h1>Dues Form {{id}}</h1>
+        <div>{{review_status}}</div>
+      </div>
+      <a class="button" href="/dues-forms">Back</a>
+    </section>
+    <section class="panel">
+      <form method="post" action="/dues-forms/{{id}}/status">
+        <label>Review status
+          <select name="review_status">
+            {{status_options}}
+          </select>
+        </label>
+        <button class="primary" type="submit">Save Status</button>
+      </form>
+    </section>
+    <section class="panel">
+      <dl>
+        {{details}}
+      </dl>
+    </section>
+    <section class="panel">
+      <h2>Raw Text</h2>
+      <pre>{{raw_text}}</pre>
+    </section>
+  </main>
+</body>
+</html>

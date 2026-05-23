@@ -15,11 +15,15 @@ config/graph_cert.pem
 
 data/grievances.sqlite3
 data/grievances/
+data/local-safe/
 data/docuseal/
 data/docuseal_db/
+data/dues_forms/
 data/template_compare/
 data/template_compare_after_restore/
 data/watchdog/
+instance/
+tmp/
 .venv/
 .tmpvenv/
 Docx Files Template/Failed Sign Documents

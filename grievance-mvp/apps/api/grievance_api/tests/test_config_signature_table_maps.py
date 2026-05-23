@@ -161,6 +161,76 @@ class ConfigSignatureTableMapTests(unittest.TestCase):
         self.assertFalse(cfg.docuseal.signature_table_trace_by_form.get("statement_of_occurrence"))
         self.assertFalse(cfg.docuseal.signature_table_trace_by_form.get("grievance_form"))
 
+
+    def test_load_config_parses_statement_attested_auto_sign_policy(self) -> None:
+        path = self._write_config(docuseal_overrides={})
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh)
+        raw["document_policies"] = {
+            "statement_of_occurrence": {
+                "folder_resolution": "default",
+                "default_signer_field": "personal_email",
+                "default_requires_signature": True,
+                "signature_dispatch_timing": "immediate",
+                "attested_auto_sign_enabled": True,
+                "attested_auto_sign_delay_seconds": 10,
+            }
+        }
+        with open(path, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(raw, fh)
+
+        try:
+            cfg = load_config(path)
+        finally:
+            os.unlink(path)
+
+        policy = cfg.document_policies["statement_of_occurrence"]
+        self.assertTrue(policy.attested_auto_sign_enabled)
+        self.assertEqual(policy.attested_auto_sign_delay_seconds, 30)
+
+    def test_load_config_parses_pay_portal_mileage_defaults(self) -> None:
+        path = self._write_config(docuseal_overrides={})
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh)
+        raw["pay_portal"] = {
+            "president_email": "president@example.org",
+            "treasurer_emails": ["treasurer@example.org"],
+            "irs_rates": {"2024": 0.67, "2025": "0.70", "2026": "0.725"},
+            "irs_rate_sync_enabled": True,
+            "irs_rate_source_urls": ["https://www.irs.gov/tax-professionals/standard-mileage-rates"],
+            "common_places": [
+                {"label": "Union Hall", "address": "4076 Union Hall Pl, Jacksonville, FL 32205, USA"},
+                {"label": "", "address": "ignored"},
+            ],
+            "pay_users": [
+                {"email": "guest@example.org", "display_name": "Guest", "role": "guest", "status": "active"}
+            ],
+        }
+        with open(path, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(raw, fh)
+
+        try:
+            cfg = load_config(path)
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(cfg.pay_portal.irs_rates, {"2024": "0.67", "2025": "0.70", "2026": "0.725"})
+        self.assertTrue(cfg.pay_portal.irs_rate_sync_enabled)
+        self.assertEqual(
+            cfg.pay_portal.irs_rate_source_urls,
+            ("https://www.irs.gov/tax-professionals/standard-mileage-rates",),
+        )
+        self.assertEqual(cfg.pay_portal.president_email, "president@example.org")
+        self.assertEqual(cfg.pay_portal.treasurer_emails, ("treasurer@example.org",))
+        self.assertEqual(
+            cfg.pay_portal.common_places,
+            ({"label": "Union Hall", "address": "4076 Union Hall Pl, Jacksonville, FL 32205, USA"},),
+        )
+        self.assertEqual(
+            cfg.pay_portal.pay_users,
+            ({"email": "guest@example.org", "display_name": "Guest", "role": "guest", "status": "active"},),
+        )
+
     def test_load_config_parses_standalone_sharepoint_storage_policy(self) -> None:
         path = self._write_config(docuseal_overrides={})
         with open(path, "r", encoding="utf-8") as fh:

@@ -20,6 +20,7 @@ from grievance_api.web.routes_hosted_forms import (
     _PUBLIC_RATE_LIMIT_BUCKETS,
     hosted_forms_admin_page,
     hosted_form_page,
+    hosted_forms_index,
     hosted_forms_admin_settings,
     submit_hosted_form,
     update_hosted_form_setting,
@@ -164,6 +165,23 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["referred_name"], "Jordan Referred")
         self.assertEqual(payload["referred_att_uid"], "JR1234")
         self.assertNotIn("template_data", payload)
+
+    def test_referral_company_fields_use_clickable_company_options(self) -> None:
+        definition = get_hosted_form_definition("referral")
+        assert definition is not None
+        referrer_group = next(field for field in definition.fields if field.name == "referrer_group")
+        referred_group = next(field for field in definition.fields if field.name == "referred_group")
+
+        self.assertEqual(referrer_group.type, "select")
+        self.assertEqual(referred_group.type, "select")
+        self.assertIn("City of Jacksonville", referrer_group.options)
+        self.assertIn("AT&T", referrer_group.options)
+        self.assertIn("Utilities", referred_group.options)
+        self.assertNotIn("Yellow Pages / Thrive", referrer_group.options)
+        self.assertNotIn("BellSouth", referrer_group.options)
+        self.assertNotIn("Core Southeastern", referrer_group.options)
+        self.assertNotIn("Construction", referrer_group.options)
+        self.assertNotIn("AT&T Mobility", referrer_group.options)
 
     def test_statement_contract_field_uses_supported_contract_dropdown(self) -> None:
         definition = get_hosted_form_definition("statement_of_occurrence")
@@ -538,6 +556,13 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["template_data"]["grievant_name"], "Jordan Lee")
         self.assertEqual(payload["template_data"]["today_date"], date.today().isoformat())
 
+    def test_data_request_letterhead_main_request_field_is_auto_expanding(self) -> None:
+        definition = get_hosted_form_definition("data_request_letterhead")
+        assert definition is not None
+        fields = {field.name: field for field in definition.fields}
+
+        self.assertEqual(fields["data_requested"].type, "textarea")
+
     def test_data_request_letterhead_accepts_blank_grievant_email(self) -> None:
         definition = get_hosted_form_definition("data_request_letterhead")
         assert definition is not None
@@ -609,9 +634,48 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Statement of Occurrence", html)
         self.assertIn("/forms/statement_of_occurrence/submissions", html)
-        self.assertIn("Hosted form key", html)
+        self.assertNotIn("Hosted form key", html)
+        self.assertNotIn("Backend path", html)
         self.assertIn("autoExpandTextarea", html)
         self.assertIn("textarea.auto-expand", html)
+        self.assertIn("Submit and open signature", html)
+        self.assertIn("waitOverlay", html)
+        self.assertIn("Preparing signature page", html)
+        self.assertIn("typed-signature fallback", html)
+        self.assertIn('class="top-menu"', html)
+        self.assertIn('href="/officers"', html)
+        self.assertIn('href="/forms"', html)
+        self.assertIn('href="/pay/start"', html)
+
+    async def test_public_forms_index_renders_navigation_menu(self) -> None:
+        response = await hosted_forms_index(_Request(state=self._state()))
+        html = response.body.decode("utf-8")
+
+        self.assertIn("Hosted Forms", html)
+        self.assertIn('class="top-menu"', html)
+        self.assertIn('href="/officers"', html)
+        self.assertIn('href="/forms" aria-current="page"', html)
+        self.assertIn('href="/pay/start"', html)
+
+    async def test_referral_public_page_renders_human_sections(self) -> None:
+        response = await hosted_form_page("referral", _Request(state=self._state()))
+        html = response.body.decode("utf-8")
+
+        self.assertIn("Your Information", html)
+        self.assertIn("Person You're Referring", html)
+        self.assertIn("Notes", html)
+        self.assertIn("choice-button", html)
+        self.assertIn("data-choice-for", html)
+        self.assertIn("AT&T", html)
+        self.assertIn("data-custom-choice-for", html)
+        self.assertIn("Type another company or group", html)
+        self.assertNotIn("Yellow Pages / Thrive", html)
+        self.assertIn("validateChoiceButtons", html)
+        self.assertIn("referrer_name", html)
+        self.assertIn("referred_att_uid", html)
+        self.assertIn("/forms/referral/submissions", html)
+        self.assertNotIn("Hosted form key", html)
+        self.assertNotIn("Backend path", html)
 
     async def test_private_page_redirects_to_officer_login_gate(self) -> None:
         await self.db.upsert_hosted_form_setting(
@@ -700,6 +764,9 @@ class HostedFormsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("data-role=\"public-link\"", html)
         self.assertIn("data-role=\"copy-public-link\"", html)
+        self.assertIn("Open Public Page", html)
+        self.assertIn("formSearchInput", html)
+        self.assertIn("Technical details", html)
         self.assertIn("Set visibility to public and save to share a public link", html)
 
     async def test_public_submission_rate_limit_returns_429(self) -> None:

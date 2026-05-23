@@ -128,6 +128,9 @@ class InternalFormsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Statement of Occurrence", html)
         self.assertIn("/internal/forms/statement-of-occurrence/submissions", html)
         self.assertIn("signatureConsent", html)
+        self.assertIn("Submit and open signature", html)
+        self.assertIn("waitOverlay", html)
+        self.assertIn("Preparing signature page", html)
         self.assertIn("Opening the signature page now", html)
 
     async def test_submit_posts_intake_payload_with_internal_auth_headers(self) -> None:

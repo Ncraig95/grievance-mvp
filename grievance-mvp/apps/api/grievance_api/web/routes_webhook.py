@@ -18,6 +18,7 @@ from ..services.contract_timeline import calculate_deadline, deadline_days_for_c
 from ..services.grievance_id_allocator import current_year_in_timezone
 from ..services.graph_mail import MailAttachment
 from ..services.notification_service import NotificationService
+from ..services.pay_portal import add_pay_event, handle_pay_docuseal_completion
 from ..services.standalone_forms import (
     standalone_audit_filename,
     standalone_document_dir,
@@ -73,6 +74,8 @@ _FORM_COMPLETION_EVENTS = {
     "form_finished",
     "form_done",
 }
+_SETTLEMENT_DOCUMENT_KEYS = {"settlement_form", "settlement_form_3106"}
+_SETTLEMENT_TRACKER_AUTOMATION_ACTOR = "DocuSeal automation"
 
 
 def _normalize_status_token(value: object) -> str:
@@ -125,6 +128,83 @@ def _is_completion_event(payload: dict) -> bool:
         # when the enclosing submission status is also completed.
         return _status_is_complete(_submission_status(payload))
     return _status_is_complete(_submission_status(payload))
+
+
+def _clean_optional_text(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _is_settlement_document(*, doc_type: object, template_key: object) -> bool:
+    return any(str(value or "").strip().lower() in _SETTLEMENT_DOCUMENT_KEYS for value in (doc_type, template_key))
+
+
+async def _auto_close_settlement_tracker(
+    *,
+    db: Db,
+    case_id: str,
+    document_id: str,
+    submission_id: str,
+    doc_type: object,
+    template_key: object,
+) -> bool:
+    if not _is_settlement_document(doc_type=doc_type, template_key=template_key):
+        return False
+
+    row = await db.fetchone(
+        "SELECT officer_status, officer_closed_at_utc, officer_closed_by FROM cases WHERE id=?",
+        (case_id,),
+    )
+    if not row:
+        return False
+
+    previous_status = _clean_optional_text(row[0])
+    if str(previous_status or "").lower() == "closed":
+        return False
+
+    previous_closed_at = _clean_optional_text(row[1])
+    previous_closed_by = _clean_optional_text(row[2])
+    closed_at = previous_closed_at or utcnow()
+    closed_by = previous_closed_by or _SETTLEMENT_TRACKER_AUTOMATION_ACTOR
+
+    await db.exec(
+        """
+        UPDATE cases
+        SET officer_status='closed',
+            officer_closed_at_utc=CASE
+              WHEN officer_closed_at_utc IS NULL OR TRIM(officer_closed_at_utc)='' THEN ?
+              ELSE officer_closed_at_utc
+            END,
+            officer_closed_by=CASE
+              WHEN officer_closed_by IS NULL OR TRIM(officer_closed_by)='' THEN ?
+              ELSE officer_closed_by
+            END
+        WHERE id=?
+          AND COALESCE(LOWER(TRIM(officer_status)), '') <> 'closed'
+        """,
+        (closed_at, closed_by, case_id),
+    )
+    await db.add_event(
+        case_id,
+        document_id,
+        "settlement_tracker_auto_closed",
+        {
+            "case_id": case_id,
+            "document_id": document_id,
+            "docuseal_submission_id": submission_id,
+            "doc_type": str(doc_type or ""),
+            "template_key": str(template_key or ""),
+            "actor": "docuseal",
+            "actor_display_name": _SETTLEMENT_TRACKER_AUTOMATION_ACTOR,
+            "previous_officer_status": previous_status,
+            "new_officer_status": "closed",
+            "previous_officer_closed_at_utc": previous_closed_at,
+            "new_officer_closed_at_utc": closed_at,
+            "previous_officer_closed_by": previous_closed_by,
+            "new_officer_closed_by": closed_by,
+        },
+    )
+    return True
 
 
 def _normalize_email(value: object) -> str:
@@ -452,6 +532,37 @@ async def webhook_docuseal(request: Request):
             (submission_id,),
         )
     if not row and not standalone_row:
+        pay_row = await db.fetchone(
+            "SELECT id, period_id FROM pay_packets WHERE docuseal_submission_id=?",
+            (submission_id,),
+        )
+        if pay_row:
+            await add_pay_event(
+                db,
+                period_id=str(pay_row[1]),
+                packet_id=str(pay_row[0]),
+                event_type="docuseal_webhook_received",
+                actor="docuseal",
+                details={"event_type": _event_type(payload), "receipt_key": receipt_key},
+            )
+            if not _is_completion_event(payload):
+                await db.mark_receipt_handled("docuseal", receipt_key)
+                return {"ok": True, "handled": False, "reason": "non_completion_event"}
+            try:
+                result = await handle_pay_docuseal_completion(
+                    db=db,
+                    cfg=cfg,
+                    graph=graph,
+                    mailer=request.app.state.mailer,
+                    docuseal=docuseal,
+                    submission_id=submission_id,
+                    payload=payload,
+                )
+                await db.mark_receipt_handled("docuseal", receipt_key)
+                return result or {"ok": True, "handled": False, "reason": "unknown_pay_submission"}
+            except Exception:
+                await db.release_receipt_claim("docuseal", receipt_key)
+                raise
         await db.mark_receipt_handled("docuseal", receipt_key)
         logger.warning("docuseal_webhook_unknown_submission", extra={"correlation_id": submission_id})
         return {"ok": True, "handled": False, "reason": "unknown_submission"}
@@ -1538,6 +1649,15 @@ async def webhook_docuseal(request: Request):
                     "case_auto_approved",
                     {"approved_at_utc": approved_ts},
                 )
+
+        await _auto_close_settlement_tracker(
+            db=db,
+            case_id=case_id,
+            document_id=document_id,
+            submission_id=submission_id,
+            doc_type=doc_type,
+            template_key=template_key,
+        )
 
         await db.add_event(case_id, document_id, "docuseal_completion_processed", {"receipt_key": receipt_key})
         await db.mark_receipt_handled("docuseal", completion_receipt_key)

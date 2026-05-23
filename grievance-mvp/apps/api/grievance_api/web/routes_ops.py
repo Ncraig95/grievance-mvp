@@ -1261,6 +1261,7 @@ async def ops_page(request: Request):
     </div>
     <div class="nav-links">
       <a class="nav-link nav-link-primary" href="/officers">Officer Tracker</a>
+      <a class="nav-link" href="/dues-forms">Dues Forms</a>
       <a class="nav-link" href="#activeQueueSection">Active Queue</a>
       <a class="nav-link" href="#caseToolsSection">Case Tools</a>
       <a class="nav-link" href="#grievanceToolsSection">Grievance Docs</a>
